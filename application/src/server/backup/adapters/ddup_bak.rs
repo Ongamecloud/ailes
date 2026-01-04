@@ -84,10 +84,8 @@ impl DdupBakBackup {
         parent_path: &Path,
     ) -> Result<(), anyhow::Error> {
         let mut entry_header = tar::Header::new_gnu();
-        entry_header.set_uid(entry.owner().0 as u64);
-        entry_header.set_gid(entry.owner().1 as u64);
+        entry_header.set_size(0);
         entry_header.set_mode(entry.mode().bits());
-
         entry_header.set_mtime(
             entry
                 .mtime()
@@ -942,7 +940,8 @@ impl BackupBrowseExt for BrowseDdupBakBackup {
                                 )?;
                             }
 
-                            zip.finish()?;
+                            let mut inner = zip.finish()?;
+                            inner.flush()?;
                         }
                         None => {
                             if path.components().count() == 0 {
@@ -956,7 +955,8 @@ impl BackupBrowseExt for BrowseDdupBakBackup {
                                     )?;
                                 }
 
-                                zip.finish()?;
+                                let mut inner = zip.finish()?;
+                                inner.flush()?;
                             }
                         }
                     };
@@ -997,6 +997,8 @@ impl BackupBrowseExt for BrowseDdupBakBackup {
                             }
 
                             tar.finish()?;
+                            let mut inner = tar.into_inner()?.finish()?;
+                            inner.flush()?;
                         }
                         None => {
                             if path.components().count() == 0 {
@@ -1010,6 +1012,8 @@ impl BackupBrowseExt for BrowseDdupBakBackup {
                                 }
 
                                 tar.finish()?;
+                                let mut inner = tar.into_inner()?.finish()?;
+                                inner.flush()?;
                             }
                         }
                     };
@@ -1070,6 +1074,9 @@ impl BackupBrowseExt for BrowseDdupBakBackup {
                         )?;
                     }
 
+                    let mut inner = zip.finish()?;
+                    inner.flush()?;
+
                     Ok(())
                 });
             }
@@ -1098,6 +1105,10 @@ impl BackupBrowseExt for BrowseDdupBakBackup {
                             Path::new(""),
                         )?;
                     }
+
+                    tar.finish()?;
+                    let mut inner = tar.into_inner()?.finish()?;
+                    inner.flush()?;
 
                     Ok(())
                 });

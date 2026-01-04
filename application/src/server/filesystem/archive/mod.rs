@@ -26,7 +26,7 @@ use utoipa::ToSchema;
 pub mod create;
 pub mod multi_reader;
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub enum ArchiveType {
     None,
     Tar,
@@ -36,7 +36,7 @@ pub enum ArchiveType {
     Ddup,
 }
 
-#[derive(ToSchema, Deserialize, Serialize, Default, Clone, Copy)]
+#[derive(Debug, ToSchema, Deserialize, Serialize, Default, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
 #[schema(rename_all = "snake_case")]
 pub enum ArchiveFormat {
@@ -256,6 +256,13 @@ impl Archive {
             _ => (CompressionType::None, get_archive_format()),
         };
 
+        tracing::debug!(
+            path = %path.display(),
+            "inferred archive format: {:?}, compression format: {:?}",
+            archive_format,
+            compression_format
+        );
+
         Ok(Self {
             compression: compression_format,
             archive: archive_format,
@@ -425,6 +432,7 @@ impl Archive {
                     }
 
                     let mut archive = tar::Archive::new(reader);
+                    archive.set_ignore_zeros(true);
                     let mut directory_entries = chunked_vec::ChunkedVec::new();
                     let mut entries = archive.entries()?;
 

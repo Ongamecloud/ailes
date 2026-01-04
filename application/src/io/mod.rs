@@ -10,6 +10,9 @@ pub mod limited_reader;
 pub mod limited_writer;
 pub mod range_reader;
 
+pub trait ReadSeek: Read + std::io::Seek {}
+impl<T: Read + std::io::Seek> ReadSeek for T {}
+
 pub fn copy(
     reader: &mut (impl ?Sized + Read),
     writer: &mut (impl ?Sized + Write),

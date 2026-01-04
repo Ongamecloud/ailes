@@ -1456,6 +1456,9 @@ impl BackupBrowseExt for BrowseWingsBackup {
                             }
                         }
 
+                        let mut inner = zip.finish()?;
+                        inner.flush()?;
+
                         Ok(())
                     });
                 }
@@ -1488,12 +1491,18 @@ impl BackupBrowseExt for BrowseWingsBackup {
                             }
 
                             let mut entry_header = tar::Header::new_gnu();
+                            entry_header.set_size(0);
                             if let Some(mode) = entry.unix_mode() {
                                 entry_header.set_mode(mode);
                             }
                             entry_header.set_mtime(
                                 zip_entry_get_modified_time(&entry)
-                                    .map(|dt| dt.into_std().elapsed().unwrap_or_default().as_secs())
+                                    .map(|dt| {
+                                        dt.into_std()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .unwrap_or_default()
+                                            .as_secs()
+                                    })
                                     .unwrap_or_default(),
                             );
 
@@ -1513,6 +1522,10 @@ impl BackupBrowseExt for BrowseWingsBackup {
                                 tar.append_link(&mut entry_header, name, link_name)?;
                             }
                         }
+
+                        tar.finish()?;
+                        let mut inner = tar.into_inner()?.finish()?;
+                        inner.flush()?;
 
                         Ok(())
                     });
@@ -1599,6 +1612,9 @@ impl BackupBrowseExt for BrowseWingsBackup {
                             }
                         }
 
+                        let mut inner = zip.finish()?;
+                        inner.flush()?;
+
                         Ok(())
                     });
                 }
@@ -1625,6 +1641,7 @@ impl BackupBrowseExt for BrowseWingsBackup {
                             }
 
                             let mut entry_header = tar::Header::new_gnu();
+                            entry_header.set_size(0);
                             if entry.has_last_modified_date {
                                 entry_header.set_mtime(
                                     std::time::SystemTime::from(entry.last_modified_date)
@@ -1668,6 +1685,10 @@ impl BackupBrowseExt for BrowseWingsBackup {
                                 };
                             }
                         }
+
+                        tar.finish()?;
+                        let mut inner = tar.into_inner()?.finish()?;
+                        inner.flush()?;
 
                         Ok(())
                     });
@@ -1733,6 +1754,9 @@ impl BackupBrowseExt for BrowseWingsBackup {
                                 }
                             }
 
+                            let mut inner = zip.finish()?;
+                            inner.flush()?;
+
                             Ok(())
                         });
                     }
@@ -1769,6 +1793,7 @@ impl BackupBrowseExt for BrowseWingsBackup {
                                 }
 
                                 let mut entry_header = tar::Header::new_gnu();
+                                entry_header.set_size(0);
                                 if let Some(mode) = entry.unix_mode() {
                                     entry_header.set_mode(mode);
                                 }
@@ -1794,6 +1819,10 @@ impl BackupBrowseExt for BrowseWingsBackup {
                                     tar.append_link(&mut entry_header, name, link_name)?;
                                 }
                             }
+
+                            tar.finish()?;
+                            let mut inner = tar.into_inner()?.finish()?;
+                            inner.flush()?;
 
                             Ok(())
                         });
@@ -1885,6 +1914,9 @@ impl BackupBrowseExt for BrowseWingsBackup {
                             }
                         }
 
+                        let mut inner = zip.finish()?;
+                        inner.flush()?;
+
                         Ok(())
                     });
                 }
@@ -1915,6 +1947,7 @@ impl BackupBrowseExt for BrowseWingsBackup {
                             }
 
                             let mut entry_header = tar::Header::new_gnu();
+                            entry_header.set_size(0);
                             if entry.has_last_modified_date {
                                 entry_header.set_mtime(
                                     std::time::SystemTime::from(entry.last_modified_date)
@@ -1958,6 +1991,10 @@ impl BackupBrowseExt for BrowseWingsBackup {
                                 };
                             }
                         }
+
+                        tar.finish()?;
+                        let mut inner = tar.into_inner()?.finish()?;
+                        inner.flush()?;
 
                         Ok(())
                     });

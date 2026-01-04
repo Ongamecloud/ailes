@@ -4,7 +4,7 @@ use utoipa::ToSchema;
 pub mod reader;
 pub mod writer;
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub enum CompressionType {
     None,
     Gz,
@@ -14,7 +14,7 @@ pub enum CompressionType {
     Zstd,
 }
 
-#[derive(Clone, Copy, ToSchema, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Copy, ToSchema, Deserialize, Serialize, Default)]
 #[serde(rename_all = "snake_case")]
 #[schema(rename_all = "snake_case")]
 pub enum CompressionLevel {

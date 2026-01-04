@@ -170,6 +170,7 @@ pub async fn create_tar<W: Write + Send + 'static>(
             }
         }
 
+        archive.finish()?;
         let mut inner = archive.into_inner()?.into_inner().finish()?;
         inner.flush()?;
 
@@ -266,6 +267,7 @@ pub async fn create_tar_distributed<W: Write + Send + 'static>(
             }
         }
 
+        archive.finish()?;
         let mut inner = archive.into_inner()?.into_inner().finish()?;
         inner.flush()?;
 

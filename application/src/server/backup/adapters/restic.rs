@@ -18,6 +18,7 @@ use human_bytes::human_bytes;
 use serde::Deserialize;
 use std::{
     collections::HashMap,
+    io::Write,
     path::{Path, PathBuf},
     sync::{
         Arc, LazyLock,
@@ -1064,6 +1065,9 @@ impl BackupBrowseExt for BrowseResticBackup {
                         }
                     }
 
+                    let mut inner = archive.finish()?;
+                    inner.flush()?;
+
                     Ok(())
                 });
             }
@@ -1099,7 +1103,9 @@ impl BackupBrowseExt for BrowseResticBackup {
                         );
                     }
 
-                    writer.finish().ok();
+                    if let Ok(mut inner) = writer.finish() {
+                        inner.flush().ok();
+                    }
                 });
             }
         }
@@ -1285,7 +1291,8 @@ impl BackupBrowseExt for BrowseResticBackup {
                             }
                         }
 
-                        archive.finish()?;
+                        let mut inner = archive.finish()?;
+                        inner.flush()?;
 
                         Ok(())
                     }
@@ -1404,8 +1411,10 @@ impl BackupBrowseExt for BrowseResticBackup {
                             }
                         }
 
-                        if let Ok(inner) = archive.into_inner() {
-                            inner.finish().ok();
+                        if let Ok(inner) = archive.into_inner()
+                            && let Ok(mut inner) = inner.finish()
+                        {
+                            inner.flush().ok();
                         }
                     }
                 });
