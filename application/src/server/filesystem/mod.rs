@@ -1089,7 +1089,7 @@ impl Filesystem {
         let mime_type = if let Some(mime_type) = self
             .app_state
             .mime_cache
-            .get_mime(&(metadata.dev(), metadata.ino()))
+            .get_mime(&(metadata.dev(), metadata.ino(), metadata.mtime()))
             .await
         {
             mime_type
@@ -1136,7 +1136,10 @@ impl Filesystem {
 
             self.app_state
                 .mime_cache
-                .insert_mime((metadata.dev(), metadata.ino()), mime_type)
+                .insert_mime(
+                    (metadata.dev(), metadata.ino(), metadata.mtime()),
+                    mime_type,
+                )
                 .await;
 
             mime_type
@@ -1181,7 +1184,7 @@ impl Filesystem {
         let mime_type = if let Some(mime_type) = self
             .app_state
             .mime_cache
-            .get_mime(&(metadata.dev(), metadata.ino()))
+            .get_mime(&(metadata.dev(), metadata.ino(), metadata.mtime()))
             .await
         {
             mime_type
@@ -1228,7 +1231,10 @@ impl Filesystem {
 
             self.app_state
                 .mime_cache
-                .insert_mime((metadata.dev(), metadata.ino()), mime_type)
+                .insert_mime(
+                    (metadata.dev(), metadata.ino(), metadata.mtime()),
+                    mime_type,
+                )
                 .await;
 
             mime_type

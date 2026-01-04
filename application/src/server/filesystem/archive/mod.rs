@@ -207,7 +207,7 @@ pub struct Archive {
     pub archive: ArchiveType,
 
     pub server: crate::server::Server,
-    pub header: [u8; 16],
+    pub header: [u8; 64],
 
     pub file: File,
     pub path: PathBuf,
@@ -217,7 +217,7 @@ impl Archive {
     pub async fn open(server: crate::server::Server, path: PathBuf) -> Result<Self, anyhow::Error> {
         let mut file = server.filesystem.async_open(&path).await?;
 
-        let mut header = [0; 16];
+        let mut header = [0; 64];
         #[allow(clippy::unused_io_amount)]
         file.read(&mut header).await?;
 

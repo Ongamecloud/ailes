@@ -26,7 +26,7 @@ pub struct AppState {
     pub stats_manager: Arc<crate::stats::StatsManager>,
     pub server_manager: Arc<crate::server::manager::ServerManager>,
     pub backup_manager: Arc<crate::server::backup::manager::BackupManager>,
-    pub mime_cache: Arc<crate::server::filesystem::mime::MimeCache<(u64, u64)>>,
+    pub mime_cache: Arc<crate::server::filesystem::mime::MimeCache<(u64, u64, i64)>>,
 }
 
 #[derive(ToSchema, Serialize)]
