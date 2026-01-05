@@ -1,44 +1,43 @@
-pub async fn setup(
-    filesystem: &crate::server::filesystem::Filesystem,
-) -> Result<(), std::io::Error> {
-    tracing::debug!(
-        path = %filesystem.base_path.display(),
-        "setting up no disk limiter for volume"
-    );
+use crate::server::filesystem::limiter::DiskLimiterExt;
 
-    tokio::fs::create_dir_all(&filesystem.base_path).await?;
-
-    Ok(())
+pub struct NoneLimiter<'a> {
+    pub filesystem: &'a crate::server::filesystem::Filesystem,
 }
 
-pub async fn attach(
-    filesystem: &crate::server::filesystem::Filesystem,
-) -> Result<(), std::io::Error> {
-    tracing::debug!(
-        path = %filesystem.base_path.display(),
-        "attaching no disk limiter for volume"
-    );
+#[async_trait::async_trait]
+impl<'a> DiskLimiterExt for NoneLimiter<'a> {
+    async fn setup(&self) -> Result<(), std::io::Error> {
+        tracing::debug!(
+            path = %self.filesystem.base_path.display(),
+            "setting up no disk limiter for volume"
+        );
 
-    Ok(())
-}
+        tokio::fs::create_dir_all(&self.filesystem.base_path).await?;
 
-pub async fn disk_usage(
-    filesystem: &crate::server::filesystem::Filesystem,
-) -> Result<u64, std::io::Error> {
-    Ok(filesystem
-        .disk_usage_cached
-        .load(std::sync::atomic::Ordering::Relaxed))
-}
+        Ok(())
+    }
 
-pub async fn update_disk_limit(
-    _filesystem: &crate::server::filesystem::Filesystem,
-    _limit: u64,
-) -> Result<(), std::io::Error> {
-    Ok(())
-}
+    async fn attach(&self) -> Result<(), std::io::Error> {
+        tracing::debug!(
+            path = %self.filesystem.base_path.display(),
+            "attaching no disk limiter for volume"
+        );
 
-pub async fn destroy(
-    filesystem: &crate::server::filesystem::Filesystem,
-) -> Result<(), std::io::Error> {
-    tokio::fs::remove_dir_all(&filesystem.base_path).await
+        Ok(())
+    }
+
+    async fn disk_usage(&self) -> Result<u64, std::io::Error> {
+        Ok(self
+            .filesystem
+            .disk_usage_cached
+            .load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    async fn update_disk_limit(&self, _limit: u64) -> Result<(), std::io::Error> {
+        Ok(())
+    }
+
+    async fn destroy(&self) -> Result<(), std::io::Error> {
+        tokio::fs::remove_dir_all(&self.filesystem.base_path).await
+    }
 }

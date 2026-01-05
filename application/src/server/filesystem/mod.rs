@@ -329,8 +329,14 @@ impl Filesystem {
     }
 
     #[inline]
+    pub fn get_disk_limiter<'a>(&'a self) -> Box<dyn limiter::DiskLimiterExt + 'a> {
+        self.config.system.disk_limiter_mode.get_limiter(self)
+    }
+
+    #[inline]
     pub async fn limiter_usage(&self) -> u64 {
-        limiter::disk_usage(self)
+        self.get_disk_limiter()
+            .disk_usage()
             .await
             .unwrap_or_else(|_| self.disk_usage_cached.load(Ordering::Relaxed))
     }
@@ -338,9 +344,10 @@ impl Filesystem {
     #[inline]
     pub async fn update_disk_limit(&self, limit: u64) {
         self.disk_limit.store(limit as i64, Ordering::Relaxed);
-        limiter::update_disk_limit(self, limit)
-            .await
-            .unwrap_or_else(|_| tracing::warn!("failed to update disk limit"));
+
+        if let Err(err) = self.get_disk_limiter().update_disk_limit(limit).await {
+            tracing::warn!("failed to update disk limit: {:?}", err);
+        }
     }
 
     #[inline]
@@ -565,9 +572,9 @@ impl Filesystem {
     /// - `ignorant`: If `true`, ignores disk limit checks
     ///
     /// Returns `true` if allocation was successful, `false` if it would exceed disk limit
-    pub async fn async_allocate_in_path_slice(
+    pub async fn async_allocate_in_path_iterator(
         &self,
-        path: &[String],
+        path: impl IntoIterator<Item = impl AsRef<str>>,
         delta: i64,
         ignorant: bool,
     ) -> bool {
@@ -679,7 +686,12 @@ impl Filesystem {
     /// - `ignorant`: If `true`, ignores disk limit checks
     ///
     /// Returns `true` if allocation was successful, `false` if it would exceed disk limit
-    pub fn allocate_in_path_slice(&self, path: &[String], delta: i64, ignorant: bool) -> bool {
+    pub fn allocate_in_path_iterator(
+        &self,
+        path: impl IntoIterator<Item = impl AsRef<str>>,
+        delta: i64,
+        ignorant: bool,
+    ) -> bool {
         if crate::unlikely(delta == 0) {
             return true;
         }
@@ -806,7 +818,9 @@ impl Filesystem {
     }
 
     pub async fn setup(&self) {
-        if let Err(err) = limiter::setup(self).await {
+        let limiter = self.get_disk_limiter();
+
+        if let Err(err) = limiter.setup().await {
             tracing::error!(
                 path = %self.base_path.display(),
                 "failed to create server base directory: {}",
@@ -816,8 +830,9 @@ impl Filesystem {
             return;
         }
 
-        if let Err(err) =
-            limiter::update_disk_limit(self, self.disk_limit.load(Ordering::Relaxed) as u64).await
+        if let Err(err) = limiter
+            .update_disk_limit(self.disk_limit.load(Ordering::Relaxed) as u64)
+            .await
         {
             tracing::error!(
                 path = %self.base_path.display(),
@@ -839,14 +854,14 @@ impl Filesystem {
                 Ok(Err(err)) => {
                     tracing::error!(
                         path = %self.base_path.display(),
-                        "failed to open server base directory: {}",
+                        "failed to open server base directory: {:?}",
                         err
                     );
                 }
                 Err(err) => {
                     tracing::error!(
                         path = %self.base_path.display(),
-                        "failed to open server base directory: {}",
+                        "failed to open server base directory: {:?}",
                         err
                     );
                 }
@@ -855,7 +870,7 @@ impl Filesystem {
     }
 
     pub async fn attach(&self) {
-        if let Err(err) = limiter::attach(self).await {
+        if let Err(err) = self.get_disk_limiter().attach().await {
             tracing::error!(
                 path = %self.base_path.display(),
                 "failed to attach server base directory: {}",
@@ -894,7 +909,7 @@ impl Filesystem {
     pub async fn destroy(&self) {
         self.disk_checker.abort();
 
-        if let Err(err) = limiter::destroy(self).await {
+        if let Err(err) = self.get_disk_limiter().destroy().await {
             tracing::error!(
                 path = %self.base_path.display(),
                 "failed to delete server base directory for: {}",

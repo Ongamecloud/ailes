@@ -434,13 +434,7 @@ nestify::nest! {
             #[serde(default = "system_disk_check_threads")]
             pub disk_check_threads: usize,
             #[serde(default)]
-            pub disk_limiter_mode: #[derive(ToSchema, Deserialize, Serialize, Default)] #[serde(rename_all = "snake_case")] pub enum SystemDiskLimiterMode {
-                #[default]
-                None,
-                BtrfsSubvolume,
-                ZfsDataset,
-                XfsQuota,
-            },
+            pub disk_limiter_mode: crate::server::filesystem::limiter::DiskLimiterMode,
             #[serde(default = "system_activity_send_interval")]
             pub activity_send_interval: u64,
             #[serde(default = "system_activity_send_count")]
