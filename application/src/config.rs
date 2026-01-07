@@ -884,6 +884,15 @@ impl Config {
                 "you have enabled sending offline server logs, but also deleting containers on stop. This will result in no logs being sent for stopped servers."
             );
         }
+        if matches!(
+            config.system.disk_limiter_mode,
+            crate::server::filesystem::limiter::DiskLimiterMode::FuseQuota
+        ) && !config.docker.delete_container_on_stop
+        {
+            tracing::warn!(
+                "you have enabled FUSE quota disk limiting, but also disabled deleting containers on stop. This WILL cause issues if you try manually starting things. this setup is not recommended."
+            );
+        }
 
         Ok((Arc::new(config), guard))
     }

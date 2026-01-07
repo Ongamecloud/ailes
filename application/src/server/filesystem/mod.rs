@@ -66,10 +66,12 @@ pub struct Filesystem {
     config: Arc<crate::config::Config>,
 
     pub base_path: PathBuf,
+    base_fs_path: RwLock<PathBuf>,
     cap_filesystem: cap::CapFilesystem,
 
     disk_limit: AtomicI64,
     disk_usage_cached: Arc<AtomicU64>,
+    disk_usage_delta_cached: Arc<AtomicI64>,
     apparent_disk_usage_cached: Arc<AtomicU64>,
     pub disk_usage: Arc<RwLock<usage::DiskUsage>>,
     disk_ignored: Arc<RwLock<ignore::gitignore::Gitignore>>,
@@ -260,11 +262,13 @@ impl Filesystem {
             }),
             config: Arc::clone(&config),
 
-            base_path,
+            base_path: base_path.clone(),
+            base_fs_path: RwLock::new(base_path),
             cap_filesystem,
 
             disk_limit: AtomicI64::new(disk_limit as i64),
             disk_usage_cached,
+            disk_usage_delta_cached: Arc::new(AtomicI64::new(0)),
             apparent_disk_usage_cached,
             disk_usage,
             disk_ignored: Arc::new(RwLock::new(disk_ignored.build().unwrap())),
@@ -348,6 +352,26 @@ impl Filesystem {
         if let Err(err) = self.get_disk_limiter().update_disk_limit(limit).await {
             tracing::warn!("failed to update disk limit: {:?}", err);
         }
+    }
+
+    /// Sets the base fs path, this is the path used by the cap filesystem
+    /// It may differ from the base_path for some disk limiters.
+    ///
+    /// DO NOT CALL THIS FUNCTION UNLESS YOU KNOW WHAT YOU ARE DOING
+    pub async fn set_base_fs_path(&self, path: PathBuf) -> Result<(), std::io::Error> {
+        let mut base_fs_path = self.base_fs_path.write().await;
+        if *base_fs_path == path {
+            return Ok(());
+        }
+        *base_fs_path = path;
+
+        Ok(())
+    }
+
+    /// Returns the base fs path, this is the path used by the cap filesystem
+    /// It may differ from the base_path for some disk limiters
+    pub async fn get_base_fs_path(&self) -> PathBuf {
+        self.base_fs_path.read().await.clone()
     }
 
     #[inline]
@@ -530,6 +554,9 @@ impl Filesystem {
             }
         }
 
+        self.disk_usage_delta_cached
+            .fetch_add(delta, Ordering::Relaxed);
+
         if delta > 0 {
             self.disk_usage_cached
                 .fetch_add(delta as u64, Ordering::Relaxed);
@@ -590,6 +617,9 @@ impl Filesystem {
             }
         }
 
+        self.disk_usage_delta_cached
+            .fetch_add(delta, Ordering::Relaxed);
+
         if delta > 0 {
             self.disk_usage_cached
                 .fetch_add(delta as u64, Ordering::Relaxed);
@@ -644,6 +674,9 @@ impl Filesystem {
                 return false;
             }
         }
+
+        self.disk_usage_delta_cached
+            .fetch_add(delta, Ordering::Relaxed);
 
         if delta > 0 {
             self.disk_usage_cached
@@ -704,6 +737,9 @@ impl Filesystem {
             }
         }
 
+        self.disk_usage_delta_cached
+            .fetch_add(delta, Ordering::Relaxed);
+
         if delta > 0 {
             self.disk_usage_cached
                 .fetch_add(delta as u64, Ordering::Relaxed);
@@ -763,14 +799,25 @@ impl Filesystem {
             let cap_filesystem = self.cap_filesystem.clone();
             let path = self.relative_path(path.as_ref());
             let base_path = self.base_path.clone();
+            let base_fs_path = self.get_base_fs_path().await;
 
             move || {
                 if crate::unlikely(path == Path::new("") || path == Path::new("/")) {
-                    Ok::<_, anyhow::Error>(std::os::unix::fs::chown(
-                        base_path,
+                    std::os::unix::fs::chown(
+                        &base_path,
                         Some(owner_uid.as_raw()),
                         Some(owner_gid.as_raw()),
-                    )?)
+                    )?;
+
+                    if base_path != base_fs_path {
+                        std::os::unix::fs::chown(
+                            base_fs_path,
+                            Some(owner_uid.as_raw()),
+                            Some(owner_gid.as_raw()),
+                        )?;
+                    }
+
+                    Ok::<_, anyhow::Error>(())
                 } else {
                     Ok(rustix::fs::chownat(
                         cap_filesystem.get_inner()?.as_fd(),

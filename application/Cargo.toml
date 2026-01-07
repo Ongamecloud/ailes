@@ -1,6 +1,6 @@
 [package]
 name = "wings-rs"
-version = "0.22.13"
+version = "0.23.0"
 edition = "2024"
 
 [dependencies]
@@ -84,4 +84,7 @@ smallvec = "1.15.1"
 tikv-jemallocator = "0.6.0"
 
 [build-dependencies]
+reqwest = { workspace = true, features = ["blocking"] }
+serde = { workspace = true }
 serde_json = { workspace = true }
+zstd = { version = "0.13.3", features = ["zstdmt"] }

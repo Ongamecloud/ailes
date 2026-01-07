@@ -1,5 +1,6 @@
 use std::fmt::Debug;
 
+pub mod bins;
 pub mod commands;
 pub mod config;
 pub mod deserialize;

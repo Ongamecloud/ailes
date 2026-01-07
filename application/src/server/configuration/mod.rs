@@ -130,7 +130,7 @@ nestify::nest! {
 }
 
 impl ServerConfiguration {
-    fn mounts(
+    async fn mounts(
         &self,
         config: &crate::config::Config,
         filesystem: &super::filesystem::Filesystem,
@@ -141,7 +141,7 @@ impl ServerConfiguration {
         mounts.push(Mount {
             default: true,
             target: "/home/container".into(),
-            source: filesystem.base(),
+            source: filesystem.get_base_fs_path().await.to_string_lossy().into(),
             read_only: false,
         });
 
@@ -177,12 +177,13 @@ impl ServerConfiguration {
         mounts
     }
 
-    fn convert_mounts(
+    async fn convert_mounts(
         &self,
         config: &crate::config::Config,
         filesystem: &super::filesystem::Filesystem,
     ) -> Vec<bollard::models::Mount> {
         self.mounts(config, filesystem)
+            .await
             .into_iter()
             .map(|mount| bollard::models::Mount {
                 typ: Some(bollard::secret::MountTypeEnum::BIND),
@@ -424,7 +425,7 @@ impl ServerConfiguration {
 
                 privileged: Some(self.container.privileged),
                 port_bindings: Some(self.convert_allocations_docker_bindings(config)),
-                mounts: Some(self.convert_mounts(config, filesystem)),
+                mounts: Some(self.convert_mounts(config, filesystem).await),
                 network_mode: Some(network_mode),
                 dns: Some(config.docker.network.dns.clone()),
                 tmpfs: Some(HashMap::from([(

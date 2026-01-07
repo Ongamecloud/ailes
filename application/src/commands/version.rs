@@ -13,6 +13,13 @@ pub async fn version(
         crate::VERSION,
         crate::GIT_COMMIT
     );
+    if !crate::bins::FUSEQUOTA_VERSION.is_empty() {
+        println!(
+            "github.com/calagopus/fusequota {} ({} compressed)",
+            crate::bins::FUSEQUOTA_VERSION,
+            human_bytes::human_bytes(crate::bins::FUSEQUOTA_BIN.len() as f64)
+        );
+    }
     println!(
         "copyright © 2025 - {} 0x7d8 & Contributors",
         chrono::Local::now().year()

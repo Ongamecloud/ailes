@@ -50,7 +50,7 @@ api:
 
 system:
   # apply a real quota limit to each server
-  # none, btrfs_subvolume, zfs_dataset, xfs_quota
+  # none, btrfs_subvolume, zfs_dataset, xfs_quota, (experimental) fuse_quota
   disk_limiter_mode: none
   # use multiple threads to check disk usage (usually lower to reduce load)
   disk_limiter_threads: 2
