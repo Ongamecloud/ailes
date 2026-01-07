@@ -260,18 +260,20 @@ impl Server {
                                     .stopping
                                     .store(false, Ordering::SeqCst);
                                 if server.app_state.config.docker.delete_container_on_stop {
-                                    server.destroy_container().await;
-
-                                    let server = server.clone();
-                                    tokio::spawn(async move {
-                                        if let Err(err) = server.filesystem.get_disk_limiter().shutdown().await {
-                                            tracing::error!(
-                                                server = %server.uuid,
-                                                "failed to shutdown disk limiter on server stop: {}",
-                                                err
-                                            );
+                                    tokio::spawn({
+                                        let server = server.clone();
+                                        async move {
+                                            if let Err(err) = server.filesystem.get_disk_limiter().shutdown().await {
+                                                tracing::error!(
+                                                    server = %server.uuid,
+                                                    "failed to shutdown disk limiter on server stop: {}",
+                                                    err
+                                                );
+                                            }
                                         }
                                     });
+
+                                    server.destroy_container().await;
                                 }
                             } else if server.app_state.config.system.crash_detection.enabled
                                 && !server
@@ -295,18 +297,20 @@ impl Server {
                                         "container exited cleanly, not restarting due to crash detection settings"
                                     );
                                     if server.app_state.config.docker.delete_container_on_stop {
-                                        server.destroy_container().await;
-
-                                        let server = server.clone();
-                                        tokio::spawn(async move {
-                                            if let Err(err) = server.filesystem.get_disk_limiter().shutdown().await {
-                                                tracing::error!(
-                                                    server = %server.uuid,
-                                                    "failed to shutdown disk limiter on server stop: {}",
-                                                    err
-                                                );
+                                        tokio::spawn({
+                                            let server = server.clone();
+                                            async move {
+                                                if let Err(err) = server.filesystem.get_disk_limiter().shutdown().await {
+                                                    tracing::error!(
+                                                        server = %server.uuid,
+                                                        "failed to shutdown disk limiter on server stop: {}",
+                                                        err
+                                                    );
+                                                }
                                             }
                                         });
+
+                                        server.destroy_container().await;
                                     }
 
                                     return;
@@ -353,18 +357,20 @@ impl Server {
                                             ),
                                         ).await;
                                         if server.app_state.config.docker.delete_container_on_stop {
-                                            server.destroy_container().await;
-
-                                            let server = server.clone();
-                                            tokio::spawn(async move {
-                                                if let Err(err) = server.filesystem.get_disk_limiter().shutdown().await {
-                                                    tracing::error!(
-                                                        server = %server.uuid,
-                                                        "failed to shutdown disk limiter on server stop: {}",
-                                                        err
-                                                    );
+                                            tokio::spawn({
+                                                let server = server.clone();
+                                                async move {
+                                                    if let Err(err) = server.filesystem.get_disk_limiter().shutdown().await {
+                                                        tracing::error!(
+                                                            server = %server.uuid,
+                                                            "failed to shutdown disk limiter on server stop: {}",
+                                                            err
+                                                        );
+                                                    }
                                                 }
                                             });
+
+                                            server.destroy_container().await;
                                         }
 
                                         return;
