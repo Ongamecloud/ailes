@@ -4,7 +4,7 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 mod post {
     use crate::{
         response::{ApiResponse, ApiResponseResult},
-        routes::ApiError,
+        routes::{ApiError, GetState},
     };
     use axum::http::{HeaderMap, HeaderName, StatusCode};
     use serde::{Deserialize, Serialize};
@@ -30,7 +30,18 @@ mod post {
         (status = ACCEPTED, body = inline(Response)),
         (status = CONFLICT, body = inline(ApiError)),
     ), request_body = inline(Payload))]
-    pub async fn route(axum::Json(data): axum::Json<Payload>) -> ApiResponseResult {
+    pub async fn route(
+        state: GetState,
+        axum::Json(data): axum::Json<Payload>,
+    ) -> ApiResponseResult {
+        if !matches!(state.container_type, crate::routes::AppContainerType::None) {
+            return ApiResponse::error(
+                "upgrades are not supported in containerized environments (yet)",
+            )
+            .with_status(StatusCode::BAD_REQUEST)
+            .ok();
+        }
+
         let current_exe = std::env::current_exe()?;
         let current_exe_parent = match current_exe.parent() {
             Some(parent) => parent,

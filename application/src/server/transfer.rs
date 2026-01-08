@@ -244,8 +244,10 @@ impl OutgoingServerTransfer {
                         bytes_sent.fetch_add(bytes_read as u64, Ordering::Relaxed);
                     }
 
-                    checksum_sender.send(format!("{:x}", hasher.finalize())).ok();
-                    writer.flush().await?;
+                    checksum_sender
+                        .send(format!("{:x}", hasher.finalize()))
+                        .ok();
+                    writer.shutdown().await?;
 
                     Ok::<_, anyhow::Error>(())
                 }

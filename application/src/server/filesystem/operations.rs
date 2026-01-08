@@ -26,7 +26,7 @@ pub enum FilesystemOperation {
     },
     Decompress {
         path: PathBuf,
-        destination: PathBuf,
+        destination_path: PathBuf,
 
         #[serde(serialize_with = "serialize_arc")]
         progress: Arc<AtomicU64>,
@@ -43,7 +43,18 @@ pub enum FilesystemOperation {
     },
     Copy {
         path: PathBuf,
-        destination: PathBuf,
+        destination_path: PathBuf,
+
+        #[serde(serialize_with = "serialize_arc")]
+        progress: Arc<AtomicU64>,
+        #[serde(serialize_with = "serialize_arc")]
+        total: Arc<AtomicU64>,
+    },
+    CopyRemote {
+        server: uuid::Uuid,
+        path: PathBuf,
+        destination_server: uuid::Uuid,
+        destination_path: PathBuf,
 
         #[serde(serialize_with = "serialize_arc")]
         progress: Arc<AtomicU64>,

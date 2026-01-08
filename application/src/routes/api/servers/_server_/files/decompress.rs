@@ -107,7 +107,7 @@ mod post {
             .add_operation(
                 crate::server::filesystem::operations::FilesystemOperation::Decompress {
                     path: source,
-                    destination: root.clone(),
+                    destination_path: root.clone(),
                     progress: progress.clone(),
                     total: total.clone(),
                 },

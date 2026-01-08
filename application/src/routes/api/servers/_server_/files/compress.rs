@@ -11,7 +11,7 @@ mod post {
     use axum::http::StatusCode;
     use serde::{Deserialize, Serialize};
     use std::{
-        path::{Path, PathBuf},
+        path::PathBuf,
         sync::{Arc, atomic::AtomicU64},
     };
     use utoipa::ToSchema;
@@ -135,7 +135,7 @@ mod post {
                                         .disk_usage
                                         .read()
                                         .await
-                                        .get_size(Path::new(file))
+                                        .get_size(&root.join(file))
                                         .map_or(0, |s| s.get_apparent());
                                 } else {
                                     total_size += metadata.len();

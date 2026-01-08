@@ -6,6 +6,7 @@ use utoipa_axum::{
 };
 
 mod _server_;
+mod files;
 
 mod post {
     use crate::{
@@ -719,6 +720,7 @@ mod post {
 pub fn router(state: &State) -> OpenApiRouter<State> {
     OpenApiRouter::new()
         .routes(routes!(post::route).layer(DefaultBodyLimit::disable()))
+        .nest("/files", files::router(state))
         .nest("/{server}", _server_::router(state))
         .with_state(state.clone())
 }

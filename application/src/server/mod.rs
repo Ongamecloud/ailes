@@ -62,6 +62,7 @@ pub struct InnerServer {
     pub filesystem: filesystem::Filesystem,
 }
 
+#[repr(transparent)]
 pub struct Server(Arc<InnerServer>);
 
 impl Server {

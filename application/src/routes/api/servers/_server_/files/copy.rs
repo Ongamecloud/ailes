@@ -187,7 +187,7 @@ mod post {
                     .add_operation(
                         crate::server::filesystem::operations::FilesystemOperation::Copy {
                             path: location.clone(),
-                            destination: file_name.clone(),
+                            destination_path: file_name.clone(),
                             progress: progress.clone(),
                             total,
                         },
@@ -242,7 +242,7 @@ mod post {
                 .add_operation(
                     crate::server::filesystem::operations::FilesystemOperation::Copy {
                         path: location.clone(),
-                        destination: file_name.clone(),
+                        destination_path: file_name.clone(),
                         progress: progress.clone(),
                         total,
                     },
