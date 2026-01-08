@@ -41,6 +41,15 @@ pub enum FilesystemOperation {
         #[serde(serialize_with = "serialize_arc")]
         total: Arc<AtomicU64>,
     },
+    Copy {
+        path: PathBuf,
+        destination: PathBuf,
+
+        #[serde(serialize_with = "serialize_arc")]
+        progress: Arc<AtomicU64>,
+        #[serde(serialize_with = "serialize_arc")]
+        total: Arc<AtomicU64>,
+    },
 }
 
 type Operation = (FilesystemOperation, tokio::sync::oneshot::Sender<()>);

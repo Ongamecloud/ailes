@@ -47,6 +47,9 @@ fn api_directory_entry_limit() -> usize {
 fn api_file_search_threads() -> usize {
     4
 }
+fn api_file_copy_threads() -> usize {
+    4
+}
 fn api_file_decompression_threads() -> usize {
     2
 }
@@ -366,6 +369,8 @@ nestify::nest! {
             pub send_offline_server_logs: bool,
             #[serde(default = "api_file_search_threads")]
             pub file_search_threads: usize,
+            #[serde(default = "api_file_copy_threads")]
+            pub file_copy_threads: usize,
             #[serde(default = "api_file_decompression_threads")]
             pub file_decompression_threads: usize,
             #[serde(default = "api_file_compression_threads")]
