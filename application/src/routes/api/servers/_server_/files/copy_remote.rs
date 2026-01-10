@@ -144,6 +144,7 @@ mod post {
                     },
                     {
                         let root = root.clone();
+                        let destination_path = PathBuf::from(data.destination_path.clone());
                         let server = server.clone();
                         let destination_server = destination_server.clone();
                         let progress = progress.clone();
@@ -161,12 +162,13 @@ mod post {
                                         continue;
                                     };
 
-                                    let destination_path = root.join(file);
+                                    let source_path = root.join(file);
+                                    let destination_path = destination_path.join(file);
 
                                     if metadata.is_dir() {
                                         let mut walker = server
                                             .filesystem
-                                            .async_walk_dir(&destination_path)
+                                            .async_walk_dir(&source_path)
                                             .await?
                                             .with_ignored(ignored);
 
@@ -176,12 +178,14 @@ mod post {
                                                 Arc::new({
                                                     let server = server.clone();
                                                     let destination_server = destination_server.clone();
+                                                    let source_path = Arc::new(source_path);
                                                     let destination_path = Arc::new(destination_path);
                                                     let progress = Arc::clone(&progress);
 
                                                     move |_, path: PathBuf| {
                                                         let server = server.clone();
                                                         let destination_server = destination_server.clone();
+                                                        let source_path = Arc::clone(&source_path);
                                                         let destination_path = Arc::clone(&destination_path);
                                                         let progress = Arc::clone(&progress);
 
@@ -192,10 +196,11 @@ mod post {
                                                                     Err(_) => return Ok(()),
                                                                 };
 
-                                                            let relative_path = match path.strip_prefix(&*destination_path) {
+                                                            let relative_path = match path.strip_prefix(&*source_path) {
                                                                 Ok(p) => p,
                                                                 Err(_) => return Ok(()),
                                                             };
+                                                            let source_path = source_path.join(relative_path);
                                                             let destination_path = destination_path.join(relative_path);
 
                                                             if metadata.is_file() {
@@ -203,7 +208,7 @@ mod post {
                                                                     destination_server.filesystem.async_create_dir_all(parent).await?;
                                                                 }
 
-                                                                let file = server.filesystem.async_open(&path).await?;
+                                                                let file = server.filesystem.async_open(&source_path).await?;
                                                                 let mut writer =
                                                                     crate::server::filesystem::writer::AsyncFileSystemWriter::new(
                                                                         destination_server.clone(),
@@ -234,7 +239,7 @@ mod post {
                                                                 }
 
                                                                 progress.fetch_add(metadata.len(), Ordering::Relaxed);
-                                                            } else if metadata.is_symlink() && let Ok(target) = server.filesystem.async_read_link(&path).await {
+                                                            } else if metadata.is_symlink() && let Ok(target) = server.filesystem.async_read_link(&source_path).await {
                                                                 if let Err(err) = destination_server.filesystem.async_symlink(&target, &destination_path).await {
                                                                     tracing::debug!(path = %destination_path.display(), "failed to create symlink from copy: {:?}", err);
                                                                 } else if let Ok(modified_time) = metadata.modified() {
@@ -253,7 +258,7 @@ mod post {
                                             )
                                             .await?;
                                     } else if metadata.is_file() {
-                                        let file = server.filesystem.async_open(file).await?;
+                                        let file = server.filesystem.async_open(source_path).await?;
                                         let mut writer =
                                             crate::server::filesystem::writer::AsyncFileSystemWriter::new(
                                                 destination_server.clone(),
@@ -270,7 +275,7 @@ mod post {
 
                                         tokio::io::copy(&mut reader, &mut writer).await?;
                                         writer.shutdown().await?;
-                                    } else if metadata.is_symlink() && let Ok(target) = server.filesystem.async_read_link(file).await {
+                                    } else if metadata.is_symlink() && let Ok(target) = server.filesystem.async_read_link(source_path).await {
                                         if let Err(err) = destination_server.filesystem.async_symlink(&target, &destination_path).await {
                                             tracing::debug!(path = %destination_path.display(), "failed to create symlink from copy: {:?}", err);
                                         } else if let Ok(modified_time) = metadata.modified() {
