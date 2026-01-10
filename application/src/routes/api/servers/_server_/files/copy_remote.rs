@@ -157,13 +157,13 @@ mod post {
                                 ];
 
                                 for file in &data.files {
-                                    let Ok(metadata) = server.filesystem.async_metadata(file).await
+                                    let source_path = root.join(file);
+                                    let destination_path = destination_path.join(file);
+
+                                    let Ok(metadata) = server.filesystem.async_symlink_metadata(&source_path).await
                                     else {
                                         continue;
                                     };
-
-                                    let source_path = root.join(file);
-                                    let destination_path = destination_path.join(file);
 
                                     if metadata.is_dir() {
                                         let mut walker = server
