@@ -1,5 +1,5 @@
 use compact_str::ToCompactString;
-use std::path::Path;
+use std::{iter::Peekable, path::Path};
 
 #[derive(Default, Clone, Copy)]
 pub struct UsedSpace {
@@ -42,14 +42,14 @@ impl UsedSpace {
 
     #[inline]
     pub fn sub_apparent(&mut self, val: u64) {
-        let real = self.get_apparent();
-        self.set_apparent(real.saturating_sub(val));
+        let apparent = self.get_apparent();
+        self.set_apparent(apparent.saturating_sub(val));
     }
 
     #[inline]
     pub fn add_apparent(&mut self, val: u64) {
-        let real = self.get_apparent();
-        self.set_apparent(real.saturating_add(val));
+        let apparent = self.get_apparent();
+        self.set_apparent(apparent.saturating_add(val));
     }
 }
 
@@ -190,17 +190,17 @@ impl DiskUsage {
             return None;
         }
 
-        self.recursive_remove(&mut path.components())
+        self.recursive_remove(&mut path.components().peekable())
     }
 
     fn recursive_remove<'a>(
         &mut self,
-        components: &mut impl Iterator<Item = std::path::Component<'a>>,
+        components: &mut Peekable<impl Iterator<Item = std::path::Component<'a>>>,
     ) -> Option<DiskUsage> {
         let component = components.next()?;
         let name = component.as_os_str().to_str().unwrap_or_default();
 
-        if components.size_hint().0 == 0 {
+        if components.peek().is_none() {
             return self.remove_entry(name);
         }
 

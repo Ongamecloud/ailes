@@ -258,7 +258,7 @@ impl AsyncWrite for AsyncFileSystemWriter {
     ) -> Poll<std::io::Result<usize>> {
         match self.poll_allocation(cx) {
             Poll::Ready(Ok(())) => {}
-            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+            Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
             Poll::Pending => return Poll::Pending,
         }
 
@@ -282,7 +282,7 @@ impl AsyncWrite for AsyncFileSystemWriter {
 
                     match self.poll_allocation(cx) {
                         Poll::Ready(Ok(())) => {}
-                        Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                        Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
                         Poll::Pending => return Poll::Pending,
                     }
                 }
@@ -295,7 +295,7 @@ impl AsyncWrite for AsyncFileSystemWriter {
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         match self.poll_allocation(cx) {
             Poll::Ready(Ok(())) => {}
-            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+            Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
             Poll::Pending => return Poll::Pending,
         }
 
@@ -304,7 +304,7 @@ impl AsyncWrite for AsyncFileSystemWriter {
 
             match self.poll_allocation(cx) {
                 Poll::Ready(Ok(())) => {}
-                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
                 Poll::Pending => return Poll::Pending,
             }
         }
@@ -319,7 +319,7 @@ impl AsyncWrite for AsyncFileSystemWriter {
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         match self.poll_allocation(cx) {
             Poll::Ready(Ok(())) => {}
-            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+            Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
             Poll::Pending => return Poll::Pending,
         }
 
@@ -328,7 +328,7 @@ impl AsyncWrite for AsyncFileSystemWriter {
 
             match self.poll_allocation(cx) {
                 Poll::Ready(Ok(())) => {}
-                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
                 Poll::Pending => return Poll::Pending,
             }
         }
@@ -357,7 +357,7 @@ impl AsyncSeek for AsyncFileSystemWriter {
     fn poll_complete(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<u64>> {
         match self.poll_allocation(cx) {
             Poll::Ready(Ok(())) => {}
-            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+            Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
             Poll::Pending => return Poll::Pending,
         }
 

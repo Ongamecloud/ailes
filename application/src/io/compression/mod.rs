@@ -9,6 +9,7 @@ pub enum CompressionType {
     None,
     Gz,
     Xz,
+    Lzip,
     Bz2,
     Lz4,
     Zstd,
@@ -61,13 +62,23 @@ impl CompressionLevel {
         match self {
             CompressionLevel::BestSpeed => 1,
             CompressionLevel::GoodSpeed => 8,
-            CompressionLevel::GoodCompression => 14,
-            CompressionLevel::BestCompression => 22,
+            CompressionLevel::GoodCompression => 13,
+            CompressionLevel::BestCompression => 19,
         }
     }
 
     #[inline]
     pub const fn to_lzma2_level(self) -> u32 {
+        match self {
+            CompressionLevel::BestSpeed => 1,
+            CompressionLevel::GoodSpeed => 4,
+            CompressionLevel::GoodCompression => 6,
+            CompressionLevel::BestCompression => 9,
+        }
+    }
+
+    #[inline]
+    pub const fn to_lzip_level(self) -> u32 {
         match self {
             CompressionLevel::BestSpeed => 1,
             CompressionLevel::GoodSpeed => 4,

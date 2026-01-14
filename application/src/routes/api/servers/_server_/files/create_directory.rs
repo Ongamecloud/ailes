@@ -8,13 +8,13 @@ mod post {
     };
     use axum::http::StatusCode;
     use serde::{Deserialize, Serialize};
-    use std::path::PathBuf;
     use utoipa::ToSchema;
 
     #[derive(ToSchema, Deserialize)]
     pub struct Payload {
+        #[serde(alias = "path")]
+        root: compact_str::CompactString,
         name: compact_str::CompactString,
-        path: compact_str::CompactString,
     }
 
     #[derive(ToSchema, Serialize)]
@@ -35,34 +35,36 @@ mod post {
         server: GetServer,
         axum::Json(data): axum::Json<Payload>,
     ) -> ApiResponseResult {
-        let path = match server.filesystem.async_canonicalize(&data.path).await {
-            Ok(path) => path,
-            Err(_) => PathBuf::from(data.path),
-        };
+        let (root, filesystem) = server
+            .filesystem
+            .resolve_writable_fs(&server, &data.root)
+            .await;
 
-        let metadata = server.filesystem.async_metadata(&path).await;
-        if !metadata.map(|m| m.is_dir()).unwrap_or(true) {
+        let metadata = filesystem.async_metadata(&root).await;
+        if !metadata.map_or(true, |m| m.file_type.is_dir()) {
             return ApiResponse::error("path is not a directory")
                 .with_status(StatusCode::EXPECTATION_FAILED)
                 .ok();
         }
 
-        if server.filesystem.is_ignored(&path, true).await {
+        if filesystem.is_primary_server_fs() && server.filesystem.is_ignored(&root, true).await {
             return ApiResponse::error("path not found")
                 .with_status(StatusCode::NOT_FOUND)
                 .ok();
         }
 
-        let destination = path.join(&data.name);
+        let destination = root.join(&data.name);
 
-        if server.filesystem.is_ignored(&destination, true).await {
+        if filesystem.is_primary_server_fs()
+            && server.filesystem.is_ignored(&destination, true).await
+        {
             return ApiResponse::error("destination not found")
                 .with_status(StatusCode::EXPECTATION_FAILED)
                 .ok();
         }
 
-        server.filesystem.async_create_dir_all(&destination).await?;
-        server.filesystem.chown_path(&destination).await?;
+        filesystem.async_create_dir_all(&destination).await?;
+        filesystem.async_chown(&destination).await?;
 
         ApiResponse::json(Response {}).ok()
     }

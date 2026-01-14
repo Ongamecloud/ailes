@@ -1,4 +1,4 @@
-use crate::server::backup::BrowseBackup;
+use crate::server::filesystem::virtualfs::{VirtualReadableFilesystem, VirtualWritableFilesystem};
 use cap_std::fs::{Metadata, MetadataExt, PermissionsExt};
 use compact_str::ToCompactString;
 use std::{
@@ -20,10 +20,10 @@ use tokio::{
 pub mod archive;
 pub mod cap;
 pub mod limiter;
-pub mod mime;
 pub mod operations;
 pub mod pull;
 pub mod usage;
+pub mod virtualfs;
 pub mod writer;
 
 #[inline]
@@ -66,7 +66,7 @@ pub struct Filesystem {
     config: Arc<crate::config::Config>,
 
     pub base_path: PathBuf,
-    base_fs_path: RwLock<PathBuf>,
+    base_fs_mount_path: RwLock<PathBuf>,
     cap_filesystem: cap::CapFilesystem,
 
     disk_limit: AtomicI64,
@@ -76,6 +76,7 @@ pub struct Filesystem {
     pub disk_usage: Arc<RwLock<usage::DiskUsage>>,
     disk_ignored: Arc<RwLock<ignore::gitignore::Gitignore>>,
 
+    pub archive_fs_cache: moka::future::Cache<PathBuf, Arc<dyn VirtualReadableFilesystem>>,
     pub pulls: RwLock<HashMap<uuid::Uuid, Arc<RwLock<pull::Download>>>>,
     pub operations: operations::OperationManager,
 }
@@ -89,7 +90,7 @@ impl Filesystem {
         config: Arc<crate::config::Config>,
         deny_list: &[compact_str::CompactString],
     ) -> Self {
-        let base_path = Path::new(&config.system.data_directory).join(uuid.to_compact_string());
+        let base_path = config.data_path(uuid);
         let disk_usage = Arc::new(RwLock::new(usage::DiskUsage::default()));
         let disk_usage_cached = Arc::new(AtomicU64::new(0));
         let apparent_disk_usage_cached = Arc::new(AtomicU64::new(0));
@@ -263,7 +264,7 @@ impl Filesystem {
             config: Arc::clone(&config),
 
             base_path: base_path.clone(),
-            base_fs_path: RwLock::new(base_path),
+            base_fs_mount_path: RwLock::new(base_path),
             cap_filesystem,
 
             disk_limit: AtomicI64::new(disk_limit as i64),
@@ -273,6 +274,9 @@ impl Filesystem {
             disk_usage,
             disk_ignored: Arc::new(RwLock::new(disk_ignored.build().unwrap())),
 
+            archive_fs_cache: moka::future::CacheBuilder::new(8)
+                .time_to_idle(std::time::Duration::from_mins(1))
+                .build(),
             pulls: RwLock::new(HashMap::new()),
             operations: operations::OperationManager::new(sender),
         }
@@ -359,7 +363,7 @@ impl Filesystem {
     ///
     /// DO NOT CALL THIS FUNCTION UNLESS YOU KNOW WHAT YOU ARE DOING
     pub async fn set_base_fs_path(&self, path: PathBuf) -> Result<(), std::io::Error> {
-        let mut base_fs_path = self.base_fs_path.write().await;
+        let mut base_fs_path = self.base_fs_mount_path.write().await;
         if *base_fs_path == path {
             return Ok(());
         }
@@ -371,7 +375,7 @@ impl Filesystem {
     /// Returns the base fs path, this is the path used by the cap filesystem
     /// It may differ from the base_path for some disk limiters
     pub async fn get_base_fs_path(&self) -> PathBuf {
-        self.base_fs_path.read().await.clone()
+        self.base_fs_mount_path.read().await.clone()
     }
 
     #[inline]
@@ -397,50 +401,180 @@ impl Filesystem {
             .collect()
     }
 
-    pub async fn backup_fs(
+    pub async fn resolve_readable_fs(
         &self,
         server: &crate::server::Server,
-        backup_manager: &crate::server::backup::manager::BackupManager,
         path: &Path,
-    ) -> Option<(Arc<BrowseBackup>, PathBuf)> {
-        if !self.config.system.backups.mounting.enabled {
-            return None;
-        }
-
+    ) -> (PathBuf, Arc<dyn VirtualReadableFilesystem>) {
         let path = self.relative_path(path);
-        if !path.starts_with(&self.config.system.backups.mounting.path) {
-            return None;
-        }
 
-        let backup_path = path
-            .strip_prefix(&self.config.system.backups.mounting.path)
-            .ok()?;
-        let uuid: uuid::Uuid = backup_path
-            .components()
-            .next()?
-            .as_os_str()
-            .to_string_lossy()
-            .parse()
-            .ok()?;
+        'backupfs: {
+            if !self.config.system.backups.mounting.enabled {
+                break 'backupfs;
+            }
 
-        if !server.configuration.read().await.backups.contains(&uuid) {
-            return None;
-        }
+            if !path.starts_with(&self.config.system.backups.mounting.path) {
+                break 'backupfs;
+            }
 
-        match backup_manager.browse(server, uuid).await {
-            Ok(Some(backup)) => Some((
-                backup,
-                backup_path
-                    .strip_prefix(uuid.to_string())
-                    .ok()?
-                    .to_path_buf(),
-            )),
-            Ok(None) => None,
-            Err(err) => {
-                tracing::error!(server = %server.uuid, backup = %uuid, "failed to find backup: {:?}", err);
-                None
+            let backup_path = match path.strip_prefix(&self.config.system.backups.mounting.path) {
+                Ok(p) => p,
+                Err(_) => break 'backupfs,
+            };
+            let uuid: uuid::Uuid = match backup_path
+                .components()
+                .next()
+                .and_then(|c| c.as_os_str().to_string_lossy().parse().ok())
+            {
+                Some(u) => u,
+                None => break 'backupfs,
+            };
+
+            if !server.configuration.read().await.backups.contains(&uuid) {
+                break 'backupfs;
+            }
+
+            match self.app_state.backup_manager.browse(server, uuid).await {
+                Ok(Some(backup)) => {
+                    let path = match backup_path.strip_prefix(uuid.to_string()) {
+                        Ok(p) => p.to_path_buf(),
+                        Err(_) => PathBuf::new(),
+                    };
+
+                    return (path, backup);
+                }
+                Ok(None) => break 'backupfs,
+                Err(err) => {
+                    tracing::error!(server = %server.uuid, backup = %uuid, "failed to find backup: {:?}", err);
+                    break 'backupfs;
+                }
             }
         }
+
+        'archivefs: {
+            let mut archive_path = PathBuf::new();
+            let mut found = false;
+            for component in path.components() {
+                let Some(component_str) = component.as_os_str().to_str() else {
+                    break 'archivefs;
+                };
+
+                archive_path.push(component);
+
+                if component_str.ends_with(".zip")
+                    || component_str.ends_with(".7z")
+                    || component_str.ends_with(".ddup")
+                {
+                    found = true;
+                    break;
+                }
+            }
+
+            if !found || archive_path == PathBuf::new() {
+                break 'archivefs;
+            }
+
+            let inner_path = match path.strip_prefix(&archive_path) {
+                Ok(p) => p,
+                Err(_) => break 'archivefs,
+            };
+
+            if self
+                .async_metadata(&archive_path)
+                .await
+                .ok()
+                .is_none_or(|m| !m.is_file())
+            {
+                break 'archivefs;
+            }
+
+            if let Some(archive_fs) = self.archive_fs_cache.get(&archive_path).await {
+                return (inner_path.to_path_buf(), archive_fs);
+            }
+
+            let archive_fs: Arc<dyn VirtualReadableFilesystem> =
+                match archive_path.extension().and_then(|ext| ext.to_str()) {
+                    Some("zip") => {
+                        match virtualfs::archive::zip::VirtualZipArchive::open(
+                            server.clone(),
+                            &archive_path,
+                        )
+                        .await
+                        {
+                            Ok(archive) => Arc::new(archive),
+                            Err(err) => {
+                                tracing::error!(
+                                    "failed to open archivefs zip archive {}: {:?}",
+                                    archive_path.display(),
+                                    err
+                                );
+                                break 'archivefs;
+                            }
+                        }
+                    }
+                    Some("7z") => {
+                        match virtualfs::archive::seven_zip::VirtualSevenZipArchive::open(
+                            server.clone(),
+                            &archive_path,
+                        )
+                        .await
+                        {
+                            Ok(archive) => Arc::new(archive),
+                            Err(err) => {
+                                tracing::error!(
+                                    "failed to open archivefs 7z archive {}: {:?}",
+                                    archive_path.display(),
+                                    err
+                                );
+                                break 'archivefs;
+                            }
+                        }
+                    }
+                    Some("ddup") => {
+                        match virtualfs::archive::ddup_bak::VirtualDdupBakArchive::open(
+                            server.clone(),
+                            &archive_path,
+                        )
+                        .await
+                        {
+                            Ok(archive) => Arc::new(archive),
+                            Err(err) => {
+                                tracing::error!(
+                                    "failed to open archivefs ddup archive {}: {:?}",
+                                    archive_path.display(),
+                                    err
+                                );
+                                break 'archivefs;
+                            }
+                        }
+                    }
+                    _ => break 'archivefs,
+                };
+
+            self.archive_fs_cache
+                .insert(archive_path, archive_fs.clone())
+                .await;
+
+            return (inner_path.to_path_buf(), archive_fs);
+        }
+
+        let mut fs = self.cap_filesystem.get_virtual(server.clone());
+        fs.is_primary_server_fs = true;
+        fs.is_writable = true;
+
+        (path, Arc::new(fs))
+    }
+
+    pub async fn resolve_writable_fs(
+        &self,
+        server: &crate::server::Server,
+        path: impl AsRef<Path>,
+    ) -> (PathBuf, Arc<dyn VirtualWritableFilesystem>) {
+        let mut fs = self.cap_filesystem.get_virtual(server.clone());
+        fs.is_primary_server_fs = true;
+        fs.is_writable = true;
+
+        (self.relative_path(path.as_ref()), Arc::new(fs))
     }
 
     pub async fn truncate_path(&self, path: impl AsRef<Path>) -> Result<(), anyhow::Error> {
@@ -778,8 +912,8 @@ impl Filesystem {
         self.disk_usage_cached.store(0, Ordering::Relaxed);
 
         let mut directory = self.async_read_dir(Path::new("")).await?;
-        while let Some(Ok((is_dir, path))) = directory.next_entry().await {
-            if is_dir {
+        while let Some(Ok((file_type, path))) = directory.next_entry().await {
+            if file_type.is_dir() {
                 self.async_remove_dir_all(&path).await?;
             } else {
                 self.async_remove_file(&path).await?;
@@ -1148,12 +1282,8 @@ impl Filesystem {
                 None
             };
 
-        let mime_type = if let Some(mime_type) = self
-            .app_state
-            .mime_cache
-            .get_mime(&(metadata.dev(), metadata.ino(), metadata.mtime()))
-            .await
-        {
+        let mime_key = (&metadata).into();
+        let mime_type = if let Some(mime_type) = self.app_state.mime_cache.get(&mime_key).await {
             mime_type
         } else {
             let mut buffer = [0; 64];
@@ -1196,13 +1326,7 @@ impl Filesystem {
                 "application/octet-stream"
             };
 
-            self.app_state
-                .mime_cache
-                .insert_mime(
-                    (metadata.dev(), metadata.ino(), metadata.mtime()),
-                    mime_type,
-                )
-                .await;
+            self.app_state.mime_cache.insert(mime_key, mime_type).await;
 
             mime_type
         };
@@ -1223,6 +1347,7 @@ impl Filesystem {
         filesystem: &cap::CapFilesystem,
         path: PathBuf,
         metadata: Metadata,
+        no_directory_size: bool,
     ) -> crate::models::DirectoryEntry {
         let symlink_destination = if metadata.is_symlink() {
             match filesystem.async_read_link(&path).await {
@@ -1243,12 +1368,8 @@ impl Filesystem {
                 None
             };
 
-        let mime_type = if let Some(mime_type) = self
-            .app_state
-            .mime_cache
-            .get_mime(&(metadata.dev(), metadata.ino(), metadata.mtime()))
-            .await
-        {
+        let mime_key = (&metadata).into();
+        let mime_type = if let Some(mime_type) = self.app_state.mime_cache.get(&mime_key).await {
             mime_type
         } else {
             let mut buffer = [0; 64];
@@ -1291,13 +1412,7 @@ impl Filesystem {
                 "application/octet-stream"
             };
 
-            self.app_state
-                .mime_cache
-                .insert_mime(
-                    (metadata.dev(), metadata.ino(), metadata.mtime()),
-                    mime_type,
-                )
-                .await;
+            self.app_state.mime_cache.insert(mime_key, mime_type).await;
 
             mime_type
         };
@@ -1305,7 +1420,7 @@ impl Filesystem {
         self.to_api_entry_mime_type(
             path,
             &metadata,
-            true,
+            no_directory_size,
             Some(mime_type),
             symlink_destination,
             symlink_destination_metadata,

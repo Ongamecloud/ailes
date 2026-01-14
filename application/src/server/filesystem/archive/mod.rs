@@ -44,6 +44,7 @@ pub enum ArchiveFormat {
     #[default]
     TarGz,
     TarXz,
+    TarLzip,
     TarBz2,
     TarLz4,
     TarZstd,
@@ -58,6 +59,7 @@ impl ArchiveFormat {
             ArchiveFormat::Tar,
             ArchiveFormat::TarGz,
             ArchiveFormat::TarXz,
+            ArchiveFormat::TarLzip,
             ArchiveFormat::TarBz2,
             ArchiveFormat::TarLz4,
             ArchiveFormat::TarZstd,
@@ -72,6 +74,7 @@ impl ArchiveFormat {
             ArchiveFormat::Tar => CompressionType::None,
             ArchiveFormat::TarGz => CompressionType::Gz,
             ArchiveFormat::TarXz => CompressionType::Xz,
+            ArchiveFormat::TarLzip => CompressionType::Lzip,
             ArchiveFormat::TarBz2 => CompressionType::Bz2,
             ArchiveFormat::TarLz4 => CompressionType::Lz4,
             ArchiveFormat::TarZstd => CompressionType::Zstd,
@@ -85,6 +88,7 @@ impl ArchiveFormat {
             ArchiveFormat::Tar => "tar",
             ArchiveFormat::TarGz => "tar.gz",
             ArchiveFormat::TarXz => "tar.xz",
+            ArchiveFormat::TarLzip => "tar.lz",
             ArchiveFormat::TarBz2 => "tar.bz2",
             ArchiveFormat::TarLz4 => "tar.lz4",
             ArchiveFormat::TarZstd => "tar.zst",
@@ -99,6 +103,7 @@ impl ArchiveFormat {
             ArchiveFormat::Tar => "application/x-tar",
             ArchiveFormat::TarGz => "application/gzip",
             ArchiveFormat::TarXz => "application/x-xz",
+            ArchiveFormat::TarLzip => "application/x-lzip",
             ArchiveFormat::TarBz2 => "application/x-bzip2",
             ArchiveFormat::TarLz4 => "application/x-lz4",
             ArchiveFormat::TarZstd => "application/zstd",
@@ -116,6 +121,7 @@ pub enum StreamableArchiveFormat {
     #[default]
     TarGz,
     TarXz,
+    TarLzip,
     TarBz2,
     TarLz4,
     TarZstd,
@@ -129,6 +135,7 @@ impl StreamableArchiveFormat {
             StreamableArchiveFormat::Tar => CompressionType::None,
             StreamableArchiveFormat::TarGz => CompressionType::Gz,
             StreamableArchiveFormat::TarXz => CompressionType::Xz,
+            StreamableArchiveFormat::TarLzip => CompressionType::Lzip,
             StreamableArchiveFormat::TarBz2 => CompressionType::Bz2,
             StreamableArchiveFormat::TarLz4 => CompressionType::Lz4,
             StreamableArchiveFormat::TarZstd => CompressionType::Zstd,
@@ -142,6 +149,7 @@ impl StreamableArchiveFormat {
             StreamableArchiveFormat::Tar => "tar",
             StreamableArchiveFormat::TarGz => "tar.gz",
             StreamableArchiveFormat::TarXz => "tar.xz",
+            StreamableArchiveFormat::TarLzip => "tar.lz",
             StreamableArchiveFormat::TarBz2 => "tar.bz2",
             StreamableArchiveFormat::TarLz4 => "tar.lz4",
             StreamableArchiveFormat::TarZstd => "tar.zst",
@@ -155,6 +163,7 @@ impl StreamableArchiveFormat {
             StreamableArchiveFormat::Tar => "application/x-tar",
             StreamableArchiveFormat::TarGz => "application/gzip",
             StreamableArchiveFormat::TarXz => "application/x-xz",
+            StreamableArchiveFormat::TarLzip => "application/x-lzip",
             StreamableArchiveFormat::TarBz2 => "application/x-bzip2",
             StreamableArchiveFormat::TarLz4 => "application/x-lz4",
             StreamableArchiveFormat::TarZstd => "application/zstd",
@@ -221,40 +230,7 @@ impl Archive {
         #[allow(clippy::unused_io_amount)]
         file.read(&mut header).await?;
 
-        let get_archive_format = || -> ArchiveType {
-            match path.extension() {
-                Some(ext)
-                    if [
-                        "tar", "tgz", "tbz", "tbz2", "txz", "tlz", "tlzf", "tlz4", "tzst",
-                    ]
-                    .contains(&ext.to_str().unwrap_or_default()) =>
-                {
-                    ArchiveType::Tar
-                }
-                Some(ext) if ext == "ddup" => ArchiveType::Ddup,
-                _ => path.file_stem().map_or(ArchiveType::None, |stem| {
-                    if stem.to_str().is_some_and(|s| s.ends_with(".tar")) {
-                        ArchiveType::Tar
-                    } else {
-                        ArchiveType::None
-                    }
-                }),
-            }
-        };
-
-        let inferred = infer::get(&header);
-        let (compression_format, archive_format) = match inferred.map(|f| f.mime_type()) {
-            Some("application/gzip") => (CompressionType::Gz, get_archive_format()),
-            Some("application/x-bzip2") => (CompressionType::Bz2, get_archive_format()),
-            Some("application/x-xz") => (CompressionType::Xz, get_archive_format()),
-            Some("application/x-lz4") => (CompressionType::Lz4, get_archive_format()),
-            Some("application/zstd") => (CompressionType::Zstd, get_archive_format()),
-            Some("application/zip") => (CompressionType::None, ArchiveType::Zip),
-            Some("application/x-tar") => (CompressionType::None, ArchiveType::Tar),
-            Some("application/vnd.rar") => (CompressionType::None, ArchiveType::Rar),
-            Some("application/x-7z-compressed") => (CompressionType::None, ArchiveType::SevenZip),
-            _ => (CompressionType::None, get_archive_format()),
-        };
+        let (compression_format, archive_format) = Self::detect(&path, &header);
 
         tracing::debug!(
             path = %path.display(),
@@ -271,6 +247,46 @@ impl Archive {
             file,
             path,
         })
+    }
+
+    pub fn detect(path: impl AsRef<Path>, header: &[u8]) -> (CompressionType, ArchiveType) {
+        let path = path.as_ref();
+        let inferred = infer::get(header);
+
+        let get_archive_format = || -> ArchiveType {
+            match path.extension() {
+                Some(ext)
+                    if [
+                        "tar", "tgz", "tbz", "tbz2", "txz", "tlz", "tlz", "tlzf", "tlz4", "tzst",
+                    ]
+                    .contains(&ext.to_str().unwrap_or_default()) =>
+                {
+                    ArchiveType::Tar
+                }
+                Some(ext) if ext == "ddup" => ArchiveType::Ddup,
+                _ => path.file_stem().map_or(ArchiveType::None, |stem| {
+                    if stem.to_str().is_some_and(|s| s.ends_with(".tar")) {
+                        ArchiveType::Tar
+                    } else {
+                        ArchiveType::None
+                    }
+                }),
+            }
+        };
+
+        match inferred.map(|f| f.mime_type()) {
+            Some("application/gzip") => (CompressionType::Gz, get_archive_format()),
+            Some("application/x-bzip2") => (CompressionType::Bz2, get_archive_format()),
+            Some("application/x-xz") => (CompressionType::Xz, get_archive_format()),
+            Some("application/x-lzip") => (CompressionType::Lzip, get_archive_format()),
+            Some("application/x-lz4") => (CompressionType::Lz4, get_archive_format()),
+            Some("application/zstd") => (CompressionType::Zstd, get_archive_format()),
+            Some("application/zip") => (CompressionType::None, ArchiveType::Zip),
+            Some("application/x-tar") => (CompressionType::None, ArchiveType::Tar),
+            Some("application/vnd.rar") => (CompressionType::None, ArchiveType::Rar),
+            Some("application/x-7z-compressed") => (CompressionType::None, ArchiveType::SevenZip),
+            _ => (CompressionType::None, get_archive_format()),
+        }
     }
 
     pub async fn estimated_size(&mut self) -> Option<u64> {
@@ -295,6 +311,7 @@ impl Archive {
                 Some(u32::from_le_bytes(buffer) as u64)
             }
             CompressionType::Xz => None,
+            CompressionType::Lzip => None,
             CompressionType::Bz2 => None,
             CompressionType::Lz4 => {
                 if self.header[0..4] != [0x04, 0x22, 0x4D, 0x18] {

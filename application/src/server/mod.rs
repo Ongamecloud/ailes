@@ -533,7 +533,7 @@ impl Server {
         self.configuration
             .read()
             .await
-            .create_machine_id_files(&self.app_state.config)
+            .ensure_vmounts(&self.app_state.config)
             .await?;
 
         let container = self
@@ -1445,6 +1445,11 @@ impl Server {
         self.suspended.store(true, Ordering::SeqCst);
         self.kill(true).await.ok();
         self.destroy_container().await;
+        self.configuration
+            .read()
+            .await
+            .remove_vmounts(&self.app_state.config)
+            .await;
 
         tokio::spawn({
             let server = self.clone();

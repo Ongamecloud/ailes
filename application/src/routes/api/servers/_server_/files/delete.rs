@@ -2,11 +2,12 @@ use super::State;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
 mod post {
+    use std::path::Path;
+
     use crate::{
         response::{ApiResponse, ApiResponseResult},
         routes::{ApiError, api::servers::_server_::GetServer},
     };
-    use axum::http::StatusCode;
     use serde::{Deserialize, Serialize};
     use utoipa::ToSchema;
 
@@ -38,45 +39,37 @@ mod post {
         server: GetServer,
         axum::Json(data): axum::Json<Payload>,
     ) -> ApiResponseResult {
-        let root = match server.filesystem.async_canonicalize(data.root).await {
-            Ok(path) => path,
-            Err(_) => {
-                return ApiResponse::error("root not found")
-                    .with_status(StatusCode::NOT_FOUND)
-                    .ok();
-            }
-        };
-
-        let metadata = server.filesystem.async_symlink_metadata(&root).await;
-        if !metadata.map(|m| m.is_dir()).unwrap_or(false) {
-            return ApiResponse::error("root is not a directory")
-                .with_status(StatusCode::EXPECTATION_FAILED)
-                .ok();
-        }
-
         let mut deleted_count = 0;
         for file in data.files {
-            let destination = root.join(file);
-            if destination == root {
+            let (source, filesystem) = server
+                .filesystem
+                .resolve_writable_fs(&server, Path::new(&data.root).join(&file))
+                .await;
+            if source == Path::new(&data.root) {
                 continue;
             }
 
-            if server
-                .filesystem
-                .is_ignored(
-                    &destination,
-                    server
-                        .filesystem
-                        .async_symlink_metadata(&destination)
-                        .await
-                        .is_ok_and(|m| m.is_dir()),
-                )
-                .await
+            let metadata = match filesystem.async_symlink_metadata(&source).await {
+                Ok(metadata) => metadata,
+                Err(_) => continue,
+            };
+
+            if filesystem.is_primary_server_fs()
+                && server
+                    .filesystem
+                    .is_ignored(&source, metadata.file_type.is_dir())
+                    .await
             {
                 continue;
             }
 
-            if server.filesystem.truncate_path(&destination).await.is_ok() {
+            if if filesystem.is_primary_server_fs() {
+                server.filesystem.truncate_path(&source).await.is_ok()
+            } else if metadata.file_type.is_dir() {
+                filesystem.async_remove_dir_all(&source).await.is_ok()
+            } else {
+                filesystem.async_remove_file(&source).await.is_ok()
+            } {
                 deleted_count += 1;
             }
         }

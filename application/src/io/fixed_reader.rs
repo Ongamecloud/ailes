@@ -93,7 +93,7 @@ impl<R: AsyncRead + Unpin> AsyncRead for AsyncFixedReader<R> {
 
                 Poll::Ready(Ok(()))
             }
-            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+            Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
             Poll::Pending => Poll::Pending,
         }
     }

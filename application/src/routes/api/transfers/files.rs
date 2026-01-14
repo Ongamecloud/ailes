@@ -128,14 +128,21 @@ mod post {
         let total_bytes: u64 = headers
             .get("Total-Bytes")
             .map_or(Ok(0), |v| v.to_str().unwrap_or_default().parse())?;
+        let root_files: Vec<compact_str::CompactString> = serde_json::from_str(
+            headers
+                .get("Root-Files")
+                .map_or("[]", |v| v.to_str().unwrap_or("[]")),
+        )?;
 
         let progress = Arc::new(AtomicU64::new(0));
         let total = Arc::new(AtomicU64::new(total_bytes));
 
-        server
+        let (root, filesystem) = server
             .filesystem
-            .async_create_dir_all(&payload.destination_path)
-            .await?;
+            .resolve_writable_fs(&server, &payload.destination_path)
+            .await;
+
+        filesystem.async_create_dir_all(&root).await?;
 
         let (_, task) = server
             .filesystem
@@ -144,6 +151,7 @@ mod post {
                 crate::server::filesystem::operations::FilesystemOperation::CopyRemote {
                     server: payload.server,
                     path: PathBuf::from(&payload.root),
+                    files: root_files.into_iter().map(PathBuf::from).collect(),
                     destination_server: server.uuid,
                     destination_path: PathBuf::from(&payload.destination_path),
                     progress: progress.clone(),
@@ -152,6 +160,7 @@ mod post {
                 {
                     let runtime = tokio::runtime::Handle::current();
                     let server = server.clone();
+                    let filesystem = filesystem.clone();
                     let state = state.clone();
 
                     async move {
@@ -174,21 +183,12 @@ mod post {
                                         let reader = HashReader::new_with_hasher(reader, sha2::Sha256::new());
                                         let reader = CompressionReader::new(
                                             reader,
-                                            match TransferArchiveFormat::from_str(&file_name)
-                                                .unwrap_or(TransferArchiveFormat::TarGz)
-                                            {
-                                                TransferArchiveFormat::Tar => CompressionType::None,
-                                                TransferArchiveFormat::TarGz => CompressionType::Gz,
-                                                TransferArchiveFormat::TarXz => CompressionType::Xz,
-                                                TransferArchiveFormat::TarBz2 => CompressionType::Bz2,
-                                                TransferArchiveFormat::TarLz4 => CompressionType::Lz4,
-                                                TransferArchiveFormat::TarZstd => CompressionType::Zstd,
-                                            },
+                                            TransferArchiveFormat::from_str(&file_name)
+                                                .map_or(CompressionType::Gz, |f| f.compression_format())
                                         );
 
                                         let mut archive = tar::Archive::new(reader);
                                         archive.set_ignore_zeros(true);
-                                        let mut directory_entries = chunked_vec::ChunkedVec::new();
                                         let mut entries = archive.entries()?;
 
                                         let mut read_buffer = vec![0; crate::BUFFER_SIZE];
@@ -202,49 +202,28 @@ mod post {
                                             let destination_path = Path::new(&payload.destination_path).join(&path);
                                             let header = entry.header();
 
-                                            if server.filesystem.is_ignored_sync(&destination_path, header.entry_type() == tar::EntryType::Directory) {
+                                            if filesystem.is_primary_server_fs() && server.filesystem.is_ignored_sync(&destination_path, header.entry_type() == tar::EntryType::Directory) {
                                                 continue;
                                             }
 
                                             match header.entry_type() {
                                                 tar::EntryType::Directory => {
-                                                    server.filesystem.create_dir_all(&destination_path)?;
+                                                    filesystem.create_dir_all(&destination_path)?;
                                                     if let Ok(permissions) =
                                                         header.mode().map(Permissions::from_mode)
                                                     {
-                                                        server.filesystem.set_permissions(
+                                                        filesystem.set_permissions(
                                                             &destination_path,
                                                             permissions,
                                                         )?;
                                                     }
-
-                                                    if let Ok(modified_time) = header.mtime() {
-                                                        directory_entries.push((
-                                                            destination_path,
-                                                            modified_time,
-                                                        ));
-                                                    }
                                                 }
                                                 tar::EntryType::Regular => {
                                                     if let Some(parent) = destination_path.parent() {
-                                                        server.filesystem.create_dir_all(parent)?;
+                                                        filesystem.create_dir_all(&parent)?;
                                                     }
 
-                                                    let writer =
-                                                        crate::server::filesystem::writer::FileSystemWriter::new(
-                                                            server.clone(),
-                                                            &destination_path,
-                                                            header.mode().map(Permissions::from_mode).ok(),
-                                                            header
-                                                                .mtime()
-                                                                .map(|t| {
-                                                                    cap_std::time::SystemTime::from_std(
-                                                                        std::time::UNIX_EPOCH
-                                                                            + std::time::Duration::from_secs(t),
-                                                                    )
-                                                                })
-                                                                .ok(),
-                                                        )?;
+                                                    let writer = filesystem.create_file(&destination_path)?;
                                                     let mut writer = CountingWriter::new_with_bytes_written(
                                                         writer,
                                                         progress.clone()
@@ -264,35 +243,17 @@ mod post {
                                                         .unwrap_or_default();
 
                                                     if let Err(err) =
-                                                        server.filesystem.symlink(link, &destination_path)
+                                                        filesystem.create_symlink(&link, &destination_path)
                                                     {
                                                         tracing::debug!(
                                                             path = %destination_path.display(),
                                                             "failed to create symlink from archive: {:#?}",
                                                             err
                                                         );
-                                                    } else if let Ok(modified_time) = header.mtime() {
-                                                        server.filesystem.set_times(
-                                                            destination_path,
-                                                            std::time::UNIX_EPOCH
-                                                                + std::time::Duration::from_secs(
-                                                                    modified_time,
-                                                                ),
-                                                            None,
-                                                        )?;
                                                     }
                                                 }
                                                 _ => {}
                                             }
-                                        }
-
-                                        for (destination_path, modified_time) in directory_entries {
-                                            server.filesystem.set_times(
-                                                &destination_path,
-                                                std::time::UNIX_EPOCH
-                                                    + std::time::Duration::from_secs(modified_time),
-                                                None,
-                                            )?;
                                         }
 
                                         let mut inner = archive.into_inner().into_inner();

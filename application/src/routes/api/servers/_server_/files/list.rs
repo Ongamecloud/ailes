@@ -2,6 +2,8 @@ use super::State;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
 mod get {
+    use std::path::Path;
+
     use crate::{
         response::{ApiResponse, ApiResponseResult},
         routes::{ApiError, GetState, api::servers::_server_::GetServer},
@@ -9,13 +11,12 @@ mod get {
     use axum::http::StatusCode;
     use axum_extra::extract::Query;
     use serde::{Deserialize, Serialize};
-    use std::path::{Path, PathBuf};
     use utoipa::ToSchema;
 
     #[derive(ToSchema, Deserialize)]
     pub struct Params {
-        #[serde(default)]
-        pub directory: compact_str::CompactString,
+        #[serde(default, alias = "directory")]
+        pub root: compact_str::CompactString,
         #[serde(default)]
         pub ignored: Vec<compact_str::CompactString>,
 
@@ -26,6 +27,8 @@ mod get {
     #[derive(ToSchema, Serialize)]
     struct Response {
         total: usize,
+        filesystem_writable: bool,
+        filesystem_fast: bool,
         entries: Vec<crate::models::DirectoryEntry>,
     }
 
@@ -70,74 +73,28 @@ mod get {
         };
         let page = data.page.unwrap_or(1);
 
-        let path = match server.filesystem.async_canonicalize(&data.directory).await {
-            Ok(path) => path,
-            Err(_) => PathBuf::from(data.directory),
-        };
-
-        let overrides = if data.ignored.is_empty() {
+        let ignore = if data.ignored.is_empty() {
             None
         } else {
-            let mut override_builder = ignore::overrides::OverrideBuilder::new("/");
+            let mut ignore_builder = ignore::gitignore::GitignoreBuilder::new("/");
 
             for file in data.ignored {
-                override_builder.add(&file).ok();
+                ignore_builder.add_line(None, &file).ok();
             }
 
-            override_builder.build().ok()
+            ignore_builder.build().ok()
         };
 
-        let is_ignored = move |path: &Path, is_dir: bool| {
-            if path == Path::new("/") || path == Path::new("") {
-                return false;
-            }
-
-            overrides
-                .as_ref()
-                .map(|ig| ig.matched(path, is_dir).is_whitelist())
-                .unwrap_or(false)
-        };
-
-        if let Some((backup, rel_path)) = server
+        let (root, filesystem) = server
             .filesystem
-            .backup_fs(&server, &state.backup_manager, &path)
-            .await
-        {
-            if is_ignored(&path, true) || server.filesystem.is_ignored(&path, true).await {
-                return ApiResponse::error("path not a directory")
-                    .with_status(StatusCode::EXPECTATION_FAILED)
-                    .ok();
-            }
+            .resolve_readable_fs(&server, Path::new(&data.root))
+            .await;
 
-            let (total, entries) = match backup
-                .read_dir(rel_path, per_page, page, move |path, is_dir| {
-                    is_ignored(&path, is_dir)
-                })
-                .await
-            {
-                Ok((total, entries)) => (total, entries),
-                Err(err) => {
-                    tracing::error!(
-                        server = %server.uuid,
-                        path = %path.display(),
-                        error = %err,
-                        "failed to list backup directory",
-                    );
-
-                    return ApiResponse::error("failed to list backup directory")
-                        .with_status(StatusCode::EXPECTATION_FAILED)
-                        .ok();
-                }
-            };
-
-            return ApiResponse::json(Response { total, entries }).ok();
-        }
-
-        let metadata = server.filesystem.async_metadata(&path).await;
+        let metadata = filesystem.async_metadata(&root).await;
         if let Ok(metadata) = metadata {
-            if !metadata.is_dir()
-                || is_ignored(&path, metadata.is_dir())
-                || server.filesystem.is_ignored(&path, metadata.is_dir()).await
+            if !metadata.file_type.is_dir()
+                || (filesystem.is_primary_server_fs()
+                    && server.filesystem.is_ignored(&root, true).await)
             {
                 return ApiResponse::error("path not a directory")
                     .with_status(StatusCode::EXPECTATION_FAILED)
@@ -149,66 +106,25 @@ mod get {
                 .ok();
         }
 
-        let mut directory = server.filesystem.async_read_dir(&path).await?;
-
-        let mut directory_entries = Vec::new();
-        let mut other_entries = Vec::new();
-
-        while let Some(Ok((is_dir, entry))) = directory.next_entry().await {
-            let path = path.join(&entry);
-
-            if is_ignored(&path, is_dir) || server.filesystem.is_ignored(&path, is_dir).await {
-                continue;
-            }
-
-            if is_dir {
-                directory_entries.push(entry);
-            } else {
-                other_entries.push(entry);
-            }
-        }
-
-        directory_entries.sort_unstable();
-        other_entries.sort_unstable();
-
-        let total_entries = directory_entries.len() + other_entries.len();
-        let mut entries = Vec::new();
-
-        if let Some(per_page) = per_page {
-            let start = (page - 1) * per_page;
-
-            for entry in directory_entries
-                .into_iter()
-                .chain(other_entries.into_iter())
-                .skip(start)
-                .take(per_page)
-            {
-                let path = path.join(&entry);
-                let metadata = match server.filesystem.async_symlink_metadata(&path).await {
-                    Ok(metadata) => metadata,
-                    Err(_) => continue,
-                };
-
-                entries.push(server.filesystem.to_api_entry(path, metadata).await);
-            }
+        let is_ignored = if filesystem.is_primary_server_fs()
+            && let Some(ignore) = ignore
+        {
+            vec![server.filesystem.get_ignored().await, ignore].into()
+        } else if filesystem.is_primary_server_fs() {
+            server.filesystem.get_ignored().await.into()
         } else {
-            for entry in directory_entries
-                .into_iter()
-                .chain(other_entries.into_iter())
-            {
-                let path = path.join(&entry);
-                let metadata = match server.filesystem.async_symlink_metadata(&path).await {
-                    Ok(metadata) => metadata,
-                    Err(_) => continue,
-                };
+            Default::default()
+        };
 
-                entries.push(server.filesystem.to_api_entry(path, metadata).await);
-            }
-        }
+        let entries = filesystem
+            .async_read_dir(&root, per_page, page, is_ignored)
+            .await?;
 
         ApiResponse::json(Response {
-            total: total_entries,
-            entries,
+            total: entries.total_entries,
+            filesystem_writable: filesystem.is_writable(),
+            filesystem_fast: filesystem.is_fast(),
+            entries: entries.entries,
         })
         .ok()
     }

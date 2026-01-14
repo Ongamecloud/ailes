@@ -10,6 +10,7 @@ use std::{
     io::BufRead,
     ops::{Deref, DerefMut},
     os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
     str::FromStr,
     sync::Arc,
 };
@@ -68,6 +69,9 @@ fn system_root_directory() -> String {
 }
 fn system_log_directory() -> String {
     "/var/log/pterodactyl".to_string()
+}
+fn system_vmount_directory() -> String {
+    "/var/lib/pterodactyl/vmounts".to_string()
 }
 fn system_data() -> String {
     "/var/lib/pterodactyl/volumes".to_string()
@@ -391,6 +395,8 @@ nestify::nest! {
             pub root_directory: String,
             #[serde(default = "system_log_directory")]
             pub log_directory: String,
+            #[serde(default = "system_vmount_directory")]
+            pub vmount_directory: String,
             #[serde(default = "system_data", rename = "data")]
             pub data_directory: String,
             #[serde(default = "system_archive_directory")]
@@ -895,8 +901,25 @@ impl Config {
         ) && !config.docker.delete_container_on_stop
         {
             tracing::warn!(
-                "you have enabled FUSE quota disk limiting, but also disabled deleting containers on stop. This WILL cause issues if you try manually starting things. this setup is not recommended."
+                "you have enabled FUSE quota disk limiting, but also disabled deleting containers on stop. This can cause issues if you try manually starting things. this setup is not recommended."
             );
+        }
+        if matches!(
+            config.system.disk_limiter_mode,
+            crate::server::filesystem::limiter::DiskLimiterMode::FuseQuota
+        ) && std::env::var("OCI_CONTAINER").is_ok()
+        {
+            for _ in 0..5 {
+                tracing::error!(
+                    "you have enabled FUSE quota disk limiting while running in a container. this setup is NOT recommended and WILL cause issues when the container recreates."
+                );
+            }
+
+            tracing::info!("waiting 10 seconds to allow you to read the above message...");
+            if std::env::var("ALLOW_FUSE_QUOTA_CONTAINER_USAGE").is_err() {
+                std::thread::sleep(std::time::Duration::from_secs(10));
+            }
+            tracing::warn!("you are treading on thin ice. proceed at your own risk.");
         }
 
         Ok((Arc::new(config), guard))
@@ -960,6 +983,7 @@ impl Config {
         let directories = vec![
             &self.system.root_directory,
             &self.system.log_directory,
+            &self.system.vmount_directory,
             &self.system.data_directory,
             &self.system.archive_directory,
             &self.system.backup_directory,
@@ -1118,6 +1142,14 @@ impl Config {
         }
 
         Ok(())
+    }
+
+    pub fn vmount_path(&self, server_uuid: uuid::Uuid) -> PathBuf {
+        Path::new(&self.system.vmount_directory).join(server_uuid.to_compact_string())
+    }
+
+    pub fn data_path(&self, server_uuid: uuid::Uuid) -> PathBuf {
+        Path::new(&self.system.data_directory).join(server_uuid.to_compact_string())
     }
 
     pub async fn ensure_network(&self, client: &bollard::Docker) -> Result<(), anyhow::Error> {

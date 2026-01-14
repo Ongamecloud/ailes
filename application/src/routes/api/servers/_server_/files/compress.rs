@@ -3,7 +3,6 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 
 mod post {
     use crate::{
-        io::compression::CompressionType,
         response::{ApiResponse, ApiResponseResult},
         routes::{ApiError, GetState, api::servers::_server_::GetServer},
         server::filesystem::archive::ArchiveFormat,
@@ -11,7 +10,7 @@ mod post {
     use axum::http::StatusCode;
     use serde::{Deserialize, Serialize};
     use std::{
-        path::PathBuf,
+        path::{Path, PathBuf},
         sync::{Arc, atomic::AtomicU64},
     };
     use utoipa::ToSchema;
@@ -56,41 +55,52 @@ mod post {
         server: GetServer,
         axum::Json(data): axum::Json<Payload>,
     ) -> ApiResponseResult {
-        let root = match server.filesystem.async_canonicalize(data.root).await {
-            Ok(path) => path,
-            Err(_) => {
-                return ApiResponse::error("root not found")
-                    .with_status(StatusCode::NOT_FOUND)
-                    .ok();
-            }
-        };
+        let (root, filesystem) = server
+            .filesystem
+            .resolve_readable_fs(&server, Path::new(&data.root))
+            .await;
 
-        let metadata = server.filesystem.async_symlink_metadata(&root).await;
-        if !metadata.map(|m| m.is_dir()).unwrap_or(true) {
+        let metadata = filesystem.async_symlink_metadata(&root).await;
+        if !metadata.map_or(true, |m| m.file_type.is_dir()) {
             return ApiResponse::error("root is not a directory")
                 .with_status(StatusCode::EXPECTATION_FAILED)
                 .ok();
         }
 
-        let file_name = data.name.unwrap_or_else(|| {
+        let archive_name = data.name.unwrap_or_else(|| {
             compact_str::format_compact!(
                 "archive-{}.{}",
                 chrono::Local::now().format("%Y-%m-%dT%H%M%S%z"),
-                match data.format {
-                    ArchiveFormat::Tar => "tar",
-                    ArchiveFormat::TarGz => "tar.gz",
-                    ArchiveFormat::TarXz => "tar.xz",
-                    ArchiveFormat::TarBz2 => "tar.bz2",
-                    ArchiveFormat::TarLz4 => "tar.lz4",
-                    ArchiveFormat::TarZstd => "tar.zst",
-                    ArchiveFormat::Zip => "zip",
-                    ArchiveFormat::SevenZip => "7z",
-                }
+                data.format.extension()
             )
         });
-        let file_name = root.join(file_name);
+        let file_name = root.join(&archive_name);
 
-        if server.filesystem.is_ignored(&file_name, false).await {
+        let parent = match file_name.parent() {
+            Some(parent) => parent,
+            None => {
+                return ApiResponse::error("file has no parent")
+                    .with_status(StatusCode::EXPECTATION_FAILED)
+                    .ok();
+            }
+        };
+
+        let file_name = match file_name.file_name() {
+            Some(name) => name,
+            None => {
+                return ApiResponse::error("invalid file name")
+                    .with_status(StatusCode::EXPECTATION_FAILED)
+                    .ok();
+            }
+        };
+
+        let (destination_root, destination_filesystem) =
+            server.filesystem.resolve_writable_fs(&server, parent).await;
+        let destination_path = destination_root.join(file_name);
+
+        if destination_filesystem.is_primary_server_fs()
+            && server.filesystem.is_ignored(&destination_path, false).await
+        {
             return ApiResponse::error("file not found")
                 .with_status(StatusCode::EXPECTATION_FAILED)
                 .ok();
@@ -104,43 +114,37 @@ mod post {
             .operations
             .add_operation(
                 crate::server::filesystem::operations::FilesystemOperation::Compress {
-                    path: file_name.clone(),
+                    path: PathBuf::from(&data.root),
+                    files: data.files.iter().map(PathBuf::from).collect(),
+                    destination_path: PathBuf::from(&data.root).join(archive_name),
                     progress: progress.clone(),
                     total: total.clone(),
                 },
                 {
                     let root = root.clone();
                     let server = server.0.clone();
-                    let file_name = file_name.clone();
+                    let filesystem = filesystem.clone();
+                    let destination_path = destination_path.clone();
+                    let destination_filesystem = destination_filesystem.clone();
 
                     async move {
                         let ignored = server.filesystem.get_ignored().await;
-                        let writer = tokio::task::spawn_blocking({
-                            let server = server.clone();
-
-                            move || {
-                                crate::server::filesystem::writer::FileSystemWriter::new(
-                                    server, &file_name, None, None,
-                                )
-                            }
+                        let writer = tokio::task::spawn_blocking(move || {
+                            destination_filesystem.create_seekable_file(&destination_path)
                         })
                         .await??;
 
                         let mut total_size = 0;
                         for file in &data.files {
-                            if let Ok(metadata) = server.filesystem.async_metadata(file).await {
-                                if metadata.is_dir() {
-                                    total_size += server
-                                        .filesystem
-                                        .disk_usage
-                                        .read()
-                                        .await
-                                        .get_size(&root.join(file))
-                                        .map_or(0, |s| s.get_apparent());
-                                } else {
-                                    total_size += metadata.len();
-                                }
-                            }
+                            let directory_entry = match filesystem
+                                .async_directory_entry_buffer(&root.join(file), &[])
+                                .await
+                            {
+                                Ok(entry) => entry,
+                                Err(_) => continue,
+                            };
+
+                            total_size += directory_entry.size;
                         }
 
                         total.store(total_size, std::sync::atomic::Ordering::Relaxed);
@@ -149,6 +153,7 @@ mod post {
                             ArchiveFormat::Tar
                             | ArchiveFormat::TarGz
                             | ArchiveFormat::TarXz
+                            | ArchiveFormat::TarLzip
                             | ArchiveFormat::TarBz2
                             | ArchiveFormat::TarLz4
                             | ArchiveFormat::TarZstd => {
@@ -158,17 +163,9 @@ mod post {
                                     &root,
                                     data.files.into_iter().map(PathBuf::from).collect(),
                                     Some(progress),
-                                    vec![ignored],
+                                    ignored.into(),
                                     crate::server::filesystem::archive::create::CreateTarOptions {
-                                        compression_type: match data.format {
-                                            ArchiveFormat::Tar => CompressionType::None,
-                                            ArchiveFormat::TarGz => CompressionType::Gz,
-                                            ArchiveFormat::TarXz => CompressionType::Xz,
-                                            ArchiveFormat::TarBz2 => CompressionType::Bz2,
-                                            ArchiveFormat::TarLz4 => CompressionType::Lz4,
-                                            ArchiveFormat::TarZstd => CompressionType::Zstd,
-                                            _ => unreachable!(),
-                                        },
+                                        compression_type: data.format.compression_format(),
                                         compression_level: state
                                             .config
                                             .system
@@ -186,7 +183,7 @@ mod post {
                                     &root,
                                     data.files.into_iter().map(PathBuf::from).collect(),
                                     Some(progress),
-                                    vec![ignored],
+                                    ignored.into(),
                                     crate::server::filesystem::archive::create::CreateZipOptions {
                                         compression_level: state
                                             .config
@@ -204,7 +201,7 @@ mod post {
                                     &root,
                                     data.files.into_iter().map(PathBuf::from).collect(),
                                     Some(progress),
-                                    vec![ignored],
+                                    ignored.into(),
                                     crate::server::filesystem::archive::create::Create7zOptions {
                                         compression_level: state
                                             .config
@@ -258,9 +255,12 @@ mod post {
                 }
             }
 
-            let metadata = server.filesystem.async_symlink_metadata(&file_name).await?;
-
-            ApiResponse::json(server.filesystem.to_api_entry(file_name, metadata).await).ok()
+            ApiResponse::json(
+                destination_filesystem
+                    .async_directory_entry(&destination_path)
+                    .await?,
+            )
+            .ok()
         } else {
             ApiResponse::json(Response { identifier })
                 .with_status(StatusCode::ACCEPTED)

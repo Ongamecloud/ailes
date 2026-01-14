@@ -2,17 +2,19 @@ use super::State;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
 mod get {
+    use std::path::Path;
+
     use crate::{
+        io::compression::reader::AsyncCompressionReader,
         response::{ApiResponse, ApiResponseResult},
-        routes::{ApiError, GetState, api::servers::_server_::GetServer},
+        routes::{ApiError, api::servers::_server_::GetServer},
     };
     use axum::{
         extract::Query,
         http::{HeaderMap, StatusCode},
     };
     use serde::Deserialize;
-    use std::path::PathBuf;
-    use std::str::FromStr;
+    use tokio::io::{AsyncBufReadExt, BufReader};
     use utoipa::ToSchema;
 
     #[derive(ToSchema, Deserialize)]
@@ -49,75 +51,33 @@ mod get {
             description = "The maximum size of the file to return. If the file is larger than this, an error will be returned.",
         ),
     ))]
-    pub async fn route(
-        state: GetState,
-        server: GetServer,
-        Query(data): Query<Params>,
-    ) -> ApiResponseResult {
-        let path = match server.filesystem.async_canonicalize(&data.file).await {
-            Ok(path) => path,
-            Err(_) => PathBuf::from(data.file),
-        };
-
-        let file_name = match path.file_name() {
-            Some(name) => name.to_string_lossy().to_string(),
+    pub async fn route(server: GetServer, Query(data): Query<Params>) -> ApiResponseResult {
+        let parent = match Path::new(&data.file).parent() {
+            Some(parent) => parent,
             None => {
-                return ApiResponse::error("file not found")
-                    .with_status(StatusCode::NOT_FOUND)
+                return ApiResponse::error("file has no parent")
+                    .with_status(StatusCode::EXPECTATION_FAILED)
                     .ok();
             }
         };
 
-        if let Some((backup, path)) = server
-            .filesystem
-            .backup_fs(&server, &state.backup_manager, &path)
-            .await
-        {
-            match backup.read_file(path.clone(), None).await {
-                Ok((headers, reader)) => {
-                    let size = u64::from_str(headers.get("Content-Length").unwrap().to_str()?)?;
-                    let mut headers = HeaderMap::new();
-
-                    if data.max_size.is_some_and(|s| size > s) {
-                        return ApiResponse::error("file size exceeds maximum allowed size")
-                            .with_status(StatusCode::PAYLOAD_TOO_LARGE)
-                            .ok();
-                    }
-
-                    headers.insert("Content-Length", size.into());
-                    if data.download {
-                        headers.insert(
-                            "Content-Disposition",
-                            format!(
-                                "attachment; filename={}",
-                                serde_json::Value::String(file_name)
-                            )
-                            .parse()?,
-                        );
-                        headers.insert("Content-Type", "application/octet-stream".parse()?);
-                    }
-
-                    return ApiResponse::new_stream(reader).with_headers(headers).ok();
-                }
-                Err(err) => {
-                    tracing::error!(
-                        server = %server.uuid,
-                        path = %path.display(),
-                        error = %err,
-                        "failed to get backup file contents",
-                    );
-
-                    return ApiResponse::error("failed to get backup file contents")
-                        .with_status(StatusCode::EXPECTATION_FAILED)
-                        .ok();
-                }
+        let file_name = match Path::new(&data.file).file_name() {
+            Some(name) => name,
+            None => {
+                return ApiResponse::error("invalid file name")
+                    .with_status(StatusCode::EXPECTATION_FAILED)
+                    .ok();
             }
-        }
+        };
 
-        let metadata = match server.filesystem.async_metadata(&path).await {
+        let (root, filesystem) = server.filesystem.resolve_readable_fs(&server, parent).await;
+        let path = root.join(file_name);
+
+        let metadata = match filesystem.async_metadata(&path).await {
             Ok(metadata) => {
-                if !metadata.is_file()
-                    || server.filesystem.is_ignored(&path, metadata.is_dir()).await
+                if !metadata.file_type.is_file()
+                    || (filesystem.is_primary_server_fs()
+                        && server.filesystem.is_ignored(&path, false).await)
                 {
                     return ApiResponse::error("file not found")
                         .with_status(StatusCode::NOT_FOUND)
@@ -133,58 +93,46 @@ mod get {
             }
         };
 
-        if data.max_size.is_some_and(|s| metadata.len() > s) {
+        if data.max_size.is_some_and(|s| metadata.size > s) {
             return ApiResponse::error("file size exceeds maximum allowed size")
                 .with_status(StatusCode::PAYLOAD_TOO_LARGE)
                 .ok();
         }
 
-        let mut file =
-            match crate::server::filesystem::archive::Archive::open(server.0.clone(), path.clone())
-                .await
-            {
-                Ok(file) => file,
-                Err(_) => {
-                    return ApiResponse::error("file not found")
-                        .with_status(StatusCode::NOT_FOUND)
-                        .ok();
-                }
-            };
+        let file_read = filesystem.async_read_file(&path, None).await?;
+        let mut reader = BufReader::new(file_read.reader);
 
-        let size = match file.estimated_size().await {
-            Some(size) => size,
-            None => {
-                return ApiResponse::error("unable to retrieve estimated file size")
-                    .with_status(StatusCode::EXPECTATION_FAILED)
-                    .ok();
-            }
-        };
+        let header = reader.fill_buf().await?;
+        let (compression_type, archive_type) =
+            crate::server::filesystem::archive::Archive::detect(path, header);
+        if !matches!(
+            archive_type,
+            crate::server::filesystem::archive::ArchiveType::None
+        ) {
+            return ApiResponse::error("file is an archive, cannot view contents")
+                .with_status(StatusCode::EXPECTATION_FAILED)
+                .ok();
+        }
 
-        let reader = match file.reader().await {
-            Ok(reader) => reader,
-            Err(err) => {
-                tracing::error!(
-                    server = %server.uuid,
-                    path = %path.display(),
-                    "failed to open file for reading: {:#?}",
-                    err,
-                );
-
-                return ApiResponse::error("unable to open file for reading")
-                    .with_status(StatusCode::EXPECTATION_FAILED)
-                    .ok();
-            }
-        };
+        let reader = AsyncCompressionReader::new(
+            tokio_util::io::SyncIoBridge::new(reader),
+            compression_type,
+        );
 
         let mut headers = HeaderMap::new();
 
-        headers.insert("Content-Length", size.into());
+        if matches!(
+            compression_type,
+            crate::io::compression::CompressionType::None
+        ) {
+            headers.insert("Content-Length", metadata.size.into());
+        }
         if data.download {
             headers.insert(
                 "Content-Disposition",
                 format!(
                     "attachment; filename={}",
-                    serde_json::Value::String(file_name)
+                    serde_json::Value::String(file_name.to_string_lossy().to_string())
                 )
                 .parse()?,
             );

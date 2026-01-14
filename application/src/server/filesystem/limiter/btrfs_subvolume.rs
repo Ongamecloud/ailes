@@ -185,8 +185,11 @@ impl<'a> DiskLimiterExt for BtrfsSubvolumeLimiter<'a> {
 
         let mount_point = match get_mount_point(&self.filesystem.base_path).await {
             Ok(mp) => mp,
-            Err(e) => {
-                tracing::warn!("failed to resolve mount point, falling back to path: {}", e);
+            Err(err) => {
+                tracing::warn!(
+                    "failed to resolve mount point, falling back to path: {}",
+                    err
+                );
                 self.filesystem.base_path.clone()
             }
         };

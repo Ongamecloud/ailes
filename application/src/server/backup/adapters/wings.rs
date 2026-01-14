@@ -1,48 +1,37 @@
 use crate::{
     io::{
-        compression::{reader::CompressionReader, writer::CompressionWriter},
-        counting_reader::CountingReader,
-        limited_reader::LimitedReader,
-        limited_writer::LimitedWriter,
+        compression::reader::CompressionReader, counting_reader::CountingReader,
+        limited_reader::LimitedReader, limited_writer::LimitedWriter,
         range_reader::AsyncRangeReader,
     },
-    models::DirectoryEntry,
     remote::backups::RawServerBackup,
     response::ApiResponse,
     server::{
-        backup::{
-            Backup, BackupBrowseExt, BackupCleanExt, BackupCreateExt, BackupExt, BackupFindExt,
-            BrowseBackup,
-        },
+        backup::{Backup, BackupCleanExt, BackupCreateExt, BackupExt, BackupFindExt},
         filesystem::{
             archive::{
                 ArchiveFormat, StreamableArchiveFormat, multi_reader::MultiReader,
                 zip_entry_get_modified_time,
             },
-            encode_mode,
+            virtualfs::{
+                ByteRange, VirtualReadableFilesystem,
+                archive::{seven_zip::VirtualSevenZipArchive, zip::VirtualZipArchive},
+            },
         },
     },
 };
-use axum::{
-    http::{HeaderMap, HeaderValue, StatusCode},
-    response::IntoResponse,
-};
-use axum_extra::{
-    TypedHeader,
-    headers::{ContentRange, Range},
-};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use cap_std::fs::{Permissions, PermissionsExt};
-use chrono::{Datelike, Timelike};
 use sha1::Digest;
 use std::{
-    io::{Read, Seek, Write},
+    io::Write,
     path::{Path, PathBuf},
     sync::{
         Arc, RwLock,
         atomic::{AtomicU64, AtomicUsize, Ordering},
     },
 };
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncReadExt;
 
 pub struct WingsBackup {
     uuid: uuid::Uuid,
@@ -134,13 +123,11 @@ impl BackupCreateExt for WingsBackup {
             let ignore = ignore.clone();
 
             async move {
-                let ignored = [ignore];
-
                 let mut walker = server
                     .filesystem
                     .async_walk_dir(Path::new(""))
                     .await?
-                    .with_ignored(&ignored);
+                    .with_is_ignored(ignore.into());
                 let mut total_files = 0;
                 while let Some(Ok((_, path))) = walker.next_entry().await {
                     let metadata = match server.filesystem.async_symlink_metadata(&path).await {
@@ -169,6 +156,7 @@ impl BackupCreateExt for WingsBackup {
                 ArchiveFormat::Tar
                 | ArchiveFormat::TarGz
                 | ArchiveFormat::TarXz
+                | ArchiveFormat::TarLzip
                 | ArchiveFormat::TarBz2
                 | ArchiveFormat::TarLz4
                 | ArchiveFormat::TarZstd => {
@@ -178,7 +166,7 @@ impl BackupCreateExt for WingsBackup {
                         Path::new(""),
                         sources.into_iter().map(PathBuf::from).collect(),
                         Some(progress),
-                        vec![ignore],
+                        ignore.into(),
                         crate::server::filesystem::archive::create::CreateTarOptions {
                             compression_type: server
                                 .app_state
@@ -206,7 +194,7 @@ impl BackupCreateExt for WingsBackup {
                         Path::new(""),
                         sources.into_iter().map(PathBuf::from).collect(),
                         Some(progress),
-                        vec![ignore],
+                        ignore.into(),
                         crate::server::filesystem::archive::create::CreateZipOptions {
                             compression_level: server
                                 .app_state
@@ -225,7 +213,7 @@ impl BackupCreateExt for WingsBackup {
                         Path::new(""),
                         sources.into_iter().map(PathBuf::from).collect(),
                         Some(progress),
-                        vec![ignore],
+                        ignore.into(),
                         crate::server::filesystem::archive::create::Create7zOptions {
                             compression_level: server
                                 .app_state
@@ -293,14 +281,14 @@ impl BackupExt for WingsBackup {
         &self,
         _config: &Arc<crate::config::Config>,
         _archive_format: StreamableArchiveFormat,
-        range: Option<TypedHeader<Range>>,
+        range: Option<ByteRange>,
     ) -> Result<ApiResponse, anyhow::Error> {
         let file = tokio::fs::File::open(&self.path).await?;
         let metadata = file.metadata().await?;
 
         let mut headers = HeaderMap::new();
         headers.insert(
-            "Content-Disposition",
+            axum::http::header::CONTENT_DISPOSITION,
             HeaderValue::try_from(format!(
                 "attachment; filename={}.{}",
                 self.uuid,
@@ -308,34 +296,28 @@ impl BackupExt for WingsBackup {
             ))?,
         );
         headers.insert(
-            "Content-Type",
+            axum::http::header::CONTENT_TYPE,
             HeaderValue::from_static(self.format.mime_type()),
         );
-        headers.insert("Accept-Ranges", "bytes".parse()?);
+        headers.insert(axum::http::header::ACCEPT_RANGES, "bytes".parse()?);
 
-        Ok(
-            if let Some(range) = range
-                && let Some(range_bounds) = range.satisfiable_ranges(metadata.len()).next()
-            {
-                let reader = AsyncRangeReader::new(file, range_bounds, metadata.len()).await?;
+        Ok(if let Some(range) = range {
+            let reader = AsyncRangeReader::new(file, range, metadata.len()).await?;
 
-                headers.insert("Content-Length", reader.len().into());
-                headers.extend(
-                    TypedHeader(ContentRange::bytes(range_bounds, Some(metadata.len()))?)
-                        .into_response()
-                        .headers_mut()
-                        .drain(),
-                );
+            headers.insert(axum::http::header::CONTENT_LENGTH, reader.len().into());
+            headers.insert(
+                axum::http::header::CONTENT_RANGE,
+                range.to_header_value(metadata.len()),
+            );
 
-                ApiResponse::new_stream(reader)
-                    .with_headers(headers)
-                    .with_status(StatusCode::PARTIAL_CONTENT)
-            } else {
-                headers.insert("Content-Length", metadata.len().into());
+            ApiResponse::new_stream(reader)
+                .with_headers(headers)
+                .with_status(StatusCode::PARTIAL_CONTENT)
+        } else {
+            headers.insert(axum::http::header::CONTENT_LENGTH, metadata.len().into());
 
-                ApiResponse::new_stream(file).with_headers(headers)
-            },
-        )
+            ApiResponse::new_stream(file).with_headers(headers)
+        })
     }
 
     async fn restore(
@@ -351,6 +333,7 @@ impl BackupExt for WingsBackup {
             ArchiveFormat::Tar
             | ArchiveFormat::TarGz
             | ArchiveFormat::TarXz
+            | ArchiveFormat::TarLzip
             | ArchiveFormat::TarBz2
             | ArchiveFormat::TarLz4
             | ArchiveFormat::TarZstd => {
@@ -791,38 +774,37 @@ impl BackupExt for WingsBackup {
         Ok(())
     }
 
-    async fn browse(&self, server: &crate::server::Server) -> Result<BrowseBackup, anyhow::Error> {
+    async fn browse(
+        &self,
+        server: &crate::server::Server,
+    ) -> Result<Arc<dyn VirtualReadableFilesystem>, anyhow::Error> {
         match self.format {
             ArchiveFormat::Zip => {
                 let reader = Arc::new(tokio::fs::File::open(&self.path).await?.into_std().await);
-                let archive =
-                    tokio::task::spawn_blocking(move || zip::ZipArchive::new(reader)).await??;
+                let archive = tokio::task::spawn_blocking(move || {
+                    zip::ZipArchive::new(MultiReader::new(reader)?)
+                })
+                .await??;
 
-                Ok(BrowseBackup::Wings(BrowseWingsBackup::Zip(
-                    ZipBackupArchive {
-                        server: server.clone(),
-                        archive,
-                        mime_cache: Arc::new(crate::server::filesystem::mime::MimeCache::default()),
-                    },
-                )))
+                Ok(Arc::new(VirtualZipArchive::new(server.clone(), archive)))
             }
             ArchiveFormat::SevenZip => {
                 let reader = Arc::new(tokio::fs::File::open(&self.path).await?.into_std().await);
                 let password = sevenz_rust2::Password::empty();
-                let archive = tokio::task::spawn_blocking({
-                    let mut reader = reader.clone();
+                let (reader, archive) = tokio::task::spawn_blocking(move || {
+                    let mut reader = MultiReader::new(reader)?;
 
-                    move || sevenz_rust2::Archive::read(&mut reader, &password)
+                    Ok::<_, sevenz_rust2::Error>((
+                        reader.clone(),
+                        sevenz_rust2::Archive::read(&mut reader, &password)?,
+                    ))
                 })
                 .await??;
 
-                Ok(BrowseBackup::Wings(BrowseWingsBackup::SevenZip(
-                    SevenZipBackupArchive {
-                        server: server.clone(),
-                        archive: Arc::new(archive),
-                        mime_cache: Arc::new(crate::server::filesystem::mime::MimeCache::default()),
-                        reader,
-                    },
+                Ok(Arc::new(VirtualSevenZipArchive::new(
+                    server.clone(),
+                    Arc::new(archive),
+                    reader,
                 )))
             }
             _ => Err(anyhow::anyhow!(
@@ -843,1255 +825,5 @@ impl BackupCleanExt for WingsBackup {
         tokio::fs::remove_file(&file_name).await?;
 
         Ok(())
-    }
-}
-
-#[derive(Clone)]
-pub struct ZipBackupArchive {
-    pub server: crate::server::Server,
-    pub archive: zip::ZipArchive<Arc<std::fs::File>>,
-    pub mime_cache: Arc<crate::server::filesystem::mime::MimeCache<usize>>,
-}
-
-impl ZipBackupArchive {
-    fn zip_entry_to_directory_entry(
-        path: &Path,
-        entry_index: usize,
-        mime_cache: &crate::server::filesystem::mime::MimeCache<usize>,
-        sizes: &[(u64, PathBuf)],
-        mut entry: zip::read::ZipFile<impl Read + Seek>,
-    ) -> DirectoryEntry {
-        let size = if entry.is_dir() {
-            sizes
-                .iter()
-                .filter(|(_, name)| name.starts_with(path))
-                .map(|(size, _)| *size)
-                .sum()
-        } else {
-            entry.size()
-        };
-
-        let mime_type = if entry.is_dir() {
-            "inode/directory"
-        } else if entry.is_symlink() {
-            "inode/symlink"
-        } else if let Some(mime_type) = mime_cache.sync_get_mime(&entry_index) {
-            mime_type
-        } else {
-            let mut buffer = [0; 64];
-            let buffer = if entry.read(&mut buffer).is_err() {
-                None
-            } else {
-                Some(&buffer)
-            };
-
-            let mime_type = if let Some(buffer) = buffer {
-                if let Some(mime) = infer::get(buffer) {
-                    mime.mime_type()
-                } else if let Some(mime) = new_mime_guess::from_path(entry.name()).iter_raw().next()
-                {
-                    mime
-                } else if crate::utils::is_valid_utf8_slice(buffer) || buffer.is_empty() {
-                    "text/plain"
-                } else {
-                    "application/octet-stream"
-                }
-            } else {
-                "application/octet-stream"
-            };
-
-            mime_cache.sync_insert_mime(entry_index, mime_type);
-
-            mime_type
-        };
-
-        let mode = entry
-            .unix_mode()
-            .unwrap_or(if entry.is_dir() { 0o755 } else { 0o644 });
-
-        DirectoryEntry {
-            name: path
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into(),
-            created: chrono::DateTime::default(),
-            modified: crate::server::filesystem::archive::zip_entry_get_modified_time(&entry)
-                .map(|dt| dt.into_std().into())
-                .unwrap_or_default(),
-            mode: encode_mode(mode),
-            mode_bits: compact_str::format_compact!("{:o}", mode & 0o777),
-            size,
-            directory: entry.is_dir(),
-            file: entry.is_file(),
-            symlink: entry.is_symlink(),
-            mime: mime_type,
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl BackupBrowseExt for ZipBackupArchive {
-    async fn read_dir(
-        &self,
-        path: PathBuf,
-        per_page: Option<usize>,
-        page: usize,
-        is_ignored: impl Fn(PathBuf, bool) -> bool + Send + Sync + 'static,
-    ) -> Result<(usize, Vec<crate::models::DirectoryEntry>), anyhow::Error> {
-        let mut archive = self.archive.clone();
-        let mime_cache = self.mime_cache.clone();
-
-        let entries = tokio::task::spawn_blocking(
-            move || -> Result<(usize, Vec<DirectoryEntry>), anyhow::Error> {
-                let names = archive
-                    .file_names()
-                    .map(|name| name.to_string())
-                    .collect::<Vec<_>>();
-                let sizes = names
-                    .into_iter()
-                    .map(|name| {
-                        (
-                            archive
-                                .by_name(&name)
-                                .map(|file| file.size())
-                                .unwrap_or_default(),
-                            PathBuf::from(name),
-                        )
-                    })
-                    .collect::<Vec<_>>();
-
-                let mut directory_entries = Vec::new();
-                let mut other_entries = Vec::new();
-
-                let path_len = path.components().count();
-                for i in 0..archive.len() {
-                    let entry = archive.by_index(i)?;
-                    let name = match entry.enclosed_name() {
-                        Some(name) => name,
-                        None => continue,
-                    };
-
-                    let name_len = name.components().count();
-                    if name_len < path_len
-                        || !name.starts_with(&path)
-                        || name == path
-                        || name_len > path_len + 1
-                    {
-                        continue;
-                    }
-
-                    if is_ignored(name, entry.is_dir()) {
-                        continue;
-                    }
-
-                    if entry.is_dir() {
-                        directory_entries.push((i, entry.name().to_string()));
-                    } else {
-                        other_entries.push((i, entry.name().to_string()));
-                    }
-                }
-
-                directory_entries.sort_unstable_by(|a, b| a.1.cmp(&b.1));
-                other_entries.sort_unstable_by(|a, b| a.1.cmp(&b.1));
-
-                let total_entries = directory_entries.len() + other_entries.len();
-                let mut entries = Vec::new();
-
-                if let Some(per_page) = per_page {
-                    let start = (page - 1) * per_page;
-
-                    for (entry_index, _) in directory_entries
-                        .into_iter()
-                        .chain(other_entries.into_iter())
-                        .skip(start)
-                        .take(per_page)
-                    {
-                        let entry = archive.by_index(entry_index)?;
-                        let entry_path = match entry.enclosed_name() {
-                            Some(name) => name,
-                            None => continue,
-                        };
-
-                        entries.push(Self::zip_entry_to_directory_entry(
-                            &entry_path,
-                            entry_index,
-                            &mime_cache,
-                            &sizes,
-                            entry,
-                        ));
-                    }
-                } else {
-                    for (entry_index, _) in directory_entries
-                        .into_iter()
-                        .chain(other_entries.into_iter())
-                    {
-                        let entry = archive.by_index(entry_index)?;
-                        let entry_path = match entry.enclosed_name() {
-                            Some(name) => name,
-                            None => continue,
-                        };
-
-                        entries.push(Self::zip_entry_to_directory_entry(
-                            &entry_path,
-                            entry_index,
-                            &mime_cache,
-                            &sizes,
-                            entry,
-                        ));
-                    }
-                }
-
-                Ok((total_entries, entries))
-            },
-        )
-        .await??;
-
-        Ok(entries)
-    }
-
-    async fn read_file(
-        &self,
-        path: PathBuf,
-        _range: Option<TypedHeader<Range>>,
-    ) -> Result<(HeaderMap, Box<dyn tokio::io::AsyncRead + Unpin + Send>), anyhow::Error> {
-        let mut archive = self.archive.clone();
-
-        let size = archive.by_name(&path.to_string_lossy())?.size();
-        let (duplex_reader, mut writer) = tokio::io::duplex(crate::BUFFER_SIZE);
-
-        crate::spawn_blocking_handled(move || -> Result<(), anyhow::Error> {
-            let runtime = tokio::runtime::Handle::current();
-            let mut entry = archive.by_name(&path.to_string_lossy())?;
-
-            let mut buffer = vec![0; crate::BUFFER_SIZE];
-            loop {
-                match entry.read(&mut buffer) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        if runtime.block_on(writer.write_all(&buffer[..n])).is_err() {
-                            break;
-                        }
-                    }
-                    Err(err) => {
-                        tracing::error!("error reading from zip entry: {:?}", err);
-                        break;
-                    }
-                }
-            }
-
-            Ok(())
-        });
-
-        let mut headers = HeaderMap::new();
-        headers.insert("Content-Length", size.into());
-
-        Ok((headers, Box::new(duplex_reader)))
-    }
-
-    async fn read_directory_archive(
-        &self,
-        path: PathBuf,
-        archive_format: StreamableArchiveFormat,
-    ) -> Result<tokio::io::DuplexStream, anyhow::Error> {
-        let mut archive = self.archive.clone();
-
-        let (duplex_reader, writer) = tokio::io::duplex(crate::BUFFER_SIZE);
-        let compression_level = self
-            .server
-            .app_state
-            .config
-            .system
-            .backups
-            .compression_level;
-
-        match archive_format {
-            StreamableArchiveFormat::Zip => {
-                crate::spawn_blocking_handled(move || -> Result<(), anyhow::Error> {
-                    let writer = tokio_util::io::SyncIoBridge::new(writer);
-                    let mut zip = zip::ZipWriter::new_stream(writer);
-
-                    for i in 0..archive.len() {
-                        let entry = archive.by_index(i)?;
-                        let name = match entry.enclosed_name() {
-                            Some(name) => name,
-                            None => continue,
-                        };
-
-                        let name = match name.strip_prefix(&path) {
-                            Ok(name) => name,
-                            Err(_) => continue,
-                        };
-
-                        if name.components().count() == 0 {
-                            continue;
-                        }
-
-                        zip.raw_copy_file(entry)?;
-                    }
-
-                    let mut inner = zip.finish()?;
-                    inner.flush()?;
-
-                    Ok(())
-                });
-            }
-            _ => {
-                let writer = CompressionWriter::new(
-                    tokio_util::io::SyncIoBridge::new(writer),
-                    archive_format.compression_format(),
-                    compression_level,
-                    self.server.app_state.config.api.file_compression_threads,
-                );
-
-                crate::spawn_blocking_handled(move || -> Result<(), anyhow::Error> {
-                    let mut tar = tar::Builder::new(writer);
-                    tar.mode(tar::HeaderMode::Complete);
-
-                    for i in 0..archive.len() {
-                        let entry = archive.by_index(i)?;
-                        let name = match entry.enclosed_name() {
-                            Some(name) => name,
-                            None => continue,
-                        };
-
-                        let name = match name.strip_prefix(&path) {
-                            Ok(name) => name,
-                            Err(_) => continue,
-                        };
-
-                        if name.components().count() == 0 {
-                            continue;
-                        }
-
-                        let mut entry_header = tar::Header::new_gnu();
-                        entry_header.set_size(0);
-                        if let Some(mode) = entry.unix_mode() {
-                            entry_header.set_mode(mode);
-                        }
-                        entry_header.set_mtime(
-                            zip_entry_get_modified_time(&entry)
-                                .map(|dt| {
-                                    dt.into_std()
-                                        .duration_since(std::time::UNIX_EPOCH)
-                                        .unwrap_or_default()
-                                        .as_secs()
-                                })
-                                .unwrap_or_default(),
-                        );
-
-                        if entry.is_dir() {
-                            entry_header.set_entry_type(tar::EntryType::Directory);
-
-                            tar.append_data(&mut entry_header, name, std::io::empty())?;
-                        } else if entry.is_file() {
-                            entry_header.set_entry_type(tar::EntryType::Regular);
-                            entry_header.set_size(entry.size());
-
-                            tar.append_data(&mut entry_header, name, entry)?;
-                        } else if entry.is_symlink() && (1..=2048).contains(&entry.size()) {
-                            entry_header.set_entry_type(tar::EntryType::Symlink);
-
-                            let link_name = std::io::read_to_string(entry)?;
-                            tar.append_link(&mut entry_header, name, link_name)?;
-                        }
-                    }
-
-                    tar.finish()?;
-                    let mut inner = tar.into_inner()?.finish()?;
-                    inner.flush()?;
-
-                    Ok(())
-                });
-            }
-        }
-
-        Ok(duplex_reader)
-    }
-
-    async fn read_files_archive(
-        &self,
-        path: PathBuf,
-        file_paths: Vec<PathBuf>,
-        archive_format: StreamableArchiveFormat,
-    ) -> Result<tokio::io::DuplexStream, anyhow::Error> {
-        let mut archive = self.archive.clone();
-
-        let (duplex_reader, writer) = tokio::io::duplex(crate::BUFFER_SIZE);
-        let compression_level = self
-            .server
-            .app_state
-            .config
-            .system
-            .backups
-            .compression_level;
-
-        match archive_format {
-            StreamableArchiveFormat::Zip => {
-                crate::spawn_blocking_handled(move || -> Result<(), anyhow::Error> {
-                    let writer = tokio_util::io::SyncIoBridge::new(writer);
-                    let mut zip = zip::ZipWriter::new_stream(writer);
-
-                    for i in 0..archive.len() {
-                        let entry = archive.by_index(i)?;
-                        let name = match entry.enclosed_name() {
-                            Some(name) => name,
-                            None => continue,
-                        };
-
-                        let name = match name.strip_prefix(&path) {
-                            Ok(name) => name,
-                            Err(_) => continue,
-                        };
-
-                        if !file_paths.iter().any(|p| name.starts_with(p)) {
-                            continue;
-                        }
-
-                        if name.components().count() == 0 {
-                            continue;
-                        }
-
-                        zip.raw_copy_file(entry)?;
-                    }
-
-                    let mut inner = zip.finish()?;
-                    inner.flush()?;
-
-                    Ok(())
-                });
-            }
-            _ => {
-                let writer = CompressionWriter::new(
-                    tokio_util::io::SyncIoBridge::new(writer),
-                    archive_format.compression_format(),
-                    compression_level,
-                    self.server.app_state.config.api.file_compression_threads,
-                );
-
-                crate::spawn_blocking_handled(move || -> Result<(), anyhow::Error> {
-                    let mut tar = tar::Builder::new(writer);
-                    tar.mode(tar::HeaderMode::Complete);
-
-                    for i in 0..archive.len() {
-                        let entry = archive.by_index(i)?;
-                        let name = match entry.enclosed_name() {
-                            Some(name) => name,
-                            None => continue,
-                        };
-
-                        let name = match name.strip_prefix(&path) {
-                            Ok(name) => name,
-                            Err(_) => continue,
-                        };
-
-                        if !file_paths.iter().any(|p| name.starts_with(p)) {
-                            continue;
-                        }
-
-                        if name.components().count() == 0 {
-                            continue;
-                        }
-
-                        let mut entry_header = tar::Header::new_gnu();
-                        entry_header.set_size(0);
-                        if let Some(mode) = entry.unix_mode() {
-                            entry_header.set_mode(mode);
-                        }
-                        entry_header.set_mtime(
-                            zip_entry_get_modified_time(&entry)
-                                .map(|dt| {
-                                    dt.into_std()
-                                        .duration_since(std::time::UNIX_EPOCH)
-                                        .unwrap_or_default()
-                                        .as_secs()
-                                })
-                                .unwrap_or_default(),
-                        );
-
-                        if entry.is_dir() {
-                            entry_header.set_entry_type(tar::EntryType::Directory);
-
-                            tar.append_data(&mut entry_header, name, std::io::empty())?;
-                        } else if entry.is_file() {
-                            entry_header.set_entry_type(tar::EntryType::Regular);
-                            entry_header.set_size(entry.size());
-
-                            tar.append_data(&mut entry_header, name, entry)?;
-                        } else if entry.is_symlink() && (1..=2048).contains(&entry.size()) {
-                            entry_header.set_entry_type(tar::EntryType::Symlink);
-
-                            let link_name = std::io::read_to_string(entry)?;
-                            tar.append_link(&mut entry_header, name, link_name)?;
-                        }
-                    }
-
-                    tar.finish()?;
-                    let mut inner = tar.into_inner()?.finish()?;
-                    inner.flush()?;
-
-                    Ok(())
-                });
-            }
-        }
-
-        Ok(duplex_reader)
-    }
-}
-
-#[derive(Clone)]
-pub struct SevenZipBackupArchive {
-    pub server: crate::server::Server,
-    pub archive: Arc<sevenz_rust2::Archive>,
-    pub mime_cache: Arc<crate::server::filesystem::mime::MimeCache<usize>>,
-    pub reader: Arc<std::fs::File>,
-}
-
-impl SevenZipBackupArchive {
-    fn seven_zip_entry_to_directory_entry(
-        path: &Path,
-        entry_index: usize,
-        mime_cache: &crate::server::filesystem::mime::MimeCache<usize>,
-        sizes: &[(u64, PathBuf)],
-        entry: &sevenz_rust2::ArchiveEntry,
-        reader: &mut dyn Read,
-    ) -> DirectoryEntry {
-        let size = if entry.is_directory() {
-            sizes
-                .iter()
-                .filter(|(_, name)| name.starts_with(path))
-                .map(|(size, _)| *size)
-                .sum()
-        } else {
-            entry.size()
-        };
-
-        let mime_type = if entry.is_directory() {
-            "inode/directory"
-        } else if let Some(mime_type) = mime_cache.sync_get_mime(&entry_index) {
-            mime_type
-        } else {
-            let mut buffer = [0; 64];
-            let buffer = if reader.read(&mut buffer).is_err() {
-                None
-            } else {
-                Some(&buffer)
-            };
-
-            let mime_type = if let Some(buffer) = buffer {
-                if let Some(mime) = infer::get(buffer) {
-                    mime.mime_type()
-                } else if let Some(mime) = new_mime_guess::from_path(entry.name()).iter_raw().next()
-                {
-                    mime
-                } else if crate::utils::is_valid_utf8_slice(buffer) || buffer.is_empty() {
-                    "text/plain"
-                } else {
-                    "application/octet-stream"
-                }
-            } else {
-                "application/octet-stream"
-            };
-
-            mime_cache.sync_insert_mime(entry_index, mime_type);
-
-            mime_type
-        };
-
-        let mode = if entry.is_directory() { 0o755 } else { 0o644 };
-
-        DirectoryEntry {
-            name: path
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into(),
-            created: if entry.has_creation_date {
-                std::time::SystemTime::from(entry.creation_date).into()
-            } else {
-                Default::default()
-            },
-            modified: if entry.has_last_modified_date {
-                std::time::SystemTime::from(entry.last_modified_date).into()
-            } else {
-                Default::default()
-            },
-            mode: encode_mode(mode),
-            mode_bits: compact_str::format_compact!("{:o}", mode),
-            size,
-            directory: entry.is_directory(),
-            file: !entry.is_directory(),
-            symlink: false,
-            mime: mime_type,
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl BackupBrowseExt for SevenZipBackupArchive {
-    async fn read_dir(
-        &self,
-        path: PathBuf,
-        per_page: Option<usize>,
-        page: usize,
-        is_ignored: impl Fn(PathBuf, bool) -> bool + Send + Sync + 'static,
-    ) -> Result<(usize, Vec<crate::models::DirectoryEntry>), anyhow::Error> {
-        let archive = self.archive.clone();
-        let mime_cache = self.mime_cache.clone();
-        let mut reader = self.reader.clone();
-
-        let entries = tokio::task::spawn_blocking(
-            move || -> Result<(usize, Vec<DirectoryEntry>), anyhow::Error> {
-                let sizes = archive
-                    .files
-                    .iter()
-                    .map(|entry| (entry.size, PathBuf::from(&entry.name)))
-                    .collect::<Vec<_>>();
-
-                let mut directory_entries = Vec::new();
-                let mut other_entries = Vec::new();
-
-                let path_len = path.components().count();
-                for (i, entry) in archive.files.iter().enumerate() {
-                    let name = Path::new(entry.name());
-
-                    let name_len = name.components().count();
-                    if name_len < path_len
-                        || !name.starts_with(&path)
-                        || name == path
-                        || name_len > path_len + 1
-                    {
-                        continue;
-                    }
-
-                    if is_ignored(name.to_path_buf(), entry.is_directory()) {
-                        continue;
-                    }
-
-                    if entry.is_directory() {
-                        directory_entries.push((i, entry.name()));
-                    } else {
-                        other_entries.push((i, entry.name()));
-                    }
-                }
-
-                directory_entries.sort_unstable_by(|a, b| a.1.cmp(b.1));
-                other_entries.sort_unstable_by(|a, b| a.1.cmp(b.1));
-
-                let total_entries = directory_entries.len() + other_entries.len();
-                let mut entries = Vec::new();
-
-                if let Some(per_page) = per_page {
-                    let start = (page - 1) * per_page;
-
-                    for (entry_index, _) in directory_entries
-                        .into_iter()
-                        .chain(other_entries.into_iter())
-                        .skip(start)
-                        .take(per_page)
-                    {
-                        let archive_entry = &archive.files[entry_index];
-                        let entry_path = Path::new(archive_entry.name());
-
-                        match archive.stream_map.file_block_index[entry_index] {
-                            Some(block_index) => {
-                                let password = sevenz_rust2::Password::empty();
-                                let folder = sevenz_rust2::BlockDecoder::new(
-                                    1,
-                                    block_index,
-                                    &archive,
-                                    &password,
-                                    &mut reader,
-                                );
-
-                                folder.for_each_entries(&mut |entry, reader| {
-                                    let path = entry.name();
-                                    if path != archive_entry.name() {
-                                        std::io::copy(reader, &mut std::io::sink())?;
-
-                                        return Ok(true);
-                                    }
-
-                                    entries.push(Self::seven_zip_entry_to_directory_entry(
-                                        entry_path,
-                                        entry_index,
-                                        &mime_cache,
-                                        &sizes,
-                                        archive_entry,
-                                        reader,
-                                    ));
-
-                                    Ok(false)
-                                })?;
-                            }
-                            None => entries.push(Self::seven_zip_entry_to_directory_entry(
-                                entry_path,
-                                entry_index,
-                                &mime_cache,
-                                &sizes,
-                                archive_entry,
-                                &mut std::io::empty(),
-                            )),
-                        };
-                    }
-                } else {
-                    for (entry_index, _) in directory_entries
-                        .into_iter()
-                        .chain(other_entries.into_iter())
-                    {
-                        let archive_entry = &archive.files[entry_index];
-                        let entry_path = Path::new(archive_entry.name());
-
-                        match archive.stream_map.file_block_index[entry_index] {
-                            Some(block_index) => {
-                                let password = sevenz_rust2::Password::empty();
-                                let folder = sevenz_rust2::BlockDecoder::new(
-                                    1,
-                                    block_index,
-                                    &archive,
-                                    &password,
-                                    &mut reader,
-                                );
-
-                                folder.for_each_entries(&mut |entry, reader| {
-                                    let path = entry.name();
-                                    if path != archive_entry.name() {
-                                        std::io::copy(reader, &mut std::io::sink())?;
-
-                                        return Ok(true);
-                                    }
-
-                                    entries.push(Self::seven_zip_entry_to_directory_entry(
-                                        entry_path,
-                                        entry_index,
-                                        &mime_cache,
-                                        &sizes,
-                                        archive_entry,
-                                        reader,
-                                    ));
-
-                                    Ok(false)
-                                })?;
-                            }
-                            None => entries.push(Self::seven_zip_entry_to_directory_entry(
-                                entry_path,
-                                entry_index,
-                                &mime_cache,
-                                &sizes,
-                                archive_entry,
-                                &mut std::io::empty(),
-                            )),
-                        };
-                    }
-                }
-
-                Ok((total_entries, entries))
-            },
-        )
-        .await??;
-
-        Ok(entries)
-    }
-
-    async fn read_file(
-        &self,
-        path: PathBuf,
-        _range: Option<TypedHeader<Range>>,
-    ) -> Result<(HeaderMap, Box<dyn tokio::io::AsyncRead + Unpin + Send>), anyhow::Error> {
-        let archive = self.archive.clone();
-        let mut reader = self.reader.clone();
-
-        let (entry_index, size) = match archive
-            .files
-            .iter()
-            .enumerate()
-            .find(|f| Path::new(f.1.name()) == path)
-        {
-            Some((i, entry)) => (i, entry.size),
-            None => return Err(anyhow::anyhow!("7z archive entry not found")),
-        };
-        let (duplex_reader, mut writer) = tokio::io::duplex(crate::BUFFER_SIZE);
-
-        crate::spawn_blocking_handled(move || -> Result<(), anyhow::Error> {
-            let runtime = tokio::runtime::Handle::current();
-
-            if let Some(block_index) = archive.stream_map.file_block_index[entry_index] {
-                let password = sevenz_rust2::Password::empty();
-                let folder = sevenz_rust2::BlockDecoder::new(
-                    1,
-                    block_index,
-                    &archive,
-                    &password,
-                    &mut reader,
-                );
-
-                folder.for_each_entries(&mut |entry, reader| {
-                    let entry_path = Path::new(entry.name());
-                    if entry_path != path {
-                        std::io::copy(reader, &mut std::io::sink())?;
-
-                        return Ok(true);
-                    }
-
-                    let mut buffer = vec![0; crate::BUFFER_SIZE];
-                    loop {
-                        match reader.read(&mut buffer) {
-                            Ok(0) => break,
-                            Ok(n) => {
-                                if runtime.block_on(writer.write_all(&buffer[..n])).is_err() {
-                                    break;
-                                }
-                            }
-                            Err(err) => {
-                                tracing::error!("error reading from 7z entry: {:#?}", err);
-                                break;
-                            }
-                        }
-                    }
-
-                    Ok(true)
-                })?;
-            };
-
-            Ok(())
-        });
-
-        let mut headers = HeaderMap::new();
-        headers.insert("Content-Length", size.into());
-
-        Ok((headers, Box::new(duplex_reader)))
-    }
-
-    async fn read_directory_archive(
-        &self,
-        path: PathBuf,
-        archive_format: StreamableArchiveFormat,
-    ) -> Result<tokio::io::DuplexStream, anyhow::Error> {
-        let archive = self.archive.clone();
-        let mut reader = self.reader.clone();
-
-        let (duplex_reader, writer) = tokio::io::duplex(crate::BUFFER_SIZE);
-        let compression_level = self
-            .server
-            .app_state
-            .config
-            .system
-            .backups
-            .compression_level;
-
-        match archive_format {
-            StreamableArchiveFormat::Zip => {
-                crate::spawn_blocking_handled(move || -> Result<(), anyhow::Error> {
-                    let writer = tokio_util::io::SyncIoBridge::new(writer);
-                    let mut zip = zip::ZipWriter::new_stream(writer);
-
-                    let mut read_buffer = vec![0; crate::BUFFER_SIZE];
-                    for (i, entry) in archive.files.iter().enumerate() {
-                        let name = match Path::new(entry.name()).strip_prefix(&path) {
-                            Ok(name) => name,
-                            Err(_) => continue,
-                        };
-
-                        if name.components().count() == 0 {
-                            continue;
-                        }
-
-                        let mut zip_options: zip::write::FileOptions<'_, ()> =
-                            zip::write::FileOptions::default()
-                                .compression_level(
-                                    Some(compression_level.to_deflate_level() as i64),
-                                )
-                                .large_file(true);
-
-                        if entry.has_last_modified_date {
-                            let mtime: chrono::DateTime<chrono::Utc> = chrono::DateTime::from(
-                                std::time::SystemTime::from(entry.last_modified_date),
-                            );
-
-                            if let Ok(mtime) = zip::DateTime::from_date_and_time(
-                                mtime.year() as u16,
-                                mtime.month() as u8,
-                                mtime.day() as u8,
-                                mtime.hour() as u8,
-                                mtime.minute() as u8,
-                                mtime.second() as u8,
-                            ) {
-                                zip_options = zip_options.last_modified_time(mtime);
-                            }
-                        }
-
-                        if entry.is_directory() {
-                            zip.add_directory(name.to_string_lossy(), zip_options)?;
-                        } else {
-                            zip.start_file(name.to_string_lossy(), zip_options)?;
-
-                            if let Some(block_index) = archive.stream_map.file_block_index[i] {
-                                let password = sevenz_rust2::Password::empty();
-                                let folder = sevenz_rust2::BlockDecoder::new(
-                                    1,
-                                    block_index,
-                                    &archive,
-                                    &password,
-                                    &mut reader,
-                                );
-
-                                folder
-                                    .for_each_entries(&mut |block_entry, reader| {
-                                        if block_entry.name() != entry.name() {
-                                            std::io::copy(reader, &mut std::io::sink())?;
-
-                                            return Ok(true);
-                                        }
-
-                                        crate::io::copy_shared(&mut read_buffer, reader, &mut zip)?;
-
-                                        Ok(false)
-                                    })
-                                    .unwrap_or_default();
-                            };
-                        }
-                    }
-
-                    let mut inner = zip.finish()?;
-                    inner.flush()?;
-
-                    Ok(())
-                });
-            }
-            _ => {
-                let writer = CompressionWriter::new(
-                    tokio_util::io::SyncIoBridge::new(writer),
-                    archive_format.compression_format(),
-                    compression_level,
-                    self.server.app_state.config.api.file_compression_threads,
-                );
-
-                crate::spawn_blocking_handled(move || -> Result<(), anyhow::Error> {
-                    let mut tar = tar::Builder::new(writer);
-                    tar.mode(tar::HeaderMode::Complete);
-
-                    for (i, entry) in archive.files.iter().enumerate() {
-                        let name = match Path::new(entry.name()).strip_prefix(&path) {
-                            Ok(name) => name,
-                            Err(_) => continue,
-                        };
-
-                        if name.components().count() == 0 {
-                            continue;
-                        }
-
-                        let mut entry_header = tar::Header::new_gnu();
-                        entry_header.set_size(0);
-                        if entry.has_last_modified_date {
-                            entry_header.set_mtime(
-                                std::time::SystemTime::from(entry.last_modified_date)
-                                    .elapsed()
-                                    .unwrap_or_default()
-                                    .as_secs(),
-                            );
-                        }
-
-                        if entry.is_directory() {
-                            entry_header.set_entry_type(tar::EntryType::Directory);
-
-                            tar.append_data(&mut entry_header, name, std::io::empty())?;
-                        } else {
-                            entry_header.set_entry_type(tar::EntryType::Regular);
-                            entry_header.set_size(entry.size);
-
-                            if let Some(block_index) = archive.stream_map.file_block_index[i] {
-                                let password = sevenz_rust2::Password::empty();
-                                let folder = sevenz_rust2::BlockDecoder::new(
-                                    1,
-                                    block_index,
-                                    &archive,
-                                    &password,
-                                    &mut reader,
-                                );
-
-                                folder
-                                    .for_each_entries(&mut |block_entry, reader| {
-                                        if block_entry.name() != entry.name() {
-                                            std::io::copy(reader, &mut std::io::sink())?;
-
-                                            return Ok(true);
-                                        }
-
-                                        tar.append_data(&mut entry_header, name, reader)?;
-
-                                        Ok(false)
-                                    })
-                                    .unwrap_or_default();
-                            };
-                        }
-                    }
-
-                    tar.finish()?;
-                    let mut inner = tar.into_inner()?.finish()?;
-                    inner.flush()?;
-
-                    Ok(())
-                });
-            }
-        }
-
-        Ok(duplex_reader)
-    }
-
-    async fn read_files_archive(
-        &self,
-        path: PathBuf,
-        file_paths: Vec<PathBuf>,
-        archive_format: StreamableArchiveFormat,
-    ) -> Result<tokio::io::DuplexStream, anyhow::Error> {
-        let archive = self.archive.clone();
-        let mut reader = self.reader.clone();
-
-        let (duplex_reader, writer) = tokio::io::duplex(crate::BUFFER_SIZE);
-        let compression_level = self
-            .server
-            .app_state
-            .config
-            .system
-            .backups
-            .compression_level;
-
-        match archive_format {
-            StreamableArchiveFormat::Zip => {
-                crate::spawn_blocking_handled(move || -> Result<(), anyhow::Error> {
-                    let writer = tokio_util::io::SyncIoBridge::new(writer);
-                    let mut zip = zip::ZipWriter::new_stream(writer);
-
-                    let mut read_buffer = vec![0; crate::BUFFER_SIZE];
-                    for (i, entry) in archive.files.iter().enumerate() {
-                        let name = match Path::new(entry.name()).strip_prefix(&path) {
-                            Ok(name) => name,
-                            Err(_) => continue,
-                        };
-
-                        if !file_paths.iter().any(|p| name.starts_with(p)) {
-                            continue;
-                        }
-
-                        if name.components().count() == 0 {
-                            continue;
-                        }
-
-                        let mut zip_options: zip::write::FileOptions<'_, ()> =
-                            zip::write::FileOptions::default()
-                                .compression_level(
-                                    Some(compression_level.to_deflate_level() as i64),
-                                )
-                                .large_file(true);
-
-                        if entry.has_last_modified_date {
-                            let mtime: chrono::DateTime<chrono::Utc> = chrono::DateTime::from(
-                                std::time::SystemTime::from(entry.last_modified_date),
-                            );
-
-                            if let Ok(mtime) = zip::DateTime::from_date_and_time(
-                                mtime.year() as u16,
-                                mtime.month() as u8,
-                                mtime.day() as u8,
-                                mtime.hour() as u8,
-                                mtime.minute() as u8,
-                                mtime.second() as u8,
-                            ) {
-                                zip_options = zip_options.last_modified_time(mtime);
-                            }
-                        }
-
-                        if entry.is_directory() {
-                            zip.add_directory(name.to_string_lossy(), zip_options)?;
-                        } else {
-                            zip.start_file(name.to_string_lossy(), zip_options)?;
-
-                            if let Some(block_index) = archive.stream_map.file_block_index[i] {
-                                let password = sevenz_rust2::Password::empty();
-                                let folder = sevenz_rust2::BlockDecoder::new(
-                                    1,
-                                    block_index,
-                                    &archive,
-                                    &password,
-                                    &mut reader,
-                                );
-
-                                folder
-                                    .for_each_entries(&mut |block_entry, reader| {
-                                        if block_entry.name() != entry.name() {
-                                            std::io::copy(reader, &mut std::io::sink())?;
-
-                                            return Ok(true);
-                                        }
-
-                                        crate::io::copy_shared(&mut read_buffer, reader, &mut zip)?;
-
-                                        Ok(false)
-                                    })
-                                    .unwrap_or_default();
-                            };
-                        }
-                    }
-
-                    let mut inner = zip.finish()?;
-                    inner.flush()?;
-
-                    Ok(())
-                });
-            }
-            _ => {
-                let writer = CompressionWriter::new(
-                    tokio_util::io::SyncIoBridge::new(writer),
-                    archive_format.compression_format(),
-                    compression_level,
-                    self.server.app_state.config.api.file_compression_threads,
-                );
-
-                crate::spawn_blocking_handled(move || -> Result<(), anyhow::Error> {
-                    let mut tar = tar::Builder::new(writer);
-                    tar.mode(tar::HeaderMode::Complete);
-
-                    for (i, entry) in archive.files.iter().enumerate() {
-                        let name = match Path::new(entry.name()).strip_prefix(&path) {
-                            Ok(name) => name,
-                            Err(_) => continue,
-                        };
-
-                        if !file_paths.iter().any(|p| name.starts_with(p)) {
-                            continue;
-                        }
-
-                        if name.components().count() == 0 {
-                            continue;
-                        }
-
-                        let mut entry_header = tar::Header::new_gnu();
-                        entry_header.set_size(0);
-                        if entry.has_last_modified_date {
-                            entry_header.set_mtime(
-                                std::time::SystemTime::from(entry.last_modified_date)
-                                    .elapsed()
-                                    .unwrap_or_default()
-                                    .as_secs(),
-                            );
-                        }
-
-                        if entry.is_directory() {
-                            entry_header.set_entry_type(tar::EntryType::Directory);
-
-                            tar.append_data(&mut entry_header, name, std::io::empty())?;
-                        } else {
-                            entry_header.set_entry_type(tar::EntryType::Regular);
-                            entry_header.set_size(entry.size);
-
-                            if let Some(block_index) = archive.stream_map.file_block_index[i] {
-                                let password = sevenz_rust2::Password::empty();
-                                let folder = sevenz_rust2::BlockDecoder::new(
-                                    1,
-                                    block_index,
-                                    &archive,
-                                    &password,
-                                    &mut reader,
-                                );
-
-                                folder
-                                    .for_each_entries(&mut |block_entry, reader| {
-                                        if block_entry.name() != entry.name() {
-                                            std::io::copy(reader, &mut std::io::sink())?;
-
-                                            return Ok(true);
-                                        }
-
-                                        tar.append_data(&mut entry_header, name, reader)?;
-
-                                        Ok(false)
-                                    })
-                                    .unwrap_or_default();
-                            };
-                        }
-                    }
-
-                    tar.finish()?;
-                    let mut inner = tar.into_inner()?.finish()?;
-                    inner.flush()?;
-
-                    Ok(())
-                });
-            }
-        }
-
-        Ok(duplex_reader)
-    }
-}
-
-#[derive(Clone)]
-pub enum BrowseWingsBackup {
-    Zip(ZipBackupArchive),
-    SevenZip(SevenZipBackupArchive),
-}
-
-#[async_trait::async_trait]
-impl BackupBrowseExt for BrowseWingsBackup {
-    async fn read_dir(
-        &self,
-        path: PathBuf,
-        per_page: Option<usize>,
-        page: usize,
-        is_ignored: impl Fn(PathBuf, bool) -> bool + Send + Sync + 'static,
-    ) -> Result<(usize, Vec<DirectoryEntry>), anyhow::Error> {
-        match self {
-            BrowseWingsBackup::Zip(archive) => {
-                archive.read_dir(path, per_page, page, is_ignored).await
-            }
-            BrowseWingsBackup::SevenZip(archive) => {
-                archive.read_dir(path, per_page, page, is_ignored).await
-            }
-        }
-    }
-
-    async fn read_file(
-        &self,
-        path: PathBuf,
-        range: Option<TypedHeader<Range>>,
-    ) -> Result<(HeaderMap, Box<dyn tokio::io::AsyncRead + Unpin + Send>), anyhow::Error> {
-        match self {
-            BrowseWingsBackup::Zip(archive) => archive.read_file(path, range).await,
-            BrowseWingsBackup::SevenZip(archive) => archive.read_file(path, range).await,
-        }
-    }
-
-    async fn read_directory_archive(
-        &self,
-        path: PathBuf,
-        archive_format: StreamableArchiveFormat,
-    ) -> Result<tokio::io::DuplexStream, anyhow::Error> {
-        match self {
-            BrowseWingsBackup::Zip(archive) => {
-                archive.read_directory_archive(path, archive_format).await
-            }
-            BrowseWingsBackup::SevenZip(archive) => {
-                archive.read_directory_archive(path, archive_format).await
-            }
-        }
-    }
-
-    async fn read_files_archive(
-        &self,
-        path: PathBuf,
-        file_paths: Vec<PathBuf>,
-        archive_format: StreamableArchiveFormat,
-    ) -> Result<tokio::io::DuplexStream, anyhow::Error> {
-        match self {
-            BrowseWingsBackup::Zip(archive) => {
-                archive
-                    .read_files_archive(path, file_paths, archive_format)
-                    .await
-            }
-            BrowseWingsBackup::SevenZip(archive) => {
-                archive
-                    .read_files_archive(path, file_paths, archive_format)
-                    .await
-            }
-        }
     }
 }

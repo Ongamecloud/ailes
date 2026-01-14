@@ -2,6 +2,8 @@ use super::State;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
 mod post {
+    use std::path::Path;
+
     use crate::{
         response::{ApiResponse, ApiResponseResult},
         routes::{ApiError, api::servers::_server_::GetServer},
@@ -13,7 +15,6 @@ mod post {
     };
     use futures_util::StreamExt;
     use serde::{Deserialize, Serialize};
-    use std::path::PathBuf;
     use tokio::io::AsyncWriteExt;
     use utoipa::ToSchema;
 
@@ -46,44 +47,7 @@ mod post {
         Query(data): Query<Params>,
         body: Body,
     ) -> ApiResponseResult {
-        let path = match server.filesystem.async_canonicalize(&data.file).await {
-            Ok(path) => path,
-            Err(_) => PathBuf::from(data.file),
-        };
-
-        let content_size: i64 = headers
-            .get("Content-Length")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0);
-        let metadata = server.filesystem.async_metadata(&path).await;
-
-        if server
-            .filesystem
-            .is_ignored(
-                &path,
-                metadata.as_ref().map(|m| m.is_dir()).unwrap_or(false),
-            )
-            .await
-        {
-            return ApiResponse::error("file not found")
-                .with_status(StatusCode::NOT_FOUND)
-                .ok();
-        }
-
-        let old_content_size = if let Ok(metadata) = metadata {
-            if !metadata.is_file() {
-                return ApiResponse::error("file is not a file")
-                    .with_status(StatusCode::EXPECTATION_FAILED)
-                    .ok();
-            }
-
-            metadata.len() as i64
-        } else {
-            0
-        };
-
-        let parent = match path.parent() {
+        let parent = match Path::new(&data.file).parent() {
             Some(parent) => parent,
             None => {
                 return ApiResponse::error("file has no parent")
@@ -92,35 +56,79 @@ mod post {
             }
         };
 
+        let file_name = match Path::new(&data.file).file_name() {
+            Some(name) => name,
+            None => {
+                return ApiResponse::error("invalid file name")
+                    .with_status(StatusCode::EXPECTATION_FAILED)
+                    .ok();
+            }
+        };
+
+        let (root, filesystem) = server
+            .filesystem
+            .resolve_writable_fs(&server, &parent)
+            .await;
+        let path = root.join(file_name);
+
+        let content_size: i64 = headers
+            .get("Content-Length")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        let metadata = filesystem.async_metadata(&path).await;
+
+        if filesystem.is_primary_server_fs()
+            && server
+                .filesystem
+                .is_ignored(&path, metadata.as_ref().is_ok_and(|m| m.file_type.is_dir()))
+                .await
+        {
+            return ApiResponse::error("file not found")
+                .with_status(StatusCode::NOT_FOUND)
+                .ok();
+        }
+
+        let old_content_size = if let Ok(metadata) = metadata {
+            if !metadata.file_type.is_file() {
+                return ApiResponse::error("file is not a file")
+                    .with_status(StatusCode::EXPECTATION_FAILED)
+                    .ok();
+            }
+
+            metadata.size as i64
+        } else {
+            0
+        };
+
         if server.filesystem.is_ignored(parent, true).await {
             return ApiResponse::error("parent directory not found")
                 .with_status(StatusCode::EXPECTATION_FAILED)
                 .ok();
         }
 
-        server.filesystem.async_create_dir_all(parent).await?;
+        filesystem.async_create_dir_all(&parent).await?;
 
-        if !server
-            .filesystem
-            .async_allocate_in_path(parent, content_size - old_content_size, false)
-            .await
+        if filesystem.is_primary_server_fs()
+            && !server
+                .filesystem
+                .async_allocate_in_path(parent, content_size - old_content_size, false)
+                .await
         {
             return ApiResponse::error("failed to allocate space")
                 .with_status(StatusCode::EXPECTATION_FAILED)
                 .ok();
         }
 
-        let mut file = server.filesystem.async_create(&path).await?;
+        let mut file = filesystem.async_create_file(&path).await?;
         let mut stream = body.into_data_stream();
 
         while let Some(Ok(chunk)) = stream.next().await {
             file.write_all(&chunk).await?;
         }
 
-        file.flush().await?;
-        file.sync_all().await?;
-
-        server.filesystem.chown_path(&path).await?;
+        file.shutdown().await?;
+        filesystem.async_chown(&path).await?;
 
         ApiResponse::json(Response {}).ok()
     }

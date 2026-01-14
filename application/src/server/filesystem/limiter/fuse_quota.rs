@@ -23,9 +23,10 @@ pub struct FuseQuotaLimiter<'a> {
 impl<'a> FuseQuotaLimiter<'a> {
     #[inline]
     fn get_fusequota_path(&self) -> PathBuf {
-        let mut fusequota_path = self.filesystem.base_path.clone();
-        fusequota_path.set_extension("fusequota");
-        fusequota_path
+        self.filesystem
+            .config
+            .vmount_path(self.filesystem.uuid)
+            .join("fs")
     }
 
     #[inline]
@@ -111,9 +112,7 @@ impl<'a> FuseQuotaLimiter<'a> {
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .spawn()?
-            .wait()
-            .await?;
+            .spawn()?;
 
         Ok(())
     }
@@ -319,7 +318,6 @@ impl<'a> DiskLimiterExt for FuseQuotaLimiter<'a> {
         }
 
         tokio::fs::remove_dir_all(&self.filesystem.base_path).await?;
-        tokio::fs::remove_file(self.get_fusequota_path()).await.ok();
 
         match self.talk_to_socket("do end").await {
             Ok(response) if response.contains("OK") => {

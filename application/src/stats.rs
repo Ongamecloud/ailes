@@ -49,7 +49,6 @@ pub struct SystemStats {
 
 pub struct StatsManager {
     stats: Arc<tokio::sync::RwLock<SystemStats>>,
-    task: tokio::task::JoinHandle<()>,
 }
 
 impl StatsManager {
@@ -63,19 +62,24 @@ impl Default for StatsManager {
     fn default() -> Self {
         let stats = Arc::new(tokio::sync::RwLock::new(SystemStats::default()));
 
-        Self {
-            stats: Arc::clone(&stats),
-            task: tokio::spawn(async move {
+        std::thread::spawn({
+            let stats = Arc::clone(&stats);
+
+            move || {
                 let mut sys = System::new_all();
                 let mut disks = Disks::new_with_refreshed_list();
                 let mut networks = Networks::new_with_refreshed_list();
 
                 loop {
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    std::thread::sleep(std::time::Duration::from_millis(500));
 
                     sys.refresh_all();
-                    disks.refresh(true);
                     networks.refresh(true);
+                    for disk in disks.list_mut() {
+                        if disk.mount_point() == Path::new("/") {
+                            disk.refresh();
+                        }
+                    }
 
                     let total_memory = sys.total_memory() / 1024 / 1024;
                     let used_memory = sys.used_memory() / 1024 / 1024;
@@ -110,7 +114,7 @@ impl Default for StatsManager {
                         .first()
                         .map_or_else(|| "unknown".to_string(), |cpu| cpu.brand().to_string());
 
-                    *stats.write().await = SystemStats {
+                    *stats.blocking_write() = SystemStats {
                         cpu: SystemCpuStats {
                             used: cpu_usage,
                             threads: cpu_threads,
@@ -136,13 +140,9 @@ impl Default for StatsManager {
                         },
                     };
                 }
-            }),
-        }
-    }
-}
+            }
+        });
 
-impl Drop for StatsManager {
-    fn drop(&mut self) {
-        self.task.abort();
+        Self { stats }
     }
 }

@@ -6,6 +6,7 @@ mod post {
         io::counting_reader::AsyncCountingReader,
         response::{ApiResponse, ApiResponseResult},
         routes::{ApiError, GetState, api::servers::_server_::GetServer},
+        server::filesystem::virtualfs::{DirectoryStreamWalkFn, VirtualReadableFilesystem},
     };
     use axum::http::StatusCode;
     use compact_str::ToCompactString;
@@ -26,7 +27,8 @@ mod post {
 
     #[derive(ToSchema, Deserialize)]
     pub struct Payload {
-        location: compact_str::CompactString,
+        #[serde(alias = "location")]
+        path: compact_str::CompactString,
         name: Option<compact_str::CompactString>,
 
         #[serde(default = "foreground")]
@@ -55,22 +57,35 @@ mod post {
         server: GetServer,
         axum::Json(data): axum::Json<Payload>,
     ) -> ApiResponseResult {
-        let location = match server.filesystem.async_canonicalize(data.location).await {
-            Ok(path) => path,
-            Err(_) => {
-                return ApiResponse::error("file not found")
-                    .with_status(StatusCode::NOT_FOUND)
+        let parent = match Path::new(&data.path).parent() {
+            Some(parent) => parent,
+            None => {
+                return ApiResponse::error("file has no parent")
+                    .with_status(StatusCode::EXPECTATION_FAILED)
                     .ok();
             }
         };
 
-        let metadata = match server.filesystem.async_metadata(&location).await {
+        let file_name = match Path::new(&data.path).file_name() {
+            Some(name) => name,
+            None => {
+                return ApiResponse::error("invalid file name")
+                    .with_status(StatusCode::EXPECTATION_FAILED)
+                    .ok();
+            }
+        };
+
+        let (root, filesystem) = server.filesystem.resolve_readable_fs(&server, parent).await;
+        let path = root.join(file_name);
+
+        let metadata = match filesystem.async_metadata(&path).await {
             Ok(metadata) => {
-                if (!metadata.is_file() && !metadata.is_dir())
-                    || server
-                        .filesystem
-                        .is_ignored(&location, metadata.is_dir())
-                        .await
+                if (!metadata.file_type.is_file() && !metadata.file_type.is_dir())
+                    || (filesystem.is_primary_server_fs()
+                        && server
+                            .filesystem
+                            .is_ignored(&path, metadata.file_type.is_dir())
+                            .await)
                 {
                     return ApiResponse::error("file not found")
                         .with_status(StatusCode::NOT_FOUND)
@@ -88,7 +103,7 @@ mod post {
 
         #[inline]
         async fn generate_new_name(
-            server: &GetServer,
+            filesystem: &dyn VirtualReadableFilesystem,
             location: &Path,
         ) -> compact_str::CompactString {
             let mut extension = location
@@ -118,12 +133,7 @@ mod post {
                 let new_name = compact_str::format_compact!("{base_name}{suffix}{extension}");
                 let new_path = parent.join(&new_name);
 
-                if server
-                    .filesystem
-                    .async_symlink_metadata(&new_path)
-                    .await
-                    .is_err()
-                {
+                if filesystem.async_symlink_metadata(&new_path).await.is_err() {
                     return new_name;
                 }
 
@@ -139,7 +149,7 @@ mod post {
             compact_str::format_compact!("{base_name}{suffix}{extension}")
         }
 
-        let parent = match location.parent() {
+        let parent = match Path::new(&data.path).parent() {
             Some(parent) => parent,
             None => {
                 return ApiResponse::error("file has no parent")
@@ -148,7 +158,7 @@ mod post {
             }
         };
 
-        if server.filesystem.is_ignored(parent, true).await {
+        if filesystem.is_primary_server_fs() && server.filesystem.is_ignored(parent, true).await {
             return ApiResponse::error("parent directory not found")
                 .with_status(StatusCode::EXPECTATION_FAILED)
                 .ok();
@@ -157,59 +167,143 @@ mod post {
         let new_name = if let Some(name) = data.name {
             name
         } else {
-            generate_new_name(&server, &location).await
+            generate_new_name(&*filesystem, &path).await
         };
         let file_name = parent.join(&new_name);
 
-        if metadata.is_file() {
-            if !server
-                .filesystem
-                .async_allocate_in_path(parent, metadata.len() as i64, false)
-                .await
-            {
-                return ApiResponse::error("failed to allocate space")
-                    .with_status(StatusCode::EXPECTATION_FAILED)
-                    .ok();
-            }
+        let (destination_path, destination_filesystem) = server
+            .filesystem
+            .resolve_writable_fs(&server, &file_name)
+            .await;
 
+        if metadata.file_type.is_file() {
             if data.foreground {
-                server
-                    .filesystem
-                    .async_copy(&location, &server.filesystem, &file_name)
-                    .await?;
+                if filesystem.is_primary_server_fs()
+                    && destination_filesystem.is_primary_server_fs()
+                {
+                    if destination_filesystem.is_primary_server_fs()
+                        && !server
+                            .filesystem
+                            .async_allocate_in_path(parent, metadata.size as i64, false)
+                            .await
+                    {
+                        return ApiResponse::error("failed to allocate space")
+                            .with_status(StatusCode::EXPECTATION_FAILED)
+                            .ok();
+                    }
+
+                    server
+                        .filesystem
+                        .async_copy(&path, &server.filesystem, &destination_path)
+                        .await?;
+                } else {
+                    let progress = Arc::new(AtomicU64::new(0));
+                    let total = Arc::new(AtomicU64::new(metadata.size));
+
+                    let (_, task) = server
+                        .filesystem
+                        .operations
+                        .add_operation(
+                            crate::server::filesystem::operations::FilesystemOperation::Copy {
+                                path: PathBuf::from(data.path),
+                                destination_path: file_name.clone(),
+                                progress: progress.clone(),
+                                total,
+                            },
+                            {
+                                let path = path.clone();
+
+                                async move {
+                                    let file_read = filesystem.async_read_file(&path, None).await?;
+                                    let mut reader = AsyncCountingReader::new_with_bytes_read(
+                                        file_read.reader,
+                                        Arc::clone(&progress),
+                                    );
+
+                                    let mut writer = destination_filesystem
+                                        .async_create_file(&destination_path)
+                                        .await?;
+                                    destination_filesystem
+                                        .async_set_permissions(
+                                            &destination_path,
+                                            metadata.permissions,
+                                        )
+                                        .await?;
+
+                                    tokio::io::copy(&mut reader, &mut writer).await?;
+                                    writer.shutdown().await?;
+
+                                    Ok(())
+                                }
+                            },
+                        )
+                        .await;
+
+                    match task.await {
+                        Ok(Some(Ok(()))) => {}
+                        Ok(None) => {
+                            return ApiResponse::error(
+                                "archive compression aborted by another source",
+                            )
+                            .with_status(StatusCode::EXPECTATION_FAILED)
+                            .ok();
+                        }
+                        Ok(Some(Err(err))) => {
+                            tracing::error!(
+                                server = %server.uuid,
+                                path = %path.display(),
+                                "failed to copy directory: {:#?}",
+                                err,
+                            );
+
+                            return ApiResponse::error(&format!("failed to copy directory: {err}"))
+                                .with_status(StatusCode::EXPECTATION_FAILED)
+                                .ok();
+                        }
+                        Err(err) => {
+                            tracing::error!(
+                                server = %server.uuid,
+                                path = %path.display(),
+                                "failed to copy directory: {:#?}",
+                                err,
+                            );
+
+                            return ApiResponse::error("failed to copy directory")
+                                .with_status(StatusCode::EXPECTATION_FAILED)
+                                .ok();
+                        }
+                    }
+                }
             } else {
                 let progress = Arc::new(AtomicU64::new(0));
-                let total = Arc::new(AtomicU64::new(metadata.len()));
+                let total = Arc::new(AtomicU64::new(metadata.size));
 
                 let (identifier, _) = server
                     .filesystem
                     .operations
                     .add_operation(
                         crate::server::filesystem::operations::FilesystemOperation::Copy {
-                            path: location.clone(),
+                            path: PathBuf::from(data.path),
                             destination_path: file_name.clone(),
                             progress: progress.clone(),
                             total,
                         },
                         {
-                            let server = server.0.clone();
-                            let location = location.clone();
-                            let file_name = file_name.clone();
+                            let path = path.clone();
 
                             async move {
-                                let reader = server.filesystem.async_open(&location).await?;
-                                let mut writer =
-                                    crate::server::filesystem::writer::AsyncFileSystemWriter::new(
-                                        server.clone(),
-                                        &file_name,
-                                        Some(metadata.permissions()),
-                                        metadata.modified().ok(),
-                                    )
-                                    .await?;
+                                let file_read = filesystem.async_read_file(&path, None).await?;
                                 let mut counting_reader = AsyncCountingReader::new_with_bytes_read(
-                                    reader,
+                                    file_read.reader,
                                     Arc::clone(&progress),
                                 );
+
+                                let mut writer = destination_filesystem
+                                    .async_create_file(&destination_path)
+                                    .await?;
+                                destination_filesystem
+                                    .async_set_permissions(&destination_path, metadata.permissions)
+                                    .await?;
 
                                 tokio::io::copy(&mut counting_reader, &mut writer).await?;
                                 writer.shutdown().await?;
@@ -225,115 +319,90 @@ mod post {
                     .ok();
             }
         } else {
+            let directory_entry = filesystem.async_directory_entry_buffer(&path, &[]).await?;
             let progress = Arc::new(AtomicU64::new(0));
-            let total = Arc::new(AtomicU64::new(
-                server
-                    .filesystem
-                    .disk_usage
-                    .read()
-                    .await
-                    .get_size(&location)
-                    .map_or(0, |s| s.get_apparent()),
-            ));
+            let total = Arc::new(AtomicU64::new(directory_entry.size));
 
             let (identifier, task) = server
                 .filesystem
                 .operations
                 .add_operation(
                     crate::server::filesystem::operations::FilesystemOperation::Copy {
-                        path: location.clone(),
+                        path: PathBuf::from(data.path),
                         destination_path: file_name.clone(),
                         progress: progress.clone(),
                         total,
                     },
                     {
                         let server = server.0.clone();
-                        let location = location.clone();
-                        let file_name = file_name.clone();
+                        let path = path.clone();
 
                         async move {
-                            let ignored = &[server.filesystem.get_ignored().await];
-                            let mut walker = server
-                                .filesystem
-                                .async_walk_dir(&location)
-                                .await?
-                                .with_ignored(ignored);
+                            let ignored = server.filesystem.get_ignored().await;
+                            let mut walker = filesystem
+                                .async_walk_dir_stream(&path, ignored.into())
+                                .await?;
 
                             walker
                                 .run_multithreaded(
                                     state.config.api.file_copy_threads,
-                                    Arc::new({
-                                        let server = server.clone();
-                                        let location = Arc::new(location);
-                                        let file_name = Arc::new(file_name);
+                                    DirectoryStreamWalkFn::from({
+                                        let filesystem = filesystem.clone();
+                                        let source_path = Arc::new(path);
+                                        let destination_path = Arc::new(destination_path);
+                                        let destination_filesystem = destination_filesystem.clone();
                                         let progress = Arc::clone(&progress);
 
-                                        move |_, path: PathBuf| {
-                                            let server = server.clone();
-                                            let location = Arc::clone(&location);
-                                            let file_name = Arc::clone(&file_name);
+                                        move |_, path: PathBuf, stream| {
+                                            let filesystem = filesystem.clone();
+                                            let source_path = Arc::clone(&source_path);
+                                            let destination_path = Arc::clone(&destination_path);
+                                            let destination_filesystem = destination_filesystem.clone();
                                             let progress = Arc::clone(&progress);
 
                                             async move {
                                                 let metadata =
-                                                    match server.filesystem.async_symlink_metadata(&path).await {
+                                                    match filesystem.async_symlink_metadata(&path).await {
                                                         Ok(metadata) => metadata,
                                                         Err(_) => return Ok(()),
                                                     };
 
-                                                let relative_path = match path.strip_prefix(&*location) {
+                                                let relative_path = match path.strip_prefix(&*source_path) {
                                                     Ok(p) => p,
                                                     Err(_) => return Ok(()),
                                                 };
-                                                let destination_path = file_name.join(relative_path);
+                                                let destination_path = destination_path.join(relative_path);
 
-                                                if metadata.is_file() {
+                                                if metadata.file_type.is_file() {
                                                     if let Some(parent) = destination_path.parent() {
-                                                        server.filesystem.async_create_dir_all(parent).await?;
+                                                        destination_filesystem.async_create_dir_all(&parent).await?;
                                                     }
 
-                                                    let file = server.filesystem.async_open(&path).await?;
-                                                    let mut writer =
-                                                        crate::server::filesystem::writer::AsyncFileSystemWriter::new(
-                                                            server.clone(),
-                                                            &destination_path,
-                                                            Some(metadata.permissions()),
-                                                            metadata.modified().ok(),
-                                                        )
-                                                        .await?;
                                                     let mut reader = AsyncCountingReader::new_with_bytes_read(
-                                                        file,
+                                                        stream,
                                                         Arc::clone(&progress),
                                                     );
 
+                                                    let mut writer = destination_filesystem
+                                                        .async_create_file(&destination_path)
+                                                        .await?;
+                                                    destination_filesystem
+                                                        .async_set_permissions(&destination_path, metadata.permissions)
+                                                        .await?;
+
                                                     tokio::io::copy(&mut reader, &mut writer).await?;
                                                     writer.shutdown().await?;
-                                                } else if metadata.is_dir() {
-                                                    server.filesystem.async_create_dir_all(&destination_path).await?;
-                                                    server
-                                                        .filesystem
-                                                        .async_set_permissions(&destination_path, metadata.permissions())
+                                                } else if metadata.file_type.is_dir() {
+                                                    destination_filesystem.async_create_dir_all(&destination_path).await?;
+                                                    destination_filesystem
+                                                        .async_set_permissions(&destination_path, metadata.permissions)
                                                         .await?;
-                                                    if let Ok(modified_time) = metadata.modified() {
-                                                        server.filesystem.async_set_times(
-                                                            &destination_path,
-                                                            modified_time.into_std(),
-                                                            None,
-                                                        ).await?;
-                                                    }
 
-                                                    progress.fetch_add(metadata.len(), Ordering::Relaxed);
-                                                } else if metadata.is_symlink() && let Ok(target) = server.filesystem.async_read_link(&path).await {
-                                                    if let Err(err) = server.filesystem.async_symlink(&target, &destination_path).await {
+                                                    progress.fetch_add(metadata.size, Ordering::Relaxed);
+                                                } else if metadata.file_type.is_symlink() && let Ok(target) = filesystem.async_read_symlink(&path).await
+                                                    && let Err(err) = destination_filesystem.async_create_symlink(&target, &destination_path).await {
                                                         tracing::debug!(path = %destination_path.display(), "failed to create symlink from copy: {:?}", err);
-                                                    } else if let Ok(modified_time) = metadata.modified() {
-                                                        server.filesystem.async_set_times(
-                                                            &destination_path,
-                                                            modified_time.into_std(),
-                                                            None,
-                                                        ).await?;
                                                     }
-                                                }
 
                                                 Ok(())
                                             }
@@ -359,7 +428,7 @@ mod post {
                     Ok(Some(Err(err))) => {
                         tracing::error!(
                             server = %server.uuid,
-                            path = %location.display(),
+                            path = %path.display(),
                             "failed to copy directory: {:#?}",
                             err,
                         );
@@ -371,7 +440,7 @@ mod post {
                     Err(err) => {
                         tracing::error!(
                             server = %server.uuid,
-                            path = %location.display(),
+                            path = %path.display(),
                             "failed to copy directory: {:#?}",
                             err,
                         );

@@ -12,7 +12,7 @@ mod get {
         http::{HeaderMap, StatusCode},
     };
     use serde::Deserialize;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use utoipa::ToSchema;
 
     #[derive(ToSchema, Deserialize)]
@@ -84,7 +84,10 @@ mod get {
             }
         };
 
-        let path = PathBuf::from(payload.file_path);
+        let (path, filesystem) = server
+            .filesystem
+            .resolve_readable_fs(&server, Path::new(&payload.file_path))
+            .await;
 
         let mut folder_ascii = String::new();
         for (i, file_path) in payload.file_paths.iter().enumerate() {
@@ -121,40 +124,12 @@ mod get {
         );
         headers.insert("Content-Type", data.archive_format.mime_type().parse()?);
 
-        if let Some((backup, path)) = server
-            .filesystem
-            .backup_fs(&server, &state.backup_manager, &path)
-            .await
-        {
-            match backup
-                .read_files_archive(
-                    path.clone(),
-                    payload.file_paths.into_iter().map(PathBuf::from).collect(),
-                    data.archive_format,
-                )
-                .await
-            {
-                Ok(reader) => {
-                    return ApiResponse::new_stream(reader).with_headers(headers).ok();
-                }
-                Err(err) => {
-                    tracing::error!(
-                        server = %server.uuid,
-                        path = %path.display(),
-                        error = %err,
-                        "failed to get backup directory contents",
-                    );
-
-                    return ApiResponse::error("failed to retrieve backup folder contents")
-                        .with_status(StatusCode::EXPECTATION_FAILED)
-                        .ok();
-                }
-            }
-        }
-
-        let metadata = server.filesystem.async_symlink_metadata(&path).await;
+        let metadata = filesystem.async_symlink_metadata(&path).await;
         if let Ok(metadata) = metadata {
-            if !metadata.is_dir() || server.filesystem.is_ignored(&path, metadata.is_dir()).await {
+            if !metadata.file_type.is_dir()
+                || (filesystem.is_primary_server_fs()
+                    && server.filesystem.is_ignored(&path, true).await)
+            {
                 return ApiResponse::error("directory not found")
                     .with_status(StatusCode::NOT_FOUND)
                     .ok();
@@ -165,60 +140,21 @@ mod get {
                 .ok();
         }
 
-        let (reader, writer) = tokio::io::duplex(crate::BUFFER_SIZE);
-
-        tokio::spawn(async move {
-            let ignored = server.filesystem.get_ignored().await;
-            let writer = tokio_util::io::SyncIoBridge::new(writer);
-
-            match data.archive_format {
-                StreamableArchiveFormat::Zip => {
-                    if let Err(err) =
-                        crate::server::filesystem::archive::create::create_zip_streaming(
-                            server.filesystem.clone(),
-                            writer,
-                            &path,
-                            payload.file_paths.into_iter().map(PathBuf::from).collect(),
-                            None,
-                            vec![ignored],
-                            crate::server::filesystem::archive::create::CreateZipOptions {
-                                compression_level: state.config.system.backups.compression_level,
-                            },
-                        )
-                        .await
-                    {
-                        tracing::error!(
-                            server = %server.uuid,
-                            "failed to create zip archive: {:#?}",
-                            err
-                        );
-                    }
-                }
-                _ => {
-                    if let Err(err) = crate::server::filesystem::archive::create::create_tar(
-                        server.filesystem.clone(),
-                        writer,
-                        &path,
-                        payload.file_paths.into_iter().map(PathBuf::from).collect(),
-                        None,
-                        vec![ignored],
-                        crate::server::filesystem::archive::create::CreateTarOptions {
-                            compression_type: data.archive_format.compression_format(),
-                            compression_level: state.config.system.backups.compression_level,
-                            threads: state.config.api.file_compression_threads,
-                        },
-                    )
-                    .await
-                    {
-                        tracing::error!(
-                            server = %server.uuid,
-                            "failed to create tar archive: {:#?}",
-                            err
-                        );
-                    }
-                }
-            }
-        });
+        let ignore = if filesystem.is_primary_server_fs() {
+            server.filesystem.get_ignored().await.into()
+        } else {
+            Default::default()
+        };
+        let reader = filesystem
+            .async_read_dir_files_archive(
+                &path,
+                payload.file_paths.into_iter().map(PathBuf::from).collect(),
+                data.archive_format,
+                state.config.system.backups.compression_level,
+                None,
+                ignore,
+            )
+            .await?;
 
         ApiResponse::new_stream(reader).with_headers(headers).ok()
     }

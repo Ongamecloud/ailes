@@ -16,7 +16,12 @@ pub struct RangeReader<R> {
 }
 
 impl<R: Read + Seek> RangeReader<R> {
-    pub fn new(mut inner: R, range: (Bound<u64>, Bound<u64>), len: u64) -> io::Result<Self> {
+    pub fn new(
+        mut inner: R,
+        range: impl Into<(Bound<u64>, Bound<u64>)>,
+        len: u64,
+    ) -> io::Result<Self> {
+        let range = range.into();
         let start = match range.0 {
             Bound::Included(start) => start,
             Bound::Excluded(start) => start + 1,
@@ -93,7 +98,12 @@ pub struct AsyncRangeReader<R> {
 }
 
 impl<R: AsyncRead + AsyncSeek + Unpin> AsyncRangeReader<R> {
-    pub async fn new(mut inner: R, range: (Bound<u64>, Bound<u64>), len: u64) -> io::Result<Self> {
+    pub async fn new(
+        mut inner: R,
+        range: impl Into<(Bound<u64>, Bound<u64>)>,
+        len: u64,
+    ) -> io::Result<Self> {
+        let range = range.into();
         let start = match range.0 {
             Bound::Included(start) => start,
             Bound::Excluded(start) => start + 1,

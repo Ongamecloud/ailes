@@ -1,24 +1,32 @@
 use crate::{
-    io::compression::writer::CompressionWriter,
+    io::{
+        compression::{CompressionLevel, writer::CompressionWriter},
+        counting_reader::CountingReader,
+    },
     models::DirectoryEntry,
     remote::backups::{RawServerBackup, ResticBackupConfiguration},
     response::ApiResponse,
     server::{
-        backup::{
-            Backup, BackupBrowseExt, BackupCleanExt, BackupCreateExt, BackupExt, BackupFindExt,
-            BrowseBackup,
+        backup::{Backup, BackupCleanExt, BackupCreateExt, BackupExt, BackupFindExt},
+        filesystem::{
+            archive::StreamableArchiveFormat,
+            cap::FileType,
+            encode_mode,
+            virtualfs::{
+                AsyncFileRead, ByteRange, DirectoryListing, DirectoryStreamWalk, DirectoryWalk,
+                FileMetadata, FileRead, IsIgnoredFn, VirtualReadableFilesystem,
+            },
         },
-        filesystem::{archive::StreamableArchiveFormat, encode_mode},
     },
 };
 use axum::http::HeaderMap;
-use axum_extra::{TypedHeader, headers::Range};
+use cap_std::fs::PermissionsExt;
 use chrono::{Datelike, Timelike};
 use human_bytes::human_bytes;
 use serde::Deserialize;
 use std::{
     collections::HashMap,
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
     sync::{
         Arc, LazyLock,
@@ -48,7 +56,7 @@ enum ResticEntryType {
 }
 
 #[derive(Deserialize)]
-struct ResticDirectoryEntry {
+pub struct ResticDirectoryEntry {
     r#type: ResticEntryType,
     path: PathBuf,
     mode: u32,
@@ -557,7 +565,7 @@ impl BackupExt for ResticBackup {
         &self,
         config: &Arc<crate::config::Config>,
         archive_format: StreamableArchiveFormat,
-        _range: Option<TypedHeader<Range>>,
+        _range: Option<ByteRange>,
     ) -> Result<crate::response::ApiResponse, anyhow::Error> {
         let compression_level = config.system.backups.compression_level;
         let (reader, writer) = tokio::io::duplex(crate::BUFFER_SIZE);
@@ -770,7 +778,10 @@ impl BackupExt for ResticBackup {
         Ok(())
     }
 
-    async fn browse(&self, server: &crate::server::Server) -> Result<BrowseBackup, anyhow::Error> {
+    async fn browse(
+        &self,
+        server: &crate::server::Server,
+    ) -> Result<Arc<dyn VirtualReadableFilesystem>, anyhow::Error> {
         let child = Command::new("restic")
             .envs(&self.configuration.environment)
             .arg("--json")
@@ -806,7 +817,7 @@ impl BackupExt for ResticBackup {
             }
         }
 
-        Ok(BrowseBackup::Restic(BrowseResticBackup {
+        Ok(Arc::new(VirtualResticBackup {
             server: server.clone(),
             short_id: self.short_id.clone(),
             server_path: self.server_path.clone(),
@@ -826,20 +837,20 @@ impl BackupCleanExt for ResticBackup {
     }
 }
 
-pub struct BrowseResticBackup {
-    server: crate::server::Server,
-    short_id: String,
-
-    server_path: PathBuf,
-    configuration: Arc<ResticBackupConfiguration>,
-    entries: Arc<Vec<ResticDirectoryEntry>>,
+pub struct VirtualResticBackup {
+    pub server: crate::server::Server,
+    pub short_id: String,
+    pub server_path: PathBuf,
+    pub configuration: Arc<ResticBackupConfiguration>,
+    pub entries: Arc<Vec<ResticDirectoryEntry>>,
 }
 
-impl BrowseResticBackup {
+impl VirtualResticBackup {
     fn restic_entry_to_directory_entry(
         &self,
         path: &Path,
         entry: &ResticDirectoryEntry,
+        buffer: Option<&[u8]>,
     ) -> DirectoryEntry {
         let size = match entry.r#type {
             ResticEntryType::File => entry.size.unwrap_or(0),
@@ -852,13 +863,24 @@ impl BrowseResticBackup {
             _ => 0,
         };
 
-        let mime = match entry.r#type {
-            ResticEntryType::Dir => "inode/directory",
-            ResticEntryType::Symlink => "inode/symlink",
-            _ => new_mime_guess::from_path(&entry.path)
-                .iter_raw()
-                .next()
-                .unwrap_or("application/octet-stream"),
+        let mime_type = if matches!(entry.r#type, ResticEntryType::Dir) {
+            "inode/directory"
+        } else if matches!(entry.r#type, ResticEntryType::Symlink) {
+            "inode/symlink"
+        } else if let Some(buffer) = buffer {
+            if let Some(mime) = infer::get(buffer) {
+                mime.mime_type()
+            } else if let Some(mime) = new_mime_guess::from_path(&entry.path).iter_raw().next() {
+                mime
+            } else if crate::utils::is_valid_utf8_slice(buffer) || buffer.is_empty() {
+                "text/plain"
+            } else {
+                "application/octet-stream"
+            }
+        } else {
+            new_mime_guess::from_path(&entry.path)
+                .first_raw()
+                .unwrap_or("application/octet-stream")
         };
 
         DirectoryEntry {
@@ -875,20 +897,107 @@ impl BrowseResticBackup {
             directory: matches!(entry.r#type, ResticEntryType::Dir),
             file: matches!(entry.r#type, ResticEntryType::File),
             symlink: matches!(entry.r#type, ResticEntryType::Symlink),
-            mime,
+            mime: mime_type,
+        }
+    }
+
+    fn restic_entry_to_file_type(entry: &ResticDirectoryEntry) -> FileType {
+        match entry.r#type {
+            ResticEntryType::Dir => FileType::Dir,
+            ResticEntryType::File => FileType::File,
+            ResticEntryType::Symlink => FileType::Symlink,
         }
     }
 }
 
 #[async_trait::async_trait]
-impl BackupBrowseExt for BrowseResticBackup {
-    async fn read_dir(
+impl VirtualReadableFilesystem for VirtualResticBackup {
+    fn metadata(
         &self,
-        path: PathBuf,
+        path: &(dyn AsRef<Path> + Send + Sync),
+    ) -> Result<FileMetadata, anyhow::Error> {
+        if path.as_ref() == Path::new("") || path.as_ref() == Path::new("/") {
+            return Ok(FileMetadata {
+                file_type: FileType::Dir,
+                permissions: cap_std::fs::Permissions::from_mode(0o755),
+                size: 0,
+                modified: None,
+                created: None,
+            });
+        }
+
+        let path = path.as_ref();
+        let entry = self
+            .entries
+            .iter()
+            .find(|e| e.path == path)
+            .ok_or_else(|| anyhow::anyhow!(std::io::Error::from(rustix::io::Errno::NOENT)))?;
+
+        Ok(FileMetadata {
+            file_type: Self::restic_entry_to_file_type(entry),
+            permissions: cap_std::fs::Permissions::from_mode(entry.mode & 0o777),
+            size: entry.size.unwrap_or(0),
+            modified: Some(entry.mtime.into()),
+            created: None,
+        })
+    }
+    async fn async_metadata(
+        &self,
+        path: &(dyn AsRef<Path> + Send + Sync),
+    ) -> Result<FileMetadata, anyhow::Error> {
+        self.metadata(path)
+    }
+
+    fn symlink_metadata(
+        &self,
+        path: &(dyn AsRef<Path> + Send + Sync),
+    ) -> Result<FileMetadata, anyhow::Error> {
+        self.metadata(path)
+    }
+    async fn async_symlink_metadata(
+        &self,
+        path: &(dyn AsRef<Path> + Send + Sync),
+    ) -> Result<FileMetadata, anyhow::Error> {
+        self.metadata(path)
+    }
+
+    async fn async_directory_entry(
+        &self,
+        path: &(dyn AsRef<Path> + Send + Sync),
+    ) -> Result<DirectoryEntry, anyhow::Error> {
+        let path = path.as_ref();
+        let entry = self
+            .entries
+            .iter()
+            .find(|e| e.path == path)
+            .ok_or_else(|| anyhow::anyhow!(std::io::Error::from(rustix::io::Errno::NOENT)))?;
+
+        Ok(self.restic_entry_to_directory_entry(path, entry, None))
+    }
+
+    async fn async_directory_entry_buffer(
+        &self,
+        path: &(dyn AsRef<Path> + Send + Sync),
+        buffer: &[u8],
+    ) -> Result<DirectoryEntry, anyhow::Error> {
+        let path = path.as_ref();
+        let entry = self
+            .entries
+            .iter()
+            .find(|e| e.path == path)
+            .ok_or_else(|| anyhow::anyhow!(std::io::Error::from(rustix::io::Errno::NOENT)))?;
+
+        Ok(self.restic_entry_to_directory_entry(path, entry, Some(buffer)))
+    }
+
+    async fn async_read_dir(
+        &self,
+        path: &(dyn AsRef<Path> + Send + Sync),
         per_page: Option<usize>,
         page: usize,
-        is_ignored: impl Fn(PathBuf, bool) -> bool + Send + Sync + 'static,
-    ) -> Result<(usize, Vec<crate::models::DirectoryEntry>), anyhow::Error> {
+        is_ignored: IsIgnoredFn,
+    ) -> Result<DirectoryListing, anyhow::Error> {
+        let path = path.as_ref().to_path_buf();
         let mut directory_entries = Vec::new();
         let mut other_entries = Vec::new();
 
@@ -905,7 +1014,7 @@ impl BackupBrowseExt for BrowseResticBackup {
                 continue;
             }
 
-            if is_ignored(name.clone(), matches!(entry.r#type, ResticEntryType::Dir)) {
+            if (is_ignored)(Self::restic_entry_to_file_type(entry), name.clone()).is_none() {
                 continue;
             }
 
@@ -931,27 +1040,124 @@ impl BackupBrowseExt for BrowseResticBackup {
                 .skip(start)
                 .take(per_page)
             {
-                entries.push(self.restic_entry_to_directory_entry(&entry.path, entry));
+                entries.push(self.restic_entry_to_directory_entry(&entry.path, entry, None));
             }
         } else {
             for entry in directory_entries.iter().chain(other_entries.iter()) {
-                entries.push(self.restic_entry_to_directory_entry(&entry.path, entry));
+                entries.push(self.restic_entry_to_directory_entry(&entry.path, entry, None));
             }
         }
 
-        Ok((total_entries, entries))
+        Ok(DirectoryListing {
+            total_entries,
+            entries,
+        })
     }
 
-    async fn read_file(
+    async fn async_walk_dir<'a>(
+        &'a self,
+        path: &(dyn AsRef<Path> + Send + Sync),
+        is_ignored: IsIgnoredFn,
+    ) -> Result<Box<dyn DirectoryWalk + Send + Sync + 'a>, anyhow::Error> {
+        struct ResticWalkDir {
+            entries: Arc<Vec<ResticDirectoryEntry>>,
+            index: usize,
+            path: PathBuf,
+            is_ignored: IsIgnoredFn,
+        }
+
+        #[async_trait::async_trait]
+        impl DirectoryWalk for ResticWalkDir {
+            async fn next_entry(&mut self) -> Option<Result<(FileType, PathBuf), anyhow::Error>> {
+                while self.index < self.entries.len() {
+                    let entry = &self.entries[self.index];
+                    self.index += 1;
+
+                    let name = &entry.path;
+                    if !name.starts_with(&self.path) || name == &self.path {
+                        continue;
+                    }
+
+                    let file_type = VirtualResticBackup::restic_entry_to_file_type(entry);
+                    if let Some(path) = (self.is_ignored)(file_type, name.clone()) {
+                        return Some(Ok((file_type, path)));
+                    }
+                }
+                None
+            }
+        }
+
+        Ok(Box::new(ResticWalkDir {
+            entries: self.entries.clone(),
+            index: 0,
+            path: path.as_ref().to_path_buf(),
+            is_ignored,
+        }))
+    }
+
+    async fn async_walk_dir_stream<'a>(
+        &'a self,
+        _path: &(dyn AsRef<Path> + Send + Sync),
+        _is_ignored: IsIgnoredFn,
+    ) -> Result<Box<dyn DirectoryStreamWalk + Send + Sync + 'a>, anyhow::Error> {
+        Err(anyhow::anyhow!(
+            "Streamed directory walking is not supported for Restic backups"
+        ))
+    }
+
+    fn read_file(
         &self,
-        path: PathBuf,
-        _range: Option<TypedHeader<Range>>,
-    ) -> Result<(HeaderMap, Box<dyn tokio::io::AsyncRead + Unpin + Send>), anyhow::Error> {
+        path: &(dyn AsRef<Path> + Send + Sync),
+        _range: Option<ByteRange>,
+    ) -> Result<FileRead, anyhow::Error> {
+        let path = path.as_ref();
         let entry = self
             .entries
             .iter()
             .find(|e| e.path == path)
             .ok_or_else(|| anyhow::anyhow!(std::io::Error::from(rustix::io::Errno::NOENT)))?;
+
+        if !matches!(entry.r#type, ResticEntryType::File) {
+            return Err(anyhow::anyhow!(std::io::Error::from(
+                rustix::io::Errno::NOENT
+            )));
+        }
+
+        let full_path = PathBuf::from(&self.server_path).join(&entry.path);
+
+        let child = std::process::Command::new("restic")
+            .envs(&self.configuration.environment)
+            .arg("--json")
+            .arg("--no-lock")
+            .arg("--repo")
+            .arg(&self.configuration.repository)
+            .args(self.configuration.password())
+            .arg("dump")
+            .arg(&self.short_id)
+            .arg(full_path)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()?;
+
+        Ok(FileRead {
+            size: entry.size.unwrap_or(0),
+            total_size: entry.size.unwrap_or(0),
+            reader_range: None,
+            reader: Box::new(child.stdout.unwrap()),
+        })
+    }
+    async fn async_read_file(
+        &self,
+        path: &(dyn AsRef<Path> + Send + Sync),
+        _range: Option<ByteRange>,
+    ) -> Result<AsyncFileRead, anyhow::Error> {
+        let path = path.as_ref();
+        let entry = self
+            .entries
+            .iter()
+            .find(|e| e.path == path)
+            .ok_or_else(|| anyhow::anyhow!(std::io::Error::from(rustix::io::Errno::NOENT)))?;
+
         if !matches!(entry.r#type, ResticEntryType::File) {
             return Err(anyhow::anyhow!(std::io::Error::from(
                 rustix::io::Errno::NOENT
@@ -974,22 +1180,44 @@ impl BackupBrowseExt for BrowseResticBackup {
             .stderr(std::process::Stdio::null())
             .spawn()?;
 
-        let mut headers = HeaderMap::new();
-        headers.insert("Content-Length", entry.size.unwrap_or_default().into());
-
-        Ok((headers, Box::new(child.stdout.unwrap())))
+        Ok(AsyncFileRead {
+            size: entry.size.unwrap_or(0),
+            total_size: entry.size.unwrap_or(0),
+            reader_range: None,
+            reader: Box::new(child.stdout.unwrap()),
+        })
     }
 
-    async fn read_directory_archive(
+    fn read_symlink(
         &self,
-        path: PathBuf,
+        _path: &(dyn AsRef<Path> + Send + Sync),
+    ) -> Result<PathBuf, anyhow::Error> {
+        Err(anyhow::anyhow!(
+            "Symlink reading is not supported for Restic backups"
+        ))
+    }
+    async fn async_read_symlink(
+        &self,
+        path: &(dyn AsRef<Path> + Send + Sync),
+    ) -> Result<PathBuf, anyhow::Error> {
+        self.read_symlink(path)
+    }
+
+    async fn async_read_dir_archive(
+        &self,
+        path: &(dyn AsRef<Path> + Send + Sync),
         archive_format: StreamableArchiveFormat,
+        compression_level: CompressionLevel,
+        bytes_archived: Option<Arc<AtomicU64>>,
+        is_ignored: IsIgnoredFn,
     ) -> Result<tokio::io::DuplexStream, anyhow::Error> {
+        let path = path.as_ref().to_path_buf();
         let entry = self
             .entries
             .iter()
             .find(|e| e.path == path)
             .ok_or_else(|| anyhow::anyhow!(std::io::Error::from(rustix::io::Errno::NOENT)))?;
+
         if !matches!(entry.r#type, ResticEntryType::Dir) {
             return Err(anyhow::anyhow!(std::io::Error::from(
                 rustix::io::Errno::NOENT
@@ -997,42 +1225,56 @@ impl BackupBrowseExt for BrowseResticBackup {
         }
 
         let full_path = PathBuf::from(&self.server_path).join(&entry.path);
-        let compression_level = self
-            .server
-            .app_state
-            .config
-            .system
-            .backups
-            .compression_level;
+
         let (reader, writer) = tokio::io::duplex(crate::BUFFER_SIZE);
+
+        let configuration = self.configuration.clone();
+        let short_id = self.short_id.clone();
+        let file_compression_threads = self.server.app_state.config.api.file_compression_threads;
+
+        let spawn_restic = move || {
+            std::process::Command::new("restic")
+                .envs(&configuration.environment)
+                .arg("--json")
+                .arg("--no-lock")
+                .arg("--repo")
+                .arg(&configuration.repository)
+                .args(configuration.password())
+                .arg("dump")
+                .arg(format!("{}:{}", short_id, full_path.display()))
+                .arg("/")
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+        };
 
         match archive_format {
             StreamableArchiveFormat::Zip => {
-                let child = std::process::Command::new("restic")
-                    .envs(&self.configuration.environment)
-                    .arg("--json")
-                    .arg("--no-lock")
-                    .arg("--repo")
-                    .arg(&self.configuration.repository)
-                    .args(self.configuration.password())
-                    .arg("dump")
-                    .arg(format!("{}:{}", self.short_id, full_path.display()))
-                    .arg("/")
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::null())
-                    .spawn()?;
-
                 crate::spawn_blocking_handled(move || -> Result<(), anyhow::Error> {
+                    let mut child = spawn_restic()?;
+
                     let writer = tokio_util::io::SyncIoBridge::new(writer);
                     let mut archive = zip::ZipWriter::new_stream(writer);
 
-                    let mut subtar = tar::Archive::new(child.stdout.unwrap());
+                    let mut subtar = tar::Archive::new(child.stdout.take().unwrap());
                     let mut entries = subtar.entries()?;
 
                     let mut read_buffer = vec![0; crate::BUFFER_SIZE];
                     while let Some(Ok(mut entry)) = entries.next() {
                         let header = entry.header().clone();
-                        let relative = entry.path()?;
+                        let relative = entry.path()?.to_path_buf();
+
+                        let file_type = match header.entry_type() {
+                            tar::EntryType::Directory => FileType::Dir,
+                            tar::EntryType::Regular => FileType::File,
+                            tar::EntryType::Symlink => FileType::Symlink,
+                            _ => continue,
+                        };
+
+                        let absolute_path = path.join(&relative);
+                        if (is_ignored)(file_type, absolute_path).is_none() {
+                            continue;
+                        }
 
                         let mut options: zip::write::FileOptions<'_, ()> =
                             zip::write::FileOptions::default()
@@ -1041,6 +1283,7 @@ impl BackupBrowseExt for BrowseResticBackup {
                                 )
                                 .unix_permissions(header.mode()?)
                                 .large_file(header.size()? >= u32::MAX as u64);
+
                         if let Ok(mtime) = header.mtime()
                             && let Some(mtime) = chrono::DateTime::from_timestamp(mtime as i64, 0)
                         {
@@ -1061,7 +1304,17 @@ impl BackupBrowseExt for BrowseResticBackup {
                             }
                             tar::EntryType::Regular => {
                                 archive.start_file(relative.to_string_lossy(), options)?;
-                                crate::io::copy_shared(&mut read_buffer, &mut entry, &mut archive)?;
+
+                                loop {
+                                    let n = entry.read(&mut read_buffer)?;
+                                    if n == 0 {
+                                        break;
+                                    }
+                                    archive.write_all(&read_buffer[..n])?;
+                                    if let Some(counter) = &bytes_archived {
+                                        counter.fetch_add(n as u64, Ordering::SeqCst);
+                                    }
+                                }
                             }
                             _ => continue,
                         }
@@ -1074,330 +1327,55 @@ impl BackupBrowseExt for BrowseResticBackup {
                 });
             }
             _ => {
-                let child = std::process::Command::new("restic")
-                    .envs(&self.configuration.environment)
-                    .arg("--json")
-                    .arg("--no-lock")
-                    .arg("--repo")
-                    .arg(&self.configuration.repository)
-                    .args(self.configuration.password())
-                    .arg("dump")
-                    .arg(format!("{}:{}", self.short_id, full_path.display()))
-                    .arg("/")
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::null())
-                    .spawn()?;
-
-                let file_compression_threads =
-                    self.server.app_state.config.api.file_compression_threads;
                 crate::spawn_blocking_handled(move || -> Result<(), anyhow::Error> {
-                    let mut writer = CompressionWriter::new(
+                    let mut child = spawn_restic()?;
+
+                    let writer = CompressionWriter::new(
                         tokio_util::io::SyncIoBridge::new(writer),
                         archive_format.compression_format(),
                         compression_level,
                         file_compression_threads,
                     );
 
-                    if let Err(err) = crate::io::copy(&mut child.stdout.unwrap(), &mut writer) {
-                        tracing::error!(
-                            "failed to compress tar archive for restic backup: {}",
-                            err
-                        );
+                    let mut subtar = tar::Archive::new(child.stdout.take().unwrap());
+                    let mut entries = subtar.entries()?;
+
+                    let mut out_tar = tar::Builder::new(writer);
+
+                    while let Some(Ok(entry)) = entries.next() {
+                        let mut header = entry.header().clone();
+                        let relative = entry.path()?.to_path_buf();
+
+                        let file_type = match header.entry_type() {
+                            tar::EntryType::Directory => FileType::Dir,
+                            tar::EntryType::Regular => FileType::File,
+                            tar::EntryType::Symlink => FileType::Symlink,
+                            _ => continue,
+                        };
+
+                        let absolute_path = path.join(&relative);
+                        if (is_ignored)(file_type, absolute_path).is_none() {
+                            continue;
+                        }
+
+                        if file_type.is_file() {
+                            if let Some(counter) = &bytes_archived {
+                                let counting_reader =
+                                    CountingReader::new_with_bytes_read(entry, counter.clone());
+                                out_tar.append_data(&mut header, relative, counting_reader)?;
+                            } else {
+                                out_tar.append_data(&mut header, relative, entry)?;
+                            }
+                        } else {
+                            out_tar.append_data(&mut header, relative, std::io::empty())?;
+                        }
                     }
 
-                    let mut inner = writer.finish()?;
+                    out_tar.finish()?;
+                    let mut inner = out_tar.into_inner()?.finish()?;
                     inner.flush()?;
 
                     Ok(())
-                });
-            }
-        }
-
-        Ok(reader)
-    }
-
-    async fn read_files_archive(
-        &self,
-        path: PathBuf,
-        file_paths: Vec<PathBuf>,
-        archive_format: StreamableArchiveFormat,
-    ) -> Result<tokio::io::DuplexStream, anyhow::Error> {
-        let path = if path.components().count() > 0 {
-            let entry = self
-                .entries
-                .iter()
-                .find(|e| e.path == path)
-                .ok_or_else(|| anyhow::anyhow!(std::io::Error::from(rustix::io::Errno::NOENT)))?;
-            if !matches!(entry.r#type, ResticEntryType::Dir) {
-                return Err(anyhow::anyhow!(std::io::Error::from(
-                    rustix::io::Errno::NOENT
-                )));
-            }
-
-            &entry.path
-        } else {
-            &PathBuf::from("")
-        };
-
-        let full_path = PathBuf::from(&self.server_path).join(path);
-        let compression_level = self
-            .server
-            .app_state
-            .config
-            .system
-            .backups
-            .compression_level;
-        let (reader, writer) = tokio::io::duplex(crate::BUFFER_SIZE);
-
-        match archive_format {
-            StreamableArchiveFormat::Zip => {
-                crate::spawn_blocking_handled({
-                    let short_id = self.short_id.clone();
-                    let configuration = Arc::clone(&self.configuration);
-                    let entries = Arc::clone(&self.entries);
-
-                    move || -> Result<(), anyhow::Error> {
-                        let writer = tokio_util::io::SyncIoBridge::new(writer);
-                        let mut archive = zip::ZipWriter::new_stream(writer);
-
-                        for file_path in file_paths {
-                            let path = full_path.join(&file_path);
-                            let entry = match entries.iter().find(|e| e.path == file_path) {
-                                Some(entry) => entry,
-                                None => continue,
-                            };
-
-                            let relative = match path.strip_prefix(&full_path) {
-                                Ok(path) => path,
-                                Err(_) => continue,
-                            };
-
-                            let options: zip::write::FileOptions<'_, ()> =
-                                zip::write::FileOptions::default()
-                                    .compression_level(Some(
-                                        compression_level.to_deflate_level() as i64
-                                    ))
-                                    .unix_permissions(entry.mode)
-                                    .large_file(
-                                        entry.size.is_some_and(|size| size >= u32::MAX as u64),
-                                    )
-                                    .last_modified_time(zip::DateTime::from_date_and_time(
-                                        entry.mtime.year() as u16,
-                                        entry.mtime.month() as u8,
-                                        entry.mtime.day() as u8,
-                                        entry.mtime.hour() as u8,
-                                        entry.mtime.minute() as u8,
-                                        entry.mtime.second() as u8,
-                                    )?);
-
-                            match entry.r#type {
-                                ResticEntryType::Dir => {
-                                    archive.add_directory(relative.to_string_lossy(), options)?;
-
-                                    let child = std::process::Command::new("restic")
-                                        .envs(&configuration.environment)
-                                        .arg("--json")
-                                        .arg("--no-lock")
-                                        .arg("--repo")
-                                        .arg(&configuration.repository)
-                                        .args(configuration.password())
-                                        .arg("dump")
-                                        .arg(format!("{}:{}", short_id, path.display()))
-                                        .arg("/")
-                                        .stdout(std::process::Stdio::piped())
-                                        .stderr(std::process::Stdio::null())
-                                        .spawn()?;
-
-                                    let mut subtar = tar::Archive::new(child.stdout.unwrap());
-                                    let mut entries = subtar.entries()?;
-
-                                    let mut read_buffer = vec![0; crate::BUFFER_SIZE];
-                                    while let Some(Ok(mut entry)) = entries.next() {
-                                        let header = entry.header().clone();
-                                        let relative = relative.join(entry.path()?);
-
-                                        let mut options: zip::write::FileOptions<'_, ()> =
-                                            zip::write::FileOptions::default()
-                                                .compression_level(Some(
-                                                    compression_level.to_deflate_level() as i64,
-                                                ))
-                                                .unix_permissions(header.mode()?)
-                                                .large_file(header.size()? >= u32::MAX as u64);
-                                        if let Ok(mtime) = header.mtime()
-                                            && let Some(mtime) =
-                                                chrono::DateTime::from_timestamp(mtime as i64, 0)
-                                        {
-                                            options = options.last_modified_time(
-                                                zip::DateTime::from_date_and_time(
-                                                    mtime.year() as u16,
-                                                    mtime.month() as u8,
-                                                    mtime.day() as u8,
-                                                    mtime.hour() as u8,
-                                                    mtime.minute() as u8,
-                                                    mtime.second() as u8,
-                                                )?,
-                                            );
-                                        }
-
-                                        match header.entry_type() {
-                                            tar::EntryType::Directory => {
-                                                archive.add_directory(
-                                                    relative.to_string_lossy(),
-                                                    options,
-                                                )?;
-                                            }
-                                            tar::EntryType::Regular => {
-                                                archive.start_file(
-                                                    relative.to_string_lossy(),
-                                                    options,
-                                                )?;
-                                                crate::io::copy_shared(
-                                                    &mut read_buffer,
-                                                    &mut entry,
-                                                    &mut archive,
-                                                )?;
-                                            }
-                                            _ => continue,
-                                        }
-                                    }
-                                }
-                                ResticEntryType::File => {
-                                    let child = match std::process::Command::new("restic")
-                                        .envs(&configuration.environment)
-                                        .arg("--json")
-                                        .arg("--no-lock")
-                                        .arg("--repo")
-                                        .arg(&configuration.repository)
-                                        .args(configuration.password())
-                                        .arg("dump")
-                                        .arg(&short_id)
-                                        .arg(&path)
-                                        .stdout(std::process::Stdio::piped())
-                                        .stderr(std::process::Stdio::null())
-                                        .spawn()
-                                    {
-                                        Ok(child) => child,
-                                        Err(_) => continue,
-                                    };
-
-                                    archive.start_file(relative.to_string_lossy(), options)?;
-                                    crate::io::copy(&mut child.stdout.unwrap(), &mut archive)?;
-                                }
-                                _ => continue,
-                            }
-                        }
-
-                        let mut inner = archive.finish()?;
-                        inner.flush()?;
-
-                        Ok(())
-                    }
-                });
-            }
-            _ => {
-                crate::spawn_blocking_handled({
-                    let file_compression_threads =
-                        self.server.app_state.config.api.file_compression_threads;
-                    let short_id = self.short_id.clone();
-                    let configuration = Arc::clone(&self.configuration);
-                    let entries = Arc::clone(&self.entries);
-
-                    move || -> Result<(), anyhow::Error> {
-                        let writer = CompressionWriter::new(
-                            tokio_util::io::SyncIoBridge::new(writer),
-                            archive_format.compression_format(),
-                            compression_level,
-                            file_compression_threads,
-                        );
-                        let mut archive = tar::Builder::new(writer);
-
-                        for file_path in file_paths {
-                            let path = full_path.join(&file_path);
-                            let entry = match entries.iter().find(|e| e.path == file_path) {
-                                Some(entry) => entry,
-                                None => continue,
-                            };
-
-                            let relative = match path.strip_prefix(&full_path) {
-                                Ok(path) => path,
-                                Err(_) => continue,
-                            };
-
-                            let mut header = tar::Header::new_gnu();
-                            header.set_size(0);
-                            header.set_mode(entry.mode);
-                            header.set_mtime(entry.mtime.timestamp() as u64);
-
-                            match entry.r#type {
-                                ResticEntryType::Dir => {
-                                    header.set_entry_type(tar::EntryType::Directory);
-
-                                    archive.append_data(&mut header, relative, std::io::empty())?;
-
-                                    let child = std::process::Command::new("restic")
-                                        .envs(&configuration.environment)
-                                        .arg("--json")
-                                        .arg("--no-lock")
-                                        .arg("--repo")
-                                        .arg(&configuration.repository)
-                                        .args(configuration.password())
-                                        .arg("dump")
-                                        .arg(format!("{}:{}", short_id, path.display()))
-                                        .arg("/")
-                                        .stdout(std::process::Stdio::piped())
-                                        .stderr(std::process::Stdio::null())
-                                        .spawn()?;
-
-                                    let mut subtar = tar::Archive::new(child.stdout.unwrap());
-                                    let mut entries = subtar.entries()?;
-
-                                    while let Some(Ok(entry)) = entries.next() {
-                                        let mut header = entry.header().clone();
-
-                                        archive.append_data(
-                                            &mut header,
-                                            relative.join(match entry.path() {
-                                                Ok(path) => path,
-                                                Err(_) => continue,
-                                            }),
-                                            entry,
-                                        )?;
-                                    }
-                                }
-                                ResticEntryType::File => {
-                                    let child = std::process::Command::new("restic")
-                                        .envs(&configuration.environment)
-                                        .arg("--json")
-                                        .arg("--no-lock")
-                                        .arg("--repo")
-                                        .arg(&configuration.repository)
-                                        .args(configuration.password())
-                                        .arg("dump")
-                                        .arg(&short_id)
-                                        .arg(&path)
-                                        .stdout(std::process::Stdio::piped())
-                                        .stderr(std::process::Stdio::null())
-                                        .spawn()?;
-
-                                    header.set_size(entry.size.unwrap_or(0));
-                                    header.set_entry_type(tar::EntryType::Regular);
-
-                                    archive.append_data(
-                                        &mut header,
-                                        relative,
-                                        child.stdout.unwrap(),
-                                    )?;
-                                }
-                                _ => continue,
-                            }
-                        }
-
-                        archive.finish()?;
-                        let mut inner = archive.into_inner()?;
-                        inner.flush()?;
-
-                        Ok(())
-                    }
                 });
             }
         }

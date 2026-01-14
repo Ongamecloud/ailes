@@ -11,6 +11,7 @@ pub enum CompressionWriter<'a, W: Write + Send + 'static> {
     None(W),
     Gz(gzp::par::compress::ParCompress<'a, gzp::deflate::Gzip, W>),
     Xz(usize, Box<lzma_rust2::XzWriterMt<W>>),
+    Lzip(usize, Box<lzma_rust2::LzipWriterMt<W>>),
     Bz2(bzip2::write::BzEncoder<W>),
     Lz4(lzzzz::lz4f::WriteCompressor<W>),
     Zstd(usize, bool, zstd::Encoder<'a, W>),
@@ -41,7 +42,27 @@ impl<'a, W: Write + Send + 'static> CompressionWriter<'a, W> {
                             let mut options =
                                 lzma_rust2::XzOptions::with_preset(compression_level.to_xz_level());
                             options.set_block_size(Some(
-                                std::num::NonZeroU64::new(16 * 1024).unwrap(),
+                                std::num::NonZeroU64::new(32 * 1024).unwrap(),
+                            ));
+
+                            options
+                        },
+                        threads as u32,
+                    )
+                    .unwrap(),
+                ),
+            ),
+            CompressionType::Lzip => CompressionWriter::Lzip(
+                0,
+                Box::new(
+                    lzma_rust2::LzipWriterMt::new(
+                        writer,
+                        {
+                            let mut options = lzma_rust2::LzipOptions::with_preset(
+                                compression_level.to_lzip_level(),
+                            );
+                            options.set_member_size(Some(
+                                std::num::NonZeroU64::new(32 * 1024).unwrap(),
                             ));
 
                             options
@@ -83,6 +104,7 @@ impl<'a, W: Write + Send + 'static> CompressionWriter<'a, W> {
                 Ok(writer.finish().map_err(std::io::Error::other)?)
             }
             CompressionWriter::Xz(_, writer) => Ok(writer.finish()?),
+            CompressionWriter::Lzip(_, writer) => Ok(writer.finish()?),
             CompressionWriter::Bz2(writer) => Ok(writer.finish()?),
             CompressionWriter::Lz4(mut writer) => {
                 writer.flush()?;
@@ -100,6 +122,15 @@ impl<'a, W: Write + Send + 'static> Write for CompressionWriter<'a, W> {
             CompressionWriter::None(writer) => writer.write(buf),
             CompressionWriter::Gz(writer) => writer.write(buf),
             CompressionWriter::Xz(i, writer) => {
+                *i += 1;
+
+                if *i % 64 == 0 {
+                    writer.flush()?;
+                }
+
+                writer.write(buf)
+            }
+            CompressionWriter::Lzip(i, writer) => {
                 *i += 1;
 
                 if *i % 64 == 0 {
@@ -130,6 +161,7 @@ impl<'a, W: Write + Send + 'static> Write for CompressionWriter<'a, W> {
             CompressionWriter::None(writer) => writer.flush(),
             CompressionWriter::Gz(writer) => writer.flush(),
             CompressionWriter::Xz(_, writer) => writer.flush(),
+            CompressionWriter::Lzip(_, writer) => writer.flush(),
             CompressionWriter::Bz2(writer) => writer.flush(),
             CompressionWriter::Lz4(writer) => writer.flush(),
             CompressionWriter::Zstd(_, _, writer) => writer.flush(),
@@ -159,16 +191,16 @@ impl AsyncCompressionWriter {
 
             match crate::io::copy(&mut reader, &mut stream) {
                 Ok(_) => {}
-                Err(e) => {
-                    let _ = inner_error_sender.send(e);
+                Err(err) => {
+                    let _ = inner_error_sender.send(err);
                     return;
                 }
             }
 
             match stream.finish() {
                 Ok(_) => {}
-                Err(e) => {
-                    let _ = inner_error_sender.send(e);
+                Err(err) => {
+                    let _ = inner_error_sender.send(err);
                 }
             }
         });

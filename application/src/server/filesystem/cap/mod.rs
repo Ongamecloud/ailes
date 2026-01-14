@@ -10,7 +10,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     sync::RwLock,
 };
-pub use utils::{AsyncReadDir, AsyncWalkDir, ReadDir, WalkDir};
+pub use utils::{AsyncReadDir, AsyncWalkDir, FileType, ReadDir, WalkDir};
 
 mod utils;
 
@@ -41,6 +41,19 @@ impl CapFilesystem {
         Self {
             base_path: Arc::new(base_path),
             inner: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    pub fn get_virtual(
+        &self,
+        server: crate::server::Server,
+    ) -> crate::server::filesystem::virtualfs::cap::VirtualCapFilesystem {
+        crate::server::filesystem::virtualfs::cap::VirtualCapFilesystem {
+            inner: self.clone(),
+            server,
+            is_primary_server_fs: false,
+            is_writable: false,
+            is_ignored: None,
         }
     }
 
@@ -829,13 +842,13 @@ impl CapFilesystem {
     pub async fn async_walk_dir(
         &self,
         path: impl AsRef<Path>,
-    ) -> Result<AsyncWalkDir<'_>, anyhow::Error> {
+    ) -> Result<AsyncWalkDir, anyhow::Error> {
         let path = self.relative_path(path.as_ref());
 
         AsyncWalkDir::new(self.clone(), path).await
     }
 
-    pub fn walk_dir(&self, path: impl AsRef<Path>) -> Result<WalkDir<'_>, anyhow::Error> {
+    pub fn walk_dir(&self, path: impl AsRef<Path>) -> Result<WalkDir, anyhow::Error> {
         let path = self.relative_path(path.as_ref());
 
         WalkDir::new(self.clone(), path)

@@ -39,3 +39,8 @@ pub fn copy_shared(
 
     Ok(())
 }
+
+pub trait WriteSeek: Write + std::io::Seek {}
+impl<T: Write + std::io::Seek> WriteSeek for T {}
+pub trait AsyncWriteSeek: tokio::io::AsyncWrite + tokio::io::AsyncSeek + Unpin {}
+impl<T: tokio::io::AsyncWrite + tokio::io::AsyncSeek + Unpin> AsyncWriteSeek for T {}

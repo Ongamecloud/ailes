@@ -201,6 +201,7 @@ remote_query:
 ---
 
 - properly support egg `file_denylist`
+- add support for browsing `.zip`, `.7z`, and `.ddup` compressed backups in the file manager
 - add support for `name` property on `POST /api/servers/{server}/files/copy`
 - add support for opening individual compressed file (e.g. `.log.gz`) in `GET /api/servers/{server}/files/contents`
 - add (real) folder size support on `GET /api/servers/{server}/files/list-directory`

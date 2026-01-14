@@ -1,6 +1,6 @@
 [package]
 name = "wings-rs"
-version = "0.23.2"
+version = "0.24.0"
 edition = "2024"
 
 [dependencies]
@@ -33,13 +33,13 @@ rand = { workspace = true }
 tar = "0.4.44"
 zip = { version = "7.0.0", default-features = false, features = ["bzip2", "deflate", "time", "zstd", "lzma", "xz"] }
 sevenz-rust2 = { version = "0.20.0", features = ["deflate", "compress", "brotli", "zstd", "bzip2", "ppmd", "lz4"] }
-flate2 = { version = "1.1.1", features = ["zlib-rs"], default-features = false }
+flate2 = { version = "1.1.1", default-features = false, features = ["zlib-rs"] }
 jwt = "0.16.0"
 hmac = { version = "0.12.1", features = ["std"] }
 sha2 = "0.10.9"
 ddup-bak = "0.7.0"
 infer = "0.19.0"
-rustls = { version = "0.23.27", features = ["ring"] }
+rustls = { version = "0.23.27", features = ["aws-lc-rs"] }
 ignore = { version = "0.4.23", features = ["simd-accel"] }
 sha1 = "0.10.6"
 futures = "0.3.31"
@@ -53,7 +53,7 @@ dialoguer = "0.12.0"
 sysinfo = "0.37.0"
 crc32fast = "1.4.2"
 cap-std = "4.0.0"
-rustix = { version = "1.0.7", features = ["system"] }
+rustix = "1.0.7"
 cidr = { version = "0.3.1", features = ["serde"] }
 hickory-resolver = "0.25.2"
 constant_time_eq = "0.4.2"
@@ -65,7 +65,7 @@ chrono-tz = "0.10.4"
 gzp = "2.0.0"
 lzma-rust2 = { version = "0.15.4", features = ["optimization"] }
 bzip2 = "0.6.0"
-zstd = { version = "0.13.3", features = ["zstdmt"] }
+zstd = { version = "0.13.3", features = ["zstdmt", "fat-lto"] }
 base64 = "0.22.1"
 chunked_vec = "=0.3.4"
 async-channel = "2.5.0"
@@ -78,7 +78,8 @@ serde_regex = "1.1.0"
 compact_str = { git = "https://github.com/0x7d8/compact_str.git", version = "0.9.0", features = ["serde", "utoipa"] }
 memchr = "2.7.6"
 thin-vec = "0.2.14"
-smallvec = "1.15.1"
+moka = { version = "0.12.12", features = ["future"] }
+ouroboros = "0.18.5"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 tikv-jemallocator = "0.6.0"

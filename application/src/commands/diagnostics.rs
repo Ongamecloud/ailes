@@ -51,7 +51,7 @@ pub async fn diagnostics(
     write_line(
         &mut output,
         "kernel",
-        &rustix::system::uname().version().to_string_lossy(),
+        &sysinfo::System::kernel_long_version(),
     )?;
     write_line(
         &mut output,

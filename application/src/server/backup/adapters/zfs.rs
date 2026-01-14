@@ -1,20 +1,16 @@
 use crate::{
-    io::{counting_reader::AsyncCountingReader, range_reader::AsyncRangeReader},
+    io::counting_reader::AsyncCountingReader,
     remote::backups::RawServerBackup,
     response::ApiResponse,
     server::{
-        backup::{
-            Backup, BackupBrowseExt, BackupCleanExt, BackupCreateExt, BackupExt, BackupFindExt,
-            BrowseBackup,
+        backup::{Backup, BackupCleanExt, BackupCreateExt, BackupExt, BackupFindExt},
+        filesystem::{
+            archive::StreamableArchiveFormat,
+            virtualfs::{ByteRange, VirtualReadableFilesystem},
         },
-        filesystem::archive::StreamableArchiveFormat,
     },
 };
-use axum::{http::HeaderMap, response::IntoResponse};
-use axum_extra::{
-    TypedHeader,
-    headers::{ContentRange, Range},
-};
+use axum::http::HeaderMap;
 use std::{
     path::{Path, PathBuf},
     sync::{
@@ -132,13 +128,11 @@ impl BackupCreateExt for ZfsBackup {
             let ignore = ignore.clone();
 
             async move {
-                let ignored = [ignore];
-
                 let mut walker = server
                     .filesystem
                     .async_walk_dir(&PathBuf::from(""))
                     .await?
-                    .with_ignored(&ignored);
+                    .with_is_ignored(ignore.into());
                 let mut total_size = 0;
                 let mut total_files = 0;
                 while let Some(Ok((_, path))) = walker.next_entry().await {
@@ -223,7 +217,7 @@ impl BackupExt for ZfsBackup {
         &self,
         config: &Arc<crate::config::Config>,
         archive_format: StreamableArchiveFormat,
-        _range: Option<TypedHeader<Range>>,
+        _range: Option<ByteRange>,
     ) -> Result<ApiResponse, anyhow::Error> {
         let snapshot_path = Self::get_snapshot_path(config, self.server_uuid, self.uuid);
 
@@ -255,7 +249,7 @@ impl BackupExt for ZfsBackup {
                                 Path::new(""),
                                 names.into_iter().map(PathBuf::from).collect(),
                                 None,
-                                vec![ignore],
+                                ignore.into(),
                                 crate::server::filesystem::archive::create::CreateZipOptions {
                                     compression_level: config.system.backups.compression_level,
                                 },
@@ -275,7 +269,7 @@ impl BackupExt for ZfsBackup {
                             Path::new(""),
                             names.into_iter().map(PathBuf::from).collect(),
                             None,
-                            vec![ignore],
+                            ignore.into(),
                             crate::server::filesystem::archive::create::CreateTarOptions {
                                 compression_type: archive_format.compression_format(),
                                 compression_level: config.system.backups.compression_level,
@@ -334,12 +328,10 @@ impl BackupExt for ZfsBackup {
             let ignore = ignore.clone();
 
             async move {
-                let ignored = [ignore];
-
                 let mut walker = filesystem
                     .async_walk_dir(&PathBuf::from(""))
                     .await?
-                    .with_ignored(&ignored);
+                    .with_is_ignored(ignore.into());
                 while let Some(Ok((_, path))) = walker.next_entry().await {
                     let metadata = match filesystem.async_symlink_metadata(&path).await {
                         Ok(metadata) => metadata,
@@ -355,12 +347,10 @@ impl BackupExt for ZfsBackup {
 
         let server = server.clone();
         let restore_task = async move {
-            let ignored = [ignore];
-
             filesystem
                 .async_walk_dir(Path::new(""))
                 .await?
-                .with_ignored(&ignored)
+                .with_is_ignored(ignore.into())
                 .run_multithreaded(
                     server.app_state.config.system.backups.btrfs.restore_threads,
                     Arc::new({
@@ -473,7 +463,10 @@ impl BackupExt for ZfsBackup {
         Ok(())
     }
 
-    async fn browse(&self, server: &crate::server::Server) -> Result<BrowseBackup, anyhow::Error> {
+    async fn browse(
+        &self,
+        server: &crate::server::Server,
+    ) -> Result<Arc<dyn VirtualReadableFilesystem>, anyhow::Error> {
         let snapshot_path =
             Self::get_snapshot_path(&server.app_state.config, self.server_uuid, self.uuid);
 
@@ -487,11 +480,11 @@ impl BackupExt for ZfsBackup {
         let filesystem = crate::server::filesystem::cap::CapFilesystem::new(snapshot_path).await?;
         let ignore = Self::get_ignore(&server.app_state.config, self.uuid).await?;
 
-        Ok(BrowseBackup::Zfs(BrowseZfsBackup {
-            server: server.clone(),
-            filesystem,
-            ignore,
-        }))
+        Ok(Arc::new(
+            filesystem
+                .get_virtual(server.clone())
+                .with_is_ignored(ignore.into()),
+        ))
     }
 }
 
@@ -524,288 +517,5 @@ impl BackupCleanExt for ZfsBackup {
         tokio::fs::remove_dir_all(backup_path).await?;
 
         Ok(())
-    }
-}
-
-pub struct BrowseZfsBackup {
-    pub server: crate::server::Server,
-    pub filesystem: crate::server::filesystem::cap::CapFilesystem,
-    pub ignore: ignore::gitignore::Gitignore,
-}
-
-#[async_trait::async_trait]
-impl BackupBrowseExt for BrowseZfsBackup {
-    async fn read_dir(
-        &self,
-        path: PathBuf,
-        per_page: Option<usize>,
-        page: usize,
-        is_ignored: impl Fn(PathBuf, bool) -> bool + Send + Sync + 'static,
-    ) -> Result<(usize, Vec<crate::models::DirectoryEntry>), anyhow::Error> {
-        let mut directory_reader = self.filesystem.async_read_dir(&path).await?;
-        let mut directory_entries = Vec::new();
-        let mut other_entries = Vec::new();
-
-        while let Some(Ok((is_dir, entry))) = directory_reader.next_entry().await {
-            let path = path.join(&entry);
-
-            if self.ignore.matched(&path, is_dir).is_ignore() || is_ignored(path, is_dir) {
-                continue;
-            }
-
-            if is_dir {
-                directory_entries.push(entry);
-            } else {
-                other_entries.push(entry);
-            }
-        }
-
-        directory_entries.sort_unstable();
-        other_entries.sort_unstable();
-
-        let total_entries = directory_entries.len() + other_entries.len();
-        let mut entries = Vec::new();
-
-        if let Some(per_page) = per_page {
-            let start = (page - 1) * per_page;
-
-            for entry in directory_entries
-                .into_iter()
-                .chain(other_entries.into_iter())
-                .skip(start)
-                .take(per_page)
-            {
-                let path = path.join(&entry);
-                let metadata = match self.filesystem.async_symlink_metadata(&path).await {
-                    Ok(metadata) => metadata,
-                    Err(_) => continue,
-                };
-
-                entries.push(
-                    self.server
-                        .filesystem
-                        .to_api_entry_cap(&self.filesystem, path, metadata)
-                        .await,
-                );
-            }
-        } else {
-            for entry in directory_entries
-                .into_iter()
-                .chain(other_entries.into_iter())
-            {
-                let path = path.join(&entry);
-                let metadata = match self.filesystem.async_symlink_metadata(&path).await {
-                    Ok(metadata) => metadata,
-                    Err(_) => continue,
-                };
-
-                entries.push(
-                    self.server
-                        .filesystem
-                        .to_api_entry_cap(&self.filesystem, path, metadata)
-                        .await,
-                );
-            }
-        }
-
-        Ok((total_entries, entries))
-    }
-
-    async fn read_file(
-        &self,
-        path: PathBuf,
-        range: Option<TypedHeader<Range>>,
-    ) -> Result<(HeaderMap, Box<dyn tokio::io::AsyncRead + Unpin + Send>), anyhow::Error> {
-        if self.ignore.matched(&path, false).is_ignore() {
-            return Err(anyhow::anyhow!(std::io::Error::from(
-                rustix::io::Errno::NOENT
-            )));
-        }
-
-        let metadata = self.filesystem.async_symlink_metadata(&path).await?;
-        let file = self.filesystem.async_open(path).await?;
-
-        let mut headers = HeaderMap::new();
-        headers.insert("Accept-Ranges", "bytes".parse()?);
-
-        if let Some(range) = range
-            && let Some(range_bounds) = range.satisfiable_ranges(metadata.len()).next()
-        {
-            let reader = AsyncRangeReader::new(file, range_bounds, metadata.len()).await?;
-
-            headers.insert("Content-Length", reader.len().into());
-            headers.extend(
-                TypedHeader(ContentRange::bytes(range_bounds, Some(metadata.len()))?)
-                    .into_response()
-                    .headers_mut()
-                    .drain(),
-            );
-
-            Ok((headers, Box::new(reader)))
-        } else {
-            headers.insert("Content-Length", metadata.len().into());
-
-            Ok((headers, Box::new(file)))
-        }
-    }
-
-    async fn read_directory_archive(
-        &self,
-        path: PathBuf,
-        archive_format: StreamableArchiveFormat,
-    ) -> Result<tokio::io::DuplexStream, anyhow::Error> {
-        if self.ignore.matched(&path, true).is_ignore() {
-            return Err(anyhow::anyhow!(std::io::Error::from(
-                rustix::io::Errno::NOENT
-            )));
-        }
-
-        let names = self.filesystem.async_read_dir_all(&path).await?;
-        let compression_level = self
-            .server
-            .app_state
-            .config
-            .system
-            .backups
-            .compression_level;
-        let file_compression_threads = self.server.app_state.config.api.file_compression_threads;
-        let (reader, writer) = tokio::io::duplex(crate::BUFFER_SIZE);
-
-        tokio::spawn({
-            let filesystem = self.filesystem.clone();
-            let ignore = self.ignore.clone();
-
-            async move {
-                let writer = tokio_util::io::SyncIoBridge::new(writer);
-
-                match archive_format {
-                    StreamableArchiveFormat::Zip => {
-                        if let Err(err) =
-                            crate::server::filesystem::archive::create::create_zip_streaming(
-                                filesystem,
-                                writer,
-                                &path,
-                                names.into_iter().map(PathBuf::from).collect(),
-                                None,
-                                vec![ignore],
-                                crate::server::filesystem::archive::create::CreateZipOptions {
-                                    compression_level,
-                                },
-                            )
-                            .await
-                        {
-                            tracing::error!(
-                                "failed to create zip archive for btrfs backup: {}",
-                                err
-                            );
-                        }
-                    }
-                    _ => {
-                        if let Err(err) = crate::server::filesystem::archive::create::create_tar(
-                            filesystem,
-                            writer,
-                            &path,
-                            names.into_iter().map(PathBuf::from).collect(),
-                            None,
-                            vec![ignore],
-                            crate::server::filesystem::archive::create::CreateTarOptions {
-                                compression_type: archive_format.compression_format(),
-                                compression_level,
-                                threads: file_compression_threads,
-                            },
-                        )
-                        .await
-                        {
-                            tracing::error!(
-                                "failed to create tar archive for btrfs backup: {}",
-                                err
-                            );
-                        }
-                    }
-                }
-            }
-        });
-
-        Ok(reader)
-    }
-
-    async fn read_files_archive(
-        &self,
-        path: PathBuf,
-        file_paths: Vec<PathBuf>,
-        archive_format: StreamableArchiveFormat,
-    ) -> Result<tokio::io::DuplexStream, anyhow::Error> {
-        if self.ignore.matched(&path, true).is_ignore() {
-            return Err(anyhow::anyhow!(std::io::Error::from(
-                rustix::io::Errno::NOENT
-            )));
-        }
-
-        let compression_level = self
-            .server
-            .app_state
-            .config
-            .system
-            .backups
-            .compression_level;
-        let file_compression_threads = self.server.app_state.config.api.file_compression_threads;
-        let (reader, writer) = tokio::io::duplex(crate::BUFFER_SIZE);
-
-        tokio::spawn({
-            let filesystem = self.filesystem.clone();
-            let ignore = self.ignore.clone();
-
-            async move {
-                let writer = tokio_util::io::SyncIoBridge::new(writer);
-
-                match archive_format {
-                    StreamableArchiveFormat::Zip => {
-                        if let Err(err) =
-                            crate::server::filesystem::archive::create::create_zip_streaming(
-                                filesystem,
-                                writer,
-                                &path,
-                                file_paths,
-                                None,
-                                vec![ignore],
-                                crate::server::filesystem::archive::create::CreateZipOptions {
-                                    compression_level,
-                                },
-                            )
-                            .await
-                        {
-                            tracing::error!(
-                                "failed to create zip archive for btrfs backup: {}",
-                                err
-                            );
-                        }
-                    }
-                    _ => {
-                        if let Err(err) = crate::server::filesystem::archive::create::create_tar(
-                            filesystem,
-                            writer,
-                            &path,
-                            file_paths,
-                            None,
-                            vec![ignore],
-                            crate::server::filesystem::archive::create::CreateTarOptions {
-                                compression_type: archive_format.compression_format(),
-                                compression_level,
-                                threads: file_compression_threads,
-                            },
-                        )
-                        .await
-                        {
-                            tracing::error!(
-                                "failed to create tar archive for btrfs backup: {}",
-                                err
-                            );
-                        }
-                    }
-                }
-            }
-        });
-
-        Ok(reader)
     }
 }

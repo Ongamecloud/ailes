@@ -6,9 +6,7 @@ mod put {
         response::{ApiResponse, ApiResponseResult},
         routes::{ApiError, api::servers::_server_::GetServer},
     };
-    use axum::http::StatusCode;
     use serde::{Deserialize, Serialize};
-    use std::path::Path;
     use utoipa::ToSchema;
 
     #[derive(ToSchema, Deserialize)]
@@ -45,14 +43,10 @@ mod put {
         server: GetServer,
         axum::Json(data): axum::Json<Payload>,
     ) -> ApiResponseResult {
-        let root = Path::new(&data.root);
-
-        let metadata = server.filesystem.async_metadata(&root).await;
-        if !metadata.map(|m| m.is_dir()).unwrap_or(true) {
-            return ApiResponse::error("root is not a directory")
-                .with_status(StatusCode::EXPECTATION_FAILED)
-                .ok();
-        }
+        let (root, filesystem) = server
+            .filesystem
+            .resolve_writable_fs(&server, &data.root)
+            .await;
 
         let mut renamed_count = 0;
         for file in data.files {
@@ -70,31 +64,36 @@ mod put {
                 continue;
             }
 
-            let from_metadata = match server.filesystem.async_metadata(&from).await {
+            let from_metadata = match filesystem.async_metadata(&from).await {
                 Ok(metadata) => metadata,
                 Err(_) => continue,
             };
 
-            if server.filesystem.async_metadata(&to).await.is_ok()
-                || server
-                    .filesystem
-                    .is_ignored(&from, from_metadata.is_dir())
-                    .await
-                || server
-                    .filesystem
-                    .is_ignored(&to, from_metadata.is_dir())
-                    .await
+            if filesystem.async_metadata(&to).await.is_ok()
+                || (filesystem.is_primary_server_fs()
+                    && (server
+                        .filesystem
+                        .is_ignored(&from, from_metadata.file_type.is_dir())
+                        .await
+                        || server
+                            .filesystem
+                            .is_ignored(&to, from_metadata.file_type.is_dir())
+                            .await))
             {
                 continue;
             }
 
-            if let Err(err) = server.filesystem.rename_path(from, to).await {
-                tracing::debug!(
-                    server = %server.uuid,
-                    "failed to rename file: {:#?}",
-                    err
-                );
-            } else {
+            if filesystem.is_primary_server_fs() {
+                if let Err(err) = server.filesystem.rename_path(from, to).await {
+                    tracing::debug!(
+                        server = %server.uuid,
+                        "failed to rename file: {:#?}",
+                        err
+                    );
+                } else {
+                    renamed_count += 1;
+                }
+            } else if filesystem.async_rename(&from, &to).await.is_ok() {
                 renamed_count += 1;
             }
         }

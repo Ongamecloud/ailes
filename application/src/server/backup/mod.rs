@@ -1,14 +1,12 @@
 use crate::{
-    models::DirectoryEntry, remote::backups::RawServerBackup, response::ApiResponse,
-    server::filesystem::archive::StreamableArchiveFormat,
+    remote::backups::RawServerBackup,
+    response::ApiResponse,
+    server::filesystem::{
+        archive::StreamableArchiveFormat,
+        virtualfs::{ByteRange, VirtualReadableFilesystem},
+    },
 };
-use axum::http::HeaderMap;
-use axum_extra::{TypedHeader, headers::Range};
-use std::{
-    path::PathBuf,
-    sync::{Arc, atomic::AtomicU64},
-};
-use tokio::io::AsyncRead;
+use std::sync::{Arc, atomic::AtomicU64};
 
 pub mod adapters;
 pub mod manager;
@@ -50,7 +48,7 @@ impl Backup {
         &self,
         config: &Arc<crate::config::Config>,
         archive_format: StreamableArchiveFormat,
-        range: Option<TypedHeader<Range>>,
+        range: Option<ByteRange>,
     ) -> Result<ApiResponse, anyhow::Error> {
         match self {
             Backup::Wings(backup) => backup.download(config, archive_format, range).await,
@@ -90,7 +88,10 @@ impl Backup {
         }
     }
 
-    async fn browse(&self, server: &crate::server::Server) -> Result<BrowseBackup, anyhow::Error> {
+    async fn browse(
+        &self,
+        server: &crate::server::Server,
+    ) -> Result<Arc<dyn VirtualReadableFilesystem>, anyhow::Error> {
         match self {
             Backup::Wings(backup) => backup.browse(server).await,
             Backup::S3(backup) => backup.browse(server).await,
@@ -98,105 +99,6 @@ impl Backup {
             Backup::Btrfs(backup) => backup.browse(server).await,
             Backup::Zfs(backup) => backup.browse(server).await,
             Backup::Restic(backup) => backup.browse(server).await,
-        }
-    }
-}
-
-pub enum BrowseBackup {
-    Wings(adapters::wings::BrowseWingsBackup),
-    DdupBak(adapters::ddup_bak::BrowseDdupBakBackup),
-    Btrfs(adapters::btrfs::BrowseBtrfsBackup),
-    Zfs(adapters::zfs::BrowseZfsBackup),
-    Restic(adapters::restic::BrowseResticBackup),
-}
-
-impl BrowseBackup {
-    pub async fn read_dir(
-        &self,
-        path: PathBuf,
-        per_page: Option<usize>,
-        page: usize,
-        is_ignored: impl Fn(PathBuf, bool) -> bool + Send + Sync + 'static,
-    ) -> Result<(usize, Vec<DirectoryEntry>), anyhow::Error> {
-        match self {
-            BrowseBackup::Wings(backup) => backup.read_dir(path, per_page, page, is_ignored).await,
-            BrowseBackup::DdupBak(backup) => {
-                backup.read_dir(path, per_page, page, is_ignored).await
-            }
-            BrowseBackup::Btrfs(backup) => backup.read_dir(path, per_page, page, is_ignored).await,
-            BrowseBackup::Zfs(backup) => backup.read_dir(path, per_page, page, is_ignored).await,
-            BrowseBackup::Restic(backup) => backup.read_dir(path, per_page, page, is_ignored).await,
-        }
-    }
-
-    pub async fn read_file(
-        &'_ self,
-        path: PathBuf,
-        range: Option<TypedHeader<Range>>,
-    ) -> Result<(HeaderMap, Box<dyn AsyncRead + Unpin + Send>), anyhow::Error> {
-        match self {
-            BrowseBackup::Wings(backup) => backup.read_file(path, range).await,
-            BrowseBackup::DdupBak(backup) => backup.read_file(path, range).await,
-            BrowseBackup::Btrfs(backup) => backup.read_file(path, range).await,
-            BrowseBackup::Zfs(backup) => backup.read_file(path, range).await,
-            BrowseBackup::Restic(backup) => backup.read_file(path, range).await,
-        }
-    }
-
-    pub async fn read_directory_archive(
-        &self,
-        path: PathBuf,
-        archive_format: StreamableArchiveFormat,
-    ) -> Result<tokio::io::DuplexStream, anyhow::Error> {
-        match self {
-            BrowseBackup::Wings(backup) => {
-                backup.read_directory_archive(path, archive_format).await
-            }
-            BrowseBackup::DdupBak(backup) => {
-                backup.read_directory_archive(path, archive_format).await
-            }
-            BrowseBackup::Btrfs(backup) => {
-                backup.read_directory_archive(path, archive_format).await
-            }
-            BrowseBackup::Zfs(backup) => backup.read_directory_archive(path, archive_format).await,
-            BrowseBackup::Restic(backup) => {
-                backup.read_directory_archive(path, archive_format).await
-            }
-        }
-    }
-
-    pub async fn read_files_archive(
-        &self,
-        path: PathBuf,
-        file_paths: Vec<PathBuf>,
-        archive_format: StreamableArchiveFormat,
-    ) -> Result<tokio::io::DuplexStream, anyhow::Error> {
-        match self {
-            BrowseBackup::Wings(backup) => {
-                backup
-                    .read_files_archive(path, file_paths, archive_format)
-                    .await
-            }
-            BrowseBackup::DdupBak(backup) => {
-                backup
-                    .read_files_archive(path, file_paths, archive_format)
-                    .await
-            }
-            BrowseBackup::Btrfs(backup) => {
-                backup
-                    .read_files_archive(path, file_paths, archive_format)
-                    .await
-            }
-            BrowseBackup::Zfs(backup) => {
-                backup
-                    .read_files_archive(path, file_paths, archive_format)
-                    .await
-            }
-            BrowseBackup::Restic(backup) => {
-                backup
-                    .read_files_archive(path, file_paths, archive_format)
-                    .await
-            }
         }
     }
 }
@@ -233,7 +135,7 @@ pub trait BackupExt {
         &self,
         config: &Arc<crate::config::Config>,
         archive_format: StreamableArchiveFormat,
-        range: Option<TypedHeader<Range>>,
+        range: Option<ByteRange>,
     ) -> Result<ApiResponse, anyhow::Error>;
 
     async fn restore(
@@ -245,38 +147,13 @@ pub trait BackupExt {
     ) -> Result<(), anyhow::Error>;
     async fn delete(&self, config: &Arc<crate::config::Config>) -> Result<(), anyhow::Error>;
 
-    async fn browse(&self, server: &crate::server::Server) -> Result<BrowseBackup, anyhow::Error>;
+    async fn browse(
+        &self,
+        server: &crate::server::Server,
+    ) -> Result<Arc<dyn VirtualReadableFilesystem>, anyhow::Error>;
 }
 
 #[async_trait::async_trait]
 pub trait BackupCleanExt {
     async fn clean(server: &crate::server::Server, uuid: uuid::Uuid) -> Result<(), anyhow::Error>;
-}
-
-#[async_trait::async_trait]
-pub trait BackupBrowseExt {
-    async fn read_dir(
-        &self,
-        path: PathBuf,
-        per_page: Option<usize>,
-        page: usize,
-        is_ignored: impl Fn(PathBuf, bool) -> bool + Send + Sync + 'static,
-    ) -> Result<(usize, Vec<DirectoryEntry>), anyhow::Error>;
-    async fn read_file(
-        &self,
-        path: PathBuf,
-        range: Option<TypedHeader<Range>>,
-    ) -> Result<(HeaderMap, Box<dyn AsyncRead + Unpin + Send>), anyhow::Error>;
-
-    async fn read_directory_archive(
-        &self,
-        path: PathBuf,
-        archive_format: StreamableArchiveFormat,
-    ) -> Result<tokio::io::DuplexStream, anyhow::Error>;
-    async fn read_files_archive(
-        &self,
-        path: PathBuf,
-        file_paths: Vec<PathBuf>,
-        archive_format: StreamableArchiveFormat,
-    ) -> Result<tokio::io::DuplexStream, anyhow::Error>;
 }

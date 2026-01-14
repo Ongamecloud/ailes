@@ -388,7 +388,7 @@ async fn main() {
         backup_manager: Arc::new(wings_rs::server::backup::manager::BackupManager::new(
             Arc::clone(&config),
         )),
-        mime_cache: Arc::new(wings_rs::server::filesystem::mime::MimeCache::default()),
+        mime_cache: moka::future::Cache::new(20480),
     });
 
     state.server_manager.boot(&state, servers).await;
@@ -452,7 +452,7 @@ async fn main() {
         );
     }
 
-    rustls::crypto::ring::default_provider()
+    rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
         .expect("Failed to install rustls crypto provider");
 

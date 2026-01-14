@@ -7,7 +7,7 @@ default-members = ["application"]
 anyhow = "1.0.98"
 axum = { version = "0.8.1", features = ["http2", "ws", "multipart"] }
 axum-server = { version = "0.8.0", features = ["tls-rustls"] }
-axum-extra = { version = "0.12.1", features = ["query", "typed-header"] }
+axum-extra = { version = "0.12.1", features = ["query"] }
 bollard = "0.18.1"
 serde = { version = "1.0.138", features = ["derive"] }
 serde_json = { version = "1.0.139", features = ["preserve_order"] }
@@ -22,18 +22,19 @@ uuid = { version = "1.16.0", features = ["serde", "v4"] }
 rand = "0.9.1"
 
 [profile.dev.package."*"]
-opt-level = 3
+opt-level = 2
 
 [profile.dev]
+# only enable when needed, slows down compile times significantly
 debug = false
 
 [profile.release.package."*"]
 opt-level = "s"
 codegen-units = 1
-strip = "symbols"
+strip = true
 
 [profile.release]
 opt-level = "s"
 lto = "fat"
 codegen-units = 1
-strip = "symbols"
+strip = true

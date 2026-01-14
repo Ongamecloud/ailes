@@ -48,7 +48,7 @@ mod post {
     };
     use axum::http::StatusCode;
     use serde::{Deserialize, Serialize};
-    use std::{path::PathBuf, sync::Arc};
+    use std::sync::Arc;
     use tokio::sync::RwLock;
     use utoipa::ToSchema;
 
@@ -90,21 +90,21 @@ mod post {
         server: GetServer,
         axum::Json(data): axum::Json<Payload>,
     ) -> ApiResponseResult {
-        let path = match server.filesystem.async_canonicalize(&data.root).await {
-            Ok(path) => path,
-            Err(_) => PathBuf::from(data.root),
-        };
+        let (root, filesystem) = server
+            .filesystem
+            .resolve_writable_fs(&server, &data.root)
+            .await;
 
-        let metadata = server.filesystem.async_symlink_metadata(&path).await;
-        if !metadata.map(|m| m.is_dir()).unwrap_or(true) {
+        let metadata = filesystem.async_symlink_metadata(&root).await;
+        if !metadata.map_or(true, |m| m.file_type.is_dir()) {
             return ApiResponse::error("root is not a directory")
                 .with_status(StatusCode::EXPECTATION_FAILED)
                 .ok();
         }
 
         if let Some(file_name) = &data.file_name {
-            let metadata = server.filesystem.async_metadata(path.join(file_name)).await;
-            if !metadata.map(|m| m.is_file()).unwrap_or(true) {
+            let metadata = filesystem.async_metadata(&root.join(file_name)).await;
+            if !metadata.map_or(true, |m| m.file_type.is_file()) {
                 return ApiResponse::error("file is not a file")
                     .with_status(StatusCode::EXPECTATION_FAILED)
                     .ok();
@@ -123,11 +123,12 @@ mod post {
                 .ok();
         }
 
-        server.filesystem.async_create_dir_all(&path).await?;
+        filesystem.async_create_dir_all(&root).await?;
         let download = Arc::new(RwLock::new(
             match crate::server::filesystem::pull::Download::new(
                 server.0.clone(),
-                &path,
+                filesystem,
+                &root,
                 data.file_name,
                 data.url,
                 data.use_header,

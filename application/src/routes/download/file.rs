@@ -2,22 +2,18 @@ use super::State;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
 mod get {
+    use std::path::Path;
+
     use crate::{
-        io::range_reader::AsyncRangeReader,
         response::{ApiResponse, ApiResponseResult},
         routes::GetState,
+        server::filesystem::virtualfs::ByteRange,
     };
     use axum::{
         extract::Query,
         http::{HeaderMap, StatusCode},
-        response::IntoResponse,
-    };
-    use axum_extra::{
-        TypedHeader,
-        headers::{ContentRange, Range},
     };
     use serde::Deserialize;
-    use std::path::Path;
     use utoipa::ToSchema;
 
     #[derive(ToSchema, Deserialize)]
@@ -48,8 +44,8 @@ mod get {
     ))]
     pub async fn route(
         state: GetState,
+        headers: HeaderMap,
         Query(data): Query<Params>,
-        range: Option<TypedHeader<Range>>,
     ) -> ApiResponseResult {
         let payload: FileJwtPayload = match state.config.jwt.verify(&data.token) {
             Ok(payload) => payload,
@@ -89,64 +85,32 @@ mod get {
             }
         };
 
-        let path = Path::new(&payload.file_path);
-
-        let file_name = match path.file_name() {
-            Some(name) => name.to_string_lossy().to_string(),
+        let parent = match Path::new(&payload.file_path).parent() {
+            Some(parent) => parent,
             None => {
-                return ApiResponse::error("file not found")
-                    .with_status(StatusCode::NOT_FOUND)
+                return ApiResponse::error("file has no parent")
+                    .with_status(StatusCode::EXPECTATION_FAILED)
                     .ok();
             }
         };
 
-        if let Some((backup, path)) = server
-            .filesystem
-            .backup_fs(&server, &state.backup_manager, path)
-            .await
-        {
-            match backup.read_file(path.clone(), range).await {
-                Ok((mut headers, reader)) => {
-                    headers.insert(
-                        "Content-Disposition",
-                        format!(
-                            "attachment; filename={}",
-                            serde_json::Value::String(file_name)
-                        )
-                        .parse()?,
-                    );
-                    headers.insert("Content-Type", "application/octet-stream".parse()?);
-
-                    let status = if headers.contains_key("Content-Range") {
-                        StatusCode::PARTIAL_CONTENT
-                    } else {
-                        StatusCode::OK
-                    };
-
-                    return ApiResponse::new_stream(reader)
-                        .with_headers(headers)
-                        .with_status(status)
-                        .ok();
-                }
-                Err(err) => {
-                    tracing::error!(
-                        server = %server.uuid,
-                        path = %path.display(),
-                        error = %err,
-                        "failed to get backup file contents",
-                    );
-
-                    return ApiResponse::error("failed to retrieve file contents from backup")
-                        .with_status(StatusCode::EXPECTATION_FAILED)
-                        .ok();
-                }
+        let file_name = match Path::new(&payload.file_path).file_name() {
+            Some(name) => name,
+            None => {
+                return ApiResponse::error("invalid file name")
+                    .with_status(StatusCode::EXPECTATION_FAILED)
+                    .ok();
             }
-        }
+        };
 
-        let metadata = match server.filesystem.async_metadata(&path).await {
+        let (root, filesystem) = server.filesystem.resolve_readable_fs(&server, parent).await;
+        let path = root.join(file_name);
+
+        let metadata = match filesystem.async_metadata(&path).await {
             Ok(metadata) => {
-                if !metadata.is_file()
-                    || server.filesystem.is_ignored(path, metadata.is_dir()).await
+                if !metadata.file_type.is_file()
+                    || (filesystem.is_primary_server_fs()
+                        && server.filesystem.is_ignored(&path, false).await)
                 {
                     return ApiResponse::error("file not found")
                         .with_status(StatusCode::NOT_FOUND)
@@ -162,7 +126,10 @@ mod get {
             }
         };
 
-        let file = match server.filesystem.async_open(&path).await {
+        let file_read = match filesystem
+            .async_read_file(&path, ByteRange::from_headers(&headers))
+            .await
+        {
             Ok(file) => file,
             Err(_) => {
                 return ApiResponse::error("file not found")
@@ -171,22 +138,20 @@ mod get {
             }
         };
 
-        let mut headers = HeaderMap::new();
+        let mut headers = file_read.headers();
         headers.insert(
             "Content-Disposition",
             format!(
                 "attachment; filename={}",
-                serde_json::Value::String(file_name)
+                serde_json::Value::String(file_name.to_string_lossy().to_string())
             )
             .parse()?,
         );
         headers.insert("Content-Type", "application/octet-stream".parse()?);
-        headers.insert("Accept-Ranges", "bytes".parse()?);
 
-        if let Ok(modified) = metadata.modified() {
+        if let Some(modified) = &metadata.modified {
             let modified = chrono::DateTime::from_timestamp(
                 modified
-                    .into_std()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs() as i64,
@@ -197,27 +162,15 @@ mod get {
             headers.insert("Last-Modified", modified.to_rfc2822().parse()?);
         }
 
-        if let Some(range) = range
-            && let Some(range_bounds) = range.satisfiable_ranges(metadata.len()).next()
-        {
-            let reader = AsyncRangeReader::new(file, range_bounds, metadata.len()).await?;
-
-            headers.insert("Content-Length", reader.len().into());
-            headers.extend(
-                TypedHeader(ContentRange::bytes(range_bounds, Some(metadata.len()))?)
-                    .into_response()
-                    .headers_mut()
-                    .drain(),
-            );
-
-            ApiResponse::new_stream(reader)
+        if file_read.reader_range.is_some() {
+            ApiResponse::new_stream(file_read.reader)
                 .with_headers(headers)
                 .with_status(StatusCode::PARTIAL_CONTENT)
                 .ok()
         } else {
-            headers.insert("Content-Length", metadata.len().into());
-
-            ApiResponse::new_stream(file).with_headers(headers).ok()
+            ApiResponse::new_stream(file_read.reader)
+                .with_headers(headers)
+                .ok()
         }
     }
 }

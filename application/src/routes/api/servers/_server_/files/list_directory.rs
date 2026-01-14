@@ -2,19 +2,20 @@ use super::State;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
 mod get {
+    use std::path::Path;
+
     use crate::{
         response::{ApiResponse, ApiResponseResult},
         routes::{ApiError, GetState, api::servers::_server_::GetServer},
     };
     use axum::{extract::Query, http::StatusCode};
     use serde::Deserialize;
-    use std::path::PathBuf;
     use utoipa::ToSchema;
 
     #[derive(ToSchema, Deserialize)]
     pub struct Params {
-        #[serde(default)]
-        pub directory: compact_str::CompactString,
+        #[serde(default, alias = "directory")]
+        pub root: compact_str::CompactString,
     }
 
     #[utoipa::path(get, path = "/", responses(
@@ -40,56 +41,17 @@ mod get {
         server: GetServer,
         Query(data): Query<Params>,
     ) -> ApiResponseResult {
-        let path = match server.filesystem.async_canonicalize(&data.directory).await {
-            Ok(path) => path,
-            Err(_) => PathBuf::from(data.directory),
-        };
-
-        if let Some((backup, path)) = server
+        let (root, filesystem) = server
             .filesystem
-            .backup_fs(&server, &state.backup_manager, &path)
-            .await
-        {
-            let mut entries = match backup
-                .read_dir(
-                    path.clone(),
-                    Some(state.config.api.directory_entry_limit),
-                    1,
-                    |_, _| false,
-                )
-                .await
-            {
-                Ok((_, entries)) => entries,
-                Err(err) => {
-                    tracing::error!(
-                        server = %server.uuid,
-                        path = %path.display(),
-                        error = %err,
-                        "failed to list backup directory",
-                    );
+            .resolve_readable_fs(&server, Path::new(&data.root))
+            .await;
 
-                    return ApiResponse::error("failed to list backup directory")
-                        .with_status(StatusCode::EXPECTATION_FAILED)
-                        .ok();
-                }
-            };
-
-            entries.sort_by(|a, b| {
-                if a.directory && !b.directory {
-                    std::cmp::Ordering::Less
-                } else if !a.directory && b.directory {
-                    std::cmp::Ordering::Greater
-                } else {
-                    a.name.cmp(&b.name)
-                }
-            });
-
-            return ApiResponse::json(entries).ok();
-        }
-
-        let metadata = server.filesystem.async_metadata(&path).await;
+        let metadata = filesystem.async_metadata(&root).await;
         if let Ok(metadata) = metadata {
-            if !metadata.is_dir() || server.filesystem.is_ignored(&path, metadata.is_dir()).await {
+            if !metadata.file_type.is_dir()
+                || (filesystem.is_primary_server_fs()
+                    && server.filesystem.is_ignored(&root, true).await)
+            {
                 return ApiResponse::error("path not a directory")
                     .with_status(StatusCode::EXPECTATION_FAILED)
                     .ok();
@@ -100,38 +62,22 @@ mod get {
                 .ok();
         }
 
-        let mut directory = server.filesystem.async_read_dir(&path).await?;
-        let mut entries = Vec::new();
+        let is_ignored = if filesystem.is_primary_server_fs() {
+            server.filesystem.get_ignored().await.into()
+        } else {
+            Default::default()
+        };
 
-        while let Some(Ok((_, entry))) = directory.next_entry().await {
-            let path = path.join(entry);
-            let metadata = match server.filesystem.async_symlink_metadata(&path).await {
-                Ok(metadata) => metadata,
-                Err(_) => continue,
-            };
+        let entries = filesystem
+            .async_read_dir(
+                &root,
+                Some(state.config.api.directory_entry_limit),
+                1,
+                is_ignored,
+            )
+            .await?;
 
-            if server.filesystem.is_ignored(&path, metadata.is_dir()).await {
-                continue;
-            }
-
-            entries.push(server.filesystem.to_api_entry(path, metadata).await);
-
-            if crate::unlikely(entries.len() >= state.config.api.directory_entry_limit) {
-                break;
-            }
-        }
-
-        entries.sort_by(|a, b| {
-            if a.directory && !b.directory {
-                std::cmp::Ordering::Less
-            } else if !a.directory && b.directory {
-                std::cmp::Ordering::Greater
-            } else {
-                a.name.cmp(&b.name)
-            }
-        });
-
-        ApiResponse::json(entries).ok()
+        ApiResponse::json(entries.entries).ok()
     }
 }
 

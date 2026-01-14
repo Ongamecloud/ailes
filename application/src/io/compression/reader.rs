@@ -10,6 +10,7 @@ pub enum CompressionReader<'a, R: Read> {
     None(R),
     Gz(flate2::read::MultiGzDecoder<R>),
     Xz(Box<lzma_rust2::XzReader<R>>),
+    Lzip(Box<lzma_rust2::LzipReader<R>>),
     Bz2(bzip2::read::MultiBzDecoder<R>),
     Lz4(lzzzz::lz4f::ReadDecompressor<'a, R>),
     Zstd(zstd::Decoder<'a, std::io::BufReader<R>>),
@@ -22,6 +23,9 @@ impl<'a, R: Read> CompressionReader<'a, R> {
             CompressionType::Gz => CompressionReader::Gz(flate2::read::MultiGzDecoder::new(reader)),
             CompressionType::Xz => {
                 CompressionReader::Xz(Box::new(lzma_rust2::XzReader::new(reader, true)))
+            }
+            CompressionType::Lzip => {
+                CompressionReader::Lzip(Box::new(lzma_rust2::LzipReader::new(reader)))
             }
             CompressionType::Bz2 => {
                 CompressionReader::Bz2(bzip2::read::MultiBzDecoder::new(reader))
@@ -38,6 +42,7 @@ impl<'a, R: Read> CompressionReader<'a, R> {
             CompressionReader::None(reader) => reader,
             CompressionReader::Gz(decoder) => decoder.into_inner(),
             CompressionReader::Xz(decoder) => decoder.into_inner(),
+            CompressionReader::Lzip(decoder) => decoder.into_inner(),
             CompressionReader::Bz2(decoder) => decoder.into_inner(),
             CompressionReader::Lz4(decoder) => decoder.into_inner(),
             CompressionReader::Zstd(decoder) => decoder.finish().into_inner(),
@@ -52,6 +57,7 @@ impl<'a, R: Read> Read for CompressionReader<'a, R> {
             CompressionReader::None(reader) => reader.read(buf),
             CompressionReader::Gz(decoder) => decoder.read(buf),
             CompressionReader::Xz(decoder) => decoder.read(buf),
+            CompressionReader::Lzip(decoder) => decoder.read(buf),
             CompressionReader::Bz2(decoder) => decoder.read(buf),
             CompressionReader::Lz4(decoder) => decoder.read(buf),
             CompressionReader::Zstd(decoder) => decoder.read(buf),
@@ -75,8 +81,8 @@ impl AsyncCompressionReader {
 
             match crate::io::copy(&mut stream, &mut writer) {
                 Ok(_) => {}
-                Err(e) => {
-                    let _ = inner_error_sender.send(e);
+                Err(err) => {
+                    let _ = inner_error_sender.send(err);
                 }
             }
         });

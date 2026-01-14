@@ -18,6 +18,8 @@ where
 pub enum FilesystemOperation {
     Compress {
         path: PathBuf,
+        files: Vec<PathBuf>,
+        destination_path: PathBuf,
 
         #[serde(serialize_with = "serialize_arc")]
         progress: Arc<AtomicU64>,
@@ -34,7 +36,7 @@ pub enum FilesystemOperation {
         total: Arc<AtomicU64>,
     },
     Pull {
-        path: PathBuf,
+        destination_path: PathBuf,
 
         #[serde(serialize_with = "serialize_arc")]
         progress: Arc<AtomicU64>,
@@ -53,6 +55,7 @@ pub enum FilesystemOperation {
     CopyRemote {
         server: uuid::Uuid,
         path: PathBuf,
+        files: Vec<PathBuf>,
         destination_server: uuid::Uuid,
         destination_path: PathBuf,
 

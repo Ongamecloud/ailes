@@ -197,16 +197,8 @@ mod post {
                                     HashReader::new_with_hasher(reader, sha2::Sha256::new());
                                 let reader = CompressionReader::new(
                                     reader,
-                                    match TransferArchiveFormat::from_str(&file_name)
-                                        .unwrap_or(TransferArchiveFormat::TarGz)
-                                    {
-                                        TransferArchiveFormat::Tar => CompressionType::None,
-                                        TransferArchiveFormat::TarGz => CompressionType::Gz,
-                                        TransferArchiveFormat::TarXz => CompressionType::Xz,
-                                        TransferArchiveFormat::TarBz2 => CompressionType::Bz2,
-                                        TransferArchiveFormat::TarLz4 => CompressionType::Lz4,
-                                        TransferArchiveFormat::TarZstd => CompressionType::Zstd,
-                                    },
+                                    TransferArchiveFormat::from_str(&file_name)
+                                        .map_or(CompressionType::Gz, |f| f.compression_format()),
                                 );
 
                                 let mut archive = tar::Archive::new(reader);

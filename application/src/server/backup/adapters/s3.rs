@@ -7,11 +7,13 @@ use crate::{
     },
     remote::backups::RawServerBackup,
     server::{
-        backup::{Backup, BackupCleanExt, BackupCreateExt, BackupExt, BackupFindExt, BrowseBackup},
-        filesystem::archive::StreamableArchiveFormat,
+        backup::{Backup, BackupCleanExt, BackupCreateExt, BackupExt, BackupFindExt},
+        filesystem::{
+            archive::StreamableArchiveFormat,
+            virtualfs::{ByteRange, VirtualReadableFilesystem},
+        },
     },
 };
-use axum_extra::{TypedHeader, headers::Range};
 use cap_std::fs::{Permissions, PermissionsExt};
 use futures::TryStreamExt;
 use sha1::Digest;
@@ -115,7 +117,7 @@ impl AsyncRead for BoundedReader {
 
                 Poll::Ready(Ok(()))
             }
-            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+            Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
             Poll::Pending => Poll::Pending,
         }
     }
@@ -195,13 +197,11 @@ impl BackupCreateExt for S3Backup {
             let ignore = ignore.clone();
 
             async move {
-                let ignored = [ignore];
-
                 let mut walker = server
                     .filesystem
                     .async_walk_dir(Path::new(""))
                     .await?
-                    .with_ignored(&ignored);
+                    .with_is_ignored(ignore.into());
                 let mut total_files = 0;
                 while let Some(Ok((_, path))) = walker.next_entry().await {
                     let metadata = match server.filesystem.async_symlink_metadata(&path).await {
@@ -233,7 +233,7 @@ impl BackupCreateExt for S3Backup {
                 Path::new(""),
                 sources.into_iter().map(PathBuf::from).collect(),
                 Some(Arc::clone(&progress)),
-                vec![ignore],
+                ignore.into(),
                 crate::server::filesystem::archive::create::CreateTarOptions {
                     compression_type: CompressionType::Gz,
                     compression_level: server.app_state.config.system.backups.compression_level,
@@ -378,7 +378,7 @@ impl BackupExt for S3Backup {
         &self,
         _config: &Arc<crate::config::Config>,
         _archive_format: StreamableArchiveFormat,
-        _range: Option<TypedHeader<Range>>,
+        _range: Option<ByteRange>,
     ) -> Result<crate::response::ApiResponse, anyhow::Error> {
         Err(anyhow::anyhow!(
             "this backup adapter does not support downloads"
@@ -526,7 +526,10 @@ impl BackupExt for S3Backup {
         Ok(())
     }
 
-    async fn browse(&self, _server: &crate::server::Server) -> Result<BrowseBackup, anyhow::Error> {
+    async fn browse(
+        &self,
+        _server: &crate::server::Server,
+    ) -> Result<Arc<dyn VirtualReadableFilesystem>, anyhow::Error> {
         Err(anyhow::anyhow!(
             "this backup adapter does not support browsing files"
         ))

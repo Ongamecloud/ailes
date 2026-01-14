@@ -136,31 +136,56 @@ mod post {
                         .ok();
                 }
             };
-            let file_path = directory.join(filename);
+            let path = directory.join(filename);
+            let parent = match path.parent() {
+                Some(parent) => parent,
+                None => {
+                    return ApiResponse::error("file has no parent")
+                        .with_status(StatusCode::EXPECTATION_FAILED)
+                        .ok();
+                }
+            };
 
             if ignored
                 .as_ref()
-                .map(|o| o.matched(&file_path, false).is_ignore())
-                .unwrap_or(false)
-                || server.filesystem.is_ignored(&file_path, false).await
+                .is_some_and(|o| o.matched(parent, false).is_ignore())
+                || server.filesystem.is_ignored(parent, false).await
             {
                 return ApiResponse::error("file not found")
                     .with_status(StatusCode::NOT_FOUND)
                     .ok();
             }
 
-            if let Some(parent) = file_path.parent() {
-                server.filesystem.async_create_dir_all(parent).await?;
+            let file_name = match path.file_name() {
+                Some(name) => name,
+                None => {
+                    return ApiResponse::error("invalid file name")
+                        .with_status(StatusCode::EXPECTATION_FAILED)
+                        .ok();
+                }
+            };
+
+            let (root, filesystem) = server
+                .filesystem
+                .resolve_writable_fs(&server, &parent)
+                .await;
+            let path = root.join(file_name);
+
+            if filesystem.is_primary_server_fs()
+                && (ignored
+                    .as_ref()
+                    .is_some_and(|o| o.matched(&path, false).is_ignore())
+                    || server.filesystem.is_ignored(&path, false).await)
+            {
+                return ApiResponse::error("file not found")
+                    .with_status(StatusCode::NOT_FOUND)
+                    .ok();
             }
 
+            filesystem.async_create_dir_all(&parent).await?;
+
             let mut written_size = 0;
-            let mut writer = crate::server::filesystem::writer::AsyncFileSystemWriter::new(
-                server.clone(),
-                &file_path,
-                None,
-                None,
-            )
-            .await?;
+            let mut writer = filesystem.async_create_file(&path).await?;
 
             server
                 .activity

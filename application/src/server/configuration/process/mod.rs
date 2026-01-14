@@ -291,11 +291,12 @@ impl ServerConfigurationFile {
                     let value = serde_json::Value::String(placeholder.to_string());
                     match Self::lookup_value(server, &value).await {
                         Ok(replacement) => result.push_str(&replacement),
-                        Err(e) => {
+                        Err(err) => {
                             tracing::error!(
                                 server = %server.uuid,
-                                "failed to lookup variable {}: {}",
-                                placeholder, e
+                                "failed to lookup variable {}: {:?}",
+                                placeholder,
+                                err
                             );
                             result.push_str(&placeholder);
                         }

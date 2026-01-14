@@ -1,7 +1,10 @@
-use crate::io::{
-    compression::{CompressionLevel, CompressionType},
-    counting_reader::AsyncCountingReader,
-    hash_reader::AsyncHashReader,
+use crate::{
+    io::{
+        compression::{CompressionLevel, CompressionType},
+        counting_reader::AsyncCountingReader,
+        hash_reader::AsyncHashReader,
+    },
+    server::filesystem::archive::StreamableArchiveFormat,
 };
 use futures::FutureExt;
 use human_bytes::human_bytes;
@@ -31,20 +34,49 @@ pub enum TransferArchiveFormat {
     #[default]
     TarGz,
     TarXz,
+    TarLzip,
     TarBz2,
     TarLz4,
     TarZstd,
 }
 
 impl TransferArchiveFormat {
+    #[inline]
+    pub fn compression_format(self) -> CompressionType {
+        match self {
+            TransferArchiveFormat::Tar => CompressionType::None,
+            TransferArchiveFormat::TarGz => CompressionType::Gz,
+            TransferArchiveFormat::TarXz => CompressionType::Xz,
+            TransferArchiveFormat::TarLzip => CompressionType::Lzip,
+            TransferArchiveFormat::TarBz2 => CompressionType::Bz2,
+            TransferArchiveFormat::TarLz4 => CompressionType::Lz4,
+            TransferArchiveFormat::TarZstd => CompressionType::Zstd,
+        }
+    }
+
     pub fn extension(&self) -> &'static str {
         match self {
             TransferArchiveFormat::Tar => "tar",
             TransferArchiveFormat::TarGz => "tar.gz",
             TransferArchiveFormat::TarXz => "tar.xz",
+            TransferArchiveFormat::TarLzip => "tar.lz",
             TransferArchiveFormat::TarBz2 => "tar.bz2",
             TransferArchiveFormat::TarLz4 => "tar.lz4",
             TransferArchiveFormat::TarZstd => "tar.zst",
+        }
+    }
+}
+
+impl From<TransferArchiveFormat> for StreamableArchiveFormat {
+    fn from(format: TransferArchiveFormat) -> Self {
+        match format {
+            TransferArchiveFormat::Tar => StreamableArchiveFormat::Tar,
+            TransferArchiveFormat::TarGz => StreamableArchiveFormat::TarGz,
+            TransferArchiveFormat::TarXz => StreamableArchiveFormat::TarXz,
+            TransferArchiveFormat::TarLzip => StreamableArchiveFormat::TarLzip,
+            TransferArchiveFormat::TarBz2 => StreamableArchiveFormat::TarBz2,
+            TransferArchiveFormat::TarLz4 => StreamableArchiveFormat::TarLz4,
+            TransferArchiveFormat::TarZstd => StreamableArchiveFormat::TarZstd,
         }
     }
 }
@@ -59,6 +91,8 @@ impl std::str::FromStr for TransferArchiveFormat {
             Ok(TransferArchiveFormat::TarGz)
         } else if s.ends_with(".tar.xz") {
             Ok(TransferArchiveFormat::TarXz)
+        } else if s.ends_with(".tar.lz") {
+            Ok(TransferArchiveFormat::TarLzip)
         } else if s.ends_with(".tar.bz2") {
             Ok(TransferArchiveFormat::TarBz2)
         } else if s.ends_with(".tar.lz4") {
@@ -198,7 +232,6 @@ impl OutgoingServerTransfer {
                         Path::new(""),
                         files_receiver,
                         Some(Arc::clone(&bytes_archived)),
-                        vec![],
                         options,
                     )
                     .await?;
@@ -213,14 +246,7 @@ impl OutgoingServerTransfer {
                 server.clone(),
                 tokio_util::io::SyncIoBridge::new(checksummed_writer),
                 crate::server::filesystem::archive::create::CreateTarOptions {
-                    compression_type: match archive_format {
-                        TransferArchiveFormat::Tar => CompressionType::None,
-                        TransferArchiveFormat::TarGz => CompressionType::Gz,
-                        TransferArchiveFormat::TarXz => CompressionType::Xz,
-                        TransferArchiveFormat::TarBz2 => CompressionType::Bz2,
-                        TransferArchiveFormat::TarLz4 => CompressionType::Lz4,
-                        TransferArchiveFormat::TarZstd => CompressionType::Zstd,
-                    },
+                    compression_type: archive_format.compression_format(),
                     compression_level,
                     threads: server.app_state.config.api.file_compression_threads,
                 },
@@ -527,14 +553,7 @@ impl OutgoingServerTransfer {
                     server.clone(),
                     tokio_util::io::SyncIoBridge::new(checksummed_writer),
                     crate::server::filesystem::archive::create::CreateTarOptions {
-                        compression_type: match archive_format {
-                            TransferArchiveFormat::Tar => CompressionType::None,
-                            TransferArchiveFormat::TarGz => CompressionType::Gz,
-                            TransferArchiveFormat::TarXz => CompressionType::Xz,
-                            TransferArchiveFormat::TarBz2 => CompressionType::Bz2,
-                            TransferArchiveFormat::TarLz4 => CompressionType::Lz4,
-                            TransferArchiveFormat::TarZstd => CompressionType::Zstd,
-                        },
+                        compression_type: archive_format.compression_format(),
                         compression_level,
                         threads: server.app_state.config.api.file_compression_threads,
                     },

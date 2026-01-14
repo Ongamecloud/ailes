@@ -6,9 +6,9 @@ mod post {
         response::{ApiResponse, ApiResponseResult},
         routes::{ApiError, api::servers::_server_::GetServer},
     };
-    use axum::http::StatusCode;
     use cap_std::fs::{Permissions, PermissionsExt};
     use serde::{Deserialize, Serialize};
+    use std::path::Path;
     use utoipa::ToSchema;
 
     #[derive(ToSchema, Deserialize)]
@@ -46,38 +46,26 @@ mod post {
         server: GetServer,
         axum::Json(data): axum::Json<Payload>,
     ) -> ApiResponseResult {
-        let root = match server.filesystem.async_canonicalize(data.root).await {
-            Ok(path) => path,
-            Err(_) => {
-                return ApiResponse::error("root not found")
-                    .with_status(StatusCode::NOT_FOUND)
-                    .ok();
-            }
-        };
-
-        let metadata = server.filesystem.async_symlink_metadata(&root).await;
-        if !metadata.map(|m| m.is_dir()).unwrap_or(true) {
-            return ApiResponse::error("root is not a directory")
-                .with_status(StatusCode::EXPECTATION_FAILED)
-                .ok();
-        }
-
         let mut updated_count = 0;
         for file in data.files {
-            let source = root.join(file.file);
-            if source == root {
+            let (source, filesystem) = server
+                .filesystem
+                .resolve_writable_fs(&server, Path::new(&data.root).join(&file.file))
+                .await;
+            if source == Path::new(&data.root) {
                 continue;
             }
 
-            let metadata = match server.filesystem.async_symlink_metadata(&source).await {
+            let metadata = match filesystem.async_symlink_metadata(&source).await {
                 Ok(metadata) => metadata,
                 Err(_) => continue,
             };
 
-            if server
-                .filesystem
-                .is_ignored(&source, metadata.is_dir())
-                .await
+            if filesystem.is_primary_server_fs()
+                && server
+                    .filesystem
+                    .is_ignored(&source, metadata.file_type.is_dir())
+                    .await
             {
                 continue;
             }
@@ -87,8 +75,7 @@ mod post {
                 Err(_) => continue,
             };
 
-            if server
-                .filesystem
+            if filesystem
                 .async_set_permissions(&source, Permissions::from_mode(mode))
                 .await
                 .is_ok()

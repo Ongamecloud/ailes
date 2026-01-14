@@ -3,20 +3,20 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 
 mod post {
     use crate::{
-        io::{
-            compression::{CompressionLevel, CompressionType},
-            counting_reader::AsyncCountingReader,
-        },
+        io::{compression::CompressionLevel, counting_reader::AsyncCountingReader},
         response::{ApiResponse, ApiResponseResult},
         routes::{ApiError, GetState, api::servers::_server_::GetServer},
-        server::transfer::TransferArchiveFormat,
+        server::{
+            filesystem::virtualfs::{DirectoryStreamWalkFn, IsIgnoredFn},
+            transfer::TransferArchiveFormat,
+        },
     };
     use axum::http::StatusCode;
     use futures::FutureExt;
     use serde::{Deserialize, Serialize};
     use sha1::Digest;
     use std::{
-        path::PathBuf,
+        path::{Path, PathBuf},
         sync::{
             Arc,
             atomic::{AtomicU64, Ordering},
@@ -75,37 +75,35 @@ mod post {
         server: GetServer,
         axum::Json(data): axum::Json<Payload>,
     ) -> ApiResponseResult {
-        let root = match server.filesystem.async_canonicalize(&data.root).await {
-            Ok(path) => path,
-            Err(_) => {
-                return ApiResponse::error("file not found")
-                    .with_status(StatusCode::NOT_FOUND)
-                    .ok();
-            }
-        };
+        let (root, filesystem) = server
+            .filesystem
+            .resolve_readable_fs(&server, Path::new(&data.root))
+            .await;
 
-        let metadata = server.filesystem.async_symlink_metadata(&root).await;
-        if !metadata.map(|m| m.is_dir()).unwrap_or(true) {
-            return ApiResponse::error("root is not a directory")
+        let metadata = filesystem.async_metadata(&root).await;
+        if !metadata.map_or(true, |m| m.file_type.is_dir()) {
+            return ApiResponse::error("path is not a directory")
                 .with_status(StatusCode::EXPECTATION_FAILED)
+                .ok();
+        }
+
+        if filesystem.is_primary_server_fs() && server.filesystem.is_ignored(&root, true).await {
+            return ApiResponse::error("path not found")
+                .with_status(StatusCode::NOT_FOUND)
                 .ok();
         }
 
         let mut total_size = 0;
         for file in &data.files {
-            if let Ok(metadata) = server.filesystem.async_metadata(file).await {
-                if metadata.is_dir() {
-                    total_size += server
-                        .filesystem
-                        .disk_usage
-                        .read()
-                        .await
-                        .get_size(&root.join(file))
-                        .map_or(0, |s| s.get_apparent());
-                } else {
-                    total_size += metadata.len();
-                }
-            }
+            let directory_entry = match filesystem
+                .async_directory_entry_buffer(&root.join(file), &[])
+                .await
+            {
+                Ok(entry) => entry,
+                Err(_) => continue,
+            };
+
+            total_size += directory_entry.size;
         }
 
         let progress = Arc::new(AtomicU64::new(0));
@@ -128,7 +126,18 @@ mod post {
                 }
             };
 
+            let (destination_path, destination_filesystem) = destination_server
+                .filesystem
+                .resolve_writable_fs(&destination_server, &data.destination_path)
+                .await;
+
             let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+
+            let ignored = vec![
+                server.filesystem.get_ignored().await,
+                destination_server.filesystem.get_ignored().await,
+            ];
+            let ignored = IsIgnoredFn::from(ignored);
 
             let (identifier, task) = server
                 .filesystem
@@ -136,157 +145,99 @@ mod post {
                 .add_operation(
                     crate::server::filesystem::operations::FilesystemOperation::CopyRemote {
                         server: server.uuid,
-                        path: root.clone(),
+                        path: PathBuf::from(&data.root),
+                        files: data.files.iter().map(PathBuf::from).collect(),
                         destination_server: data.destination_server,
-                        destination_path: PathBuf::from(data.destination_path.clone()),
+                        destination_path: PathBuf::from(&data.destination_path),
                         progress: progress.clone(),
                         total: total.clone(),
                     },
                     {
                         let root = root.clone();
-                        let destination_path = PathBuf::from(data.destination_path.clone());
-                        let server = server.clone();
-                        let destination_server = destination_server.clone();
+                        let files = data.files.clone();
+                        let filesystem = filesystem.clone();
+                        let destination_path = Arc::new(destination_path);
+                        let destination_filesystem = destination_filesystem.clone();
                         let progress = progress.clone();
 
                         async move {
                             let inner = async {
-                                let ignored = &[
-                                    server.filesystem.get_ignored().await,
-                                    destination_server.filesystem.get_ignored().await,
-                                ];
+                                let mut walker = filesystem
+                                    .async_walk_dir_files_stream(
+                                        root.clone(),
+                                        files.into_iter().map(PathBuf::from).collect(),
+                                        ignored,
+                                    )
+                                    .await?;
 
-                                for file in &data.files {
-                                    let source_path = root.join(file);
-                                    let destination_path = destination_path.join(file);
+                                walker
+                                    .run_multithreaded(
+                                        state.config.api.file_copy_threads,
+                                        DirectoryStreamWalkFn::from({
+                                            let filesystem = filesystem.clone();
+                                            let source_path = Arc::new(root);
+                                            let destination_path = Arc::new(destination_path);
+                                            let destination_filesystem = destination_filesystem.clone();
+                                            let progress = Arc::clone(&progress);
 
-                                    let Ok(metadata) = server.filesystem.async_symlink_metadata(&source_path).await
-                                    else {
-                                        continue;
-                                    };
+                                            move |_, path: PathBuf, stream| {
+                                                let filesystem = filesystem.clone();
+                                                let source_path = Arc::clone(&source_path);
+                                                let destination_path = Arc::clone(&destination_path);
+                                                let destination_filesystem = destination_filesystem.clone();
+                                                let progress = Arc::clone(&progress);
 
-                                    if metadata.is_dir() {
-                                        let mut walker = server
-                                            .filesystem
-                                            .async_walk_dir(&source_path)
-                                            .await?
-                                            .with_ignored(ignored);
+                                                async move {
+                                                    let metadata =
+                                                        match filesystem.async_symlink_metadata(&path).await {
+                                                            Ok(metadata) => metadata,
+                                                            Err(_) => return Ok(()),
+                                                        };
 
-                                        walker
-                                            .run_multithreaded(
-                                                state.config.api.file_copy_threads,
-                                                Arc::new({
-                                                    let server = server.clone();
-                                                    let destination_server = destination_server.clone();
-                                                    let source_path = Arc::new(source_path);
-                                                    let destination_path = Arc::new(destination_path);
-                                                    let progress = Arc::clone(&progress);
+                                                    let relative_path = match path.strip_prefix(&*source_path) {
+                                                        Ok(p) => p,
+                                                        Err(_) => return Ok(()),
+                                                    };
+                                                    let source_path = source_path.join(relative_path);
+                                                    let destination_path = destination_path.join(relative_path);
 
-                                                    move |_, path: PathBuf| {
-                                                        let server = server.clone();
-                                                        let destination_server = destination_server.clone();
-                                                        let source_path = Arc::clone(&source_path);
-                                                        let destination_path = Arc::clone(&destination_path);
-                                                        let progress = Arc::clone(&progress);
-
-                                                        async move {
-                                                            let metadata =
-                                                                match server.filesystem.async_symlink_metadata(&path).await {
-                                                                    Ok(metadata) => metadata,
-                                                                    Err(_) => return Ok(()),
-                                                                };
-
-                                                            let relative_path = match path.strip_prefix(&*source_path) {
-                                                                Ok(p) => p,
-                                                                Err(_) => return Ok(()),
-                                                            };
-                                                            let source_path = source_path.join(relative_path);
-                                                            let destination_path = destination_path.join(relative_path);
-
-                                                            if metadata.is_file() {
-                                                                if let Some(parent) = destination_path.parent() {
-                                                                    destination_server.filesystem.async_create_dir_all(parent).await?;
-                                                                }
-
-                                                                let file = server.filesystem.async_open(&source_path).await?;
-                                                                let mut writer =
-                                                                    crate::server::filesystem::writer::AsyncFileSystemWriter::new(
-                                                                        destination_server.clone(),
-                                                                        &destination_path,
-                                                                        Some(metadata.permissions()),
-                                                                        metadata.modified().ok(),
-                                                                    )
-                                                                    .await?;
-                                                                let mut reader = AsyncCountingReader::new_with_bytes_read(
-                                                                    file,
-                                                                    Arc::clone(&progress),
-                                                                );
-
-                                                                tokio::io::copy(&mut reader, &mut writer).await?;
-                                                                writer.shutdown().await?;
-                                                            } else if metadata.is_dir() {
-                                                                destination_server.filesystem.async_create_dir_all(&destination_path).await?;
-                                                                destination_server
-                                                                    .filesystem
-                                                                    .async_set_permissions(&destination_path, metadata.permissions())
-                                                                    .await?;
-                                                                if let Ok(modified_time) = metadata.modified() {
-                                                                    destination_server.filesystem.async_set_times(
-                                                                        &destination_path,
-                                                                        modified_time.into_std(),
-                                                                        None,
-                                                                    ).await?;
-                                                                }
-
-                                                                progress.fetch_add(metadata.len(), Ordering::Relaxed);
-                                                            } else if metadata.is_symlink() && let Ok(target) = server.filesystem.async_read_link(&source_path).await {
-                                                                if let Err(err) = destination_server.filesystem.async_symlink(&target, &destination_path).await {
-                                                                    tracing::debug!(path = %destination_path.display(), "failed to create symlink from copy: {:?}", err);
-                                                                } else if let Ok(modified_time) = metadata.modified() {
-                                                                    destination_server.filesystem.async_set_times(
-                                                                        &destination_path,
-                                                                        modified_time.into_std(),
-                                                                        None,
-                                                                    ).await?;
-                                                                }
-                                                            }
-
-                                                            Ok(())
+                                                    if metadata.file_type.is_file() {
+                                                        if let Some(parent) = destination_path.parent() {
+                                                            destination_filesystem.async_create_dir_all(&parent).await?;
                                                         }
-                                                    }
-                                                }),
-                                            )
-                                            .await?;
-                                    } else if metadata.is_file() {
-                                        let file = server.filesystem.async_open(source_path).await?;
-                                        let mut writer =
-                                            crate::server::filesystem::writer::AsyncFileSystemWriter::new(
-                                                destination_server.clone(),
-                                                &destination_path,
-                                                Some(metadata.permissions()),
-                                                metadata.modified().ok(),
-                                            )
-                                            .await?;
-                                        let mut reader =
-                                            AsyncCountingReader::new_with_bytes_read(
-                                                file,
-                                                Arc::clone(&progress),
-                                            );
 
-                                        tokio::io::copy(&mut reader, &mut writer).await?;
-                                        writer.shutdown().await?;
-                                    } else if metadata.is_symlink() && let Ok(target) = server.filesystem.async_read_link(source_path).await {
-                                        if let Err(err) = destination_server.filesystem.async_symlink(&target, &destination_path).await {
-                                            tracing::debug!(path = %destination_path.display(), "failed to create symlink from copy: {:?}", err);
-                                        } else if let Ok(modified_time) = metadata.modified() {
-                                            destination_server.filesystem.async_set_times(
-                                                &destination_path,
-                                                modified_time.into_std(),
-                                                None,
-                                            ).await?;
-                                        }
-                                    }
-                                }
+                                                        let mut reader = AsyncCountingReader::new_with_bytes_read(
+                                                            stream,
+                                                            Arc::clone(&progress),
+                                                        );
+
+                                                        let mut writer = destination_filesystem
+                                                            .async_create_file(&destination_path)
+                                                            .await?;
+                                                        destination_filesystem
+                                                            .async_set_permissions(&destination_path, metadata.permissions)
+                                                            .await?;
+
+                                                        tokio::io::copy(&mut reader, &mut writer).await?;
+                                                        writer.shutdown().await?;
+                                                    } else if metadata.file_type.is_dir() {
+                                                        destination_filesystem.async_create_dir_all(&destination_path).await?;
+                                                        destination_filesystem
+                                                            .async_set_permissions(&destination_path, metadata.permissions)
+                                                            .await?;
+
+                                                        progress.fetch_add(metadata.size, Ordering::Relaxed);
+                                                    } else if metadata.file_type.is_symlink() && let Ok(target) = filesystem.async_read_symlink(&source_path).await
+                                                        && let Err(err) = destination_filesystem.async_create_symlink(&target, &destination_path).await {
+                                                            tracing::debug!(path = %destination_path.display(), "failed to create symlink from copy: {:?}", err);
+                                                        }
+
+                                                    Ok(())
+                                                }
+                                            }
+                                        }),
+                                    )
+                                    .await?;
 
                                 Ok(())
                             };
@@ -307,7 +258,8 @@ mod post {
                 .add_operation(
                     crate::server::filesystem::operations::FilesystemOperation::CopyRemote {
                         server: server.uuid,
-                        path: root.clone(),
+                        path: PathBuf::from(data.root),
+                        files: data.files.iter().map(PathBuf::from).collect(),
                         destination_server: data.destination_server,
                         destination_path: PathBuf::from(data.destination_path),
                         progress: progress.clone(),
@@ -376,6 +328,7 @@ mod post {
                     crate::server::filesystem::operations::FilesystemOperation::CopyRemote {
                         server: server.uuid,
                         path: root.clone(),
+                        files: data.files.iter().map(PathBuf::from).collect(),
                         destination_server: data.destination_server,
                         destination_path: PathBuf::from(data.destination_path),
                         progress: progress.clone(),
@@ -383,42 +336,37 @@ mod post {
                     },
                     {
                         let root = root.clone();
+                        let files = data.files.clone();
                         let server = server.clone();
 
                         async move {
                             let (checksum_sender, checksum_receiver) =
                                 tokio::sync::oneshot::channel();
-                            let (checksummed_writer, mut checksummed_reader) =
+                            let (mut checksummed_writer, mut checksummed_reader) =
                                 tokio::io::duplex(crate::BUFFER_SIZE);
                             let (mut writer, reader) = tokio::io::duplex(crate::BUFFER_SIZE);
 
                             let archive_task = async {
-                                let ignored = server.filesystem.get_ignored().await;
-                                let writer = tokio_util::io::SyncIoBridge::new(checksummed_writer);
+                                let is_ignored = if filesystem.is_primary_server_fs() {
+                                    server.filesystem.get_ignored().await.into()
+                                } else {
+                                    Default::default()
+                                };
 
-                                crate::server::filesystem::archive::create::create_tar(
-                                    server.filesystem.clone(),
-                                    writer,
-                                    &root,
-                                    data.files.into_iter().map(PathBuf::from).collect(),
-                                    Some(progress),
-                                    vec![ignored],
-                                    crate::server::filesystem::archive::create::CreateTarOptions {
-                                        compression_type: match data.archive_format {
-                                            TransferArchiveFormat::Tar => CompressionType::None,
-                                            TransferArchiveFormat::TarGz => CompressionType::Gz,
-                                            TransferArchiveFormat::TarXz => CompressionType::Xz,
-                                            TransferArchiveFormat::TarBz2 => CompressionType::Bz2,
-                                            TransferArchiveFormat::TarLz4 => CompressionType::Lz4,
-                                            TransferArchiveFormat::TarZstd => CompressionType::Zstd,
-                                        },
-                                        compression_level: data.compression_level.unwrap_or(
+                                let mut reader = filesystem
+                                    .async_read_dir_files_archive(
+                                        &root,
+                                        files.into_iter().map(PathBuf::from).collect(),
+                                        data.archive_format.into(),
+                                        data.compression_level.unwrap_or(
                                             state.config.system.backups.compression_level,
                                         ),
-                                        threads: state.config.api.file_compression_threads,
-                                    },
-                                )
-                                .await?;
+                                        Some(progress),
+                                        is_ignored,
+                                    )
+                                    .await?;
+
+                                tokio::io::copy(&mut reader, &mut checksummed_writer).await?;
 
                                 Ok::<_, anyhow::Error>(())
                             };
@@ -476,6 +424,7 @@ mod post {
                                 .post(&data.url)
                                 .header("Authorization", &data.token)
                                 .header("Total-Bytes", total.load(Ordering::Relaxed))
+                                .header("Root-Files", serde_json::to_string(&data.files)?)
                                 .multipart(form)
                                 .send();
 

@@ -1,10 +1,7 @@
 use compact_str::ToCompactString;
 use serde::{Deserialize, Serialize};
 use serde_default::DefaultFromSerde;
-use std::{
-    collections::HashMap,
-    path::{Path, PathBuf},
-};
+use std::{collections::HashMap, path::PathBuf};
 use utoipa::ToSchema;
 
 pub mod process;
@@ -134,11 +131,34 @@ nestify::nest! {
 
 impl ServerConfiguration {
     fn machine_id_path(&self, config: &crate::config::Config) -> PathBuf {
-        Path::new(&config.system.tmp_directory).join(format!("{}/machine-id", self.uuid))
+        config.vmount_path(self.uuid).join("machine-id")
     }
 
     fn machine_uuid_path(&self, config: &crate::config::Config) -> PathBuf {
-        Path::new(&config.system.tmp_directory).join(format!("{}/machine-uuid", self.uuid))
+        config.vmount_path(self.uuid).join("machine-uuid")
+    }
+
+    fn vmounts(&self, config: &crate::config::Config) -> Vec<Mount> {
+        vec![
+            Mount {
+                default: false,
+                target: "/etc/machine-id".into(),
+                source: self
+                    .machine_id_path(config)
+                    .to_string_lossy()
+                    .to_compact_string(),
+                read_only: true,
+            },
+            Mount {
+                default: false,
+                target: "/sys/class/dmi/id/product_uuid".into(),
+                source: self
+                    .machine_uuid_path(config)
+                    .to_string_lossy()
+                    .to_compact_string(),
+                read_only: true,
+            },
+        ]
     }
 
     async fn mounts(
@@ -146,7 +166,7 @@ impl ServerConfiguration {
         config: &crate::config::Config,
         filesystem: &super::filesystem::Filesystem,
     ) -> Vec<Mount> {
-        let mut mounts = Vec::new();
+        let mut mounts = self.vmounts(config);
         mounts.reserve_exact(5 + self.mounts.len());
 
         mounts.push(Mount {
@@ -154,24 +174,6 @@ impl ServerConfiguration {
             target: "/home/container".into(),
             source: filesystem.get_base_fs_path().await.to_string_lossy().into(),
             read_only: false,
-        });
-        mounts.push(Mount {
-            default: false,
-            target: "/etc/machine-id".into(),
-            source: self
-                .machine_id_path(config)
-                .to_string_lossy()
-                .to_compact_string(),
-            read_only: true,
-        });
-        mounts.push(Mount {
-            default: false,
-            target: "/sys/class/dmi/id/product_uuid".into(),
-            source: self
-                .machine_uuid_path(config)
-                .to_string_lossy()
-                .to_compact_string(),
-            read_only: true,
         });
 
         if config.system.passwd.enabled {
@@ -196,7 +198,11 @@ impl ServerConfiguration {
         }
 
         for mount in &self.mounts {
-            if !config.allowed_mounts.contains(&mount.source) {
+            if config
+                .allowed_mounts
+                .iter()
+                .all(|m| !mount.source.starts_with(&**m))
+            {
                 continue;
             }
 
@@ -301,7 +307,7 @@ impl ServerConfiguration {
         map
     }
 
-    pub async fn create_machine_id_files(
+    pub async fn ensure_vmounts(
         &self,
         config: &crate::config::Config,
     ) -> Result<(), std::io::Error> {
@@ -318,6 +324,18 @@ impl ServerConfiguration {
         tokio::fs::write(&machine_uuid_path, self.uuid.to_string()).await?;
 
         Ok(())
+    }
+
+    pub async fn remove_vmounts(&self, config: &crate::config::Config) {
+        let vmount_path = config.vmount_path(self.uuid);
+        if let Err(err) = tokio::fs::remove_dir_all(&vmount_path).await {
+            tracing::error!(
+                server = %self.uuid,
+                "failed to remove vmounts at {}: {:?}",
+                vmount_path.to_string_lossy(),
+                err
+            );
+        }
     }
 
     pub fn convert_container_resources(

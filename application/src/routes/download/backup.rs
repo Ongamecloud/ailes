@@ -5,10 +5,12 @@ mod get {
     use crate::{
         response::{ApiResponse, ApiResponseResult},
         routes::GetState,
-        server::filesystem::archive::StreamableArchiveFormat,
+        server::filesystem::{archive::StreamableArchiveFormat, virtualfs::ByteRange},
     };
-    use axum::{extract::Query, http::StatusCode};
-    use axum_extra::{TypedHeader, headers::Range};
+    use axum::{
+        extract::Query,
+        http::{HeaderMap, StatusCode},
+    };
     use serde::Deserialize;
     use utoipa::ToSchema;
 
@@ -43,8 +45,8 @@ mod get {
     ))]
     pub async fn route(
         state: GetState,
+        headers: HeaderMap,
         Query(data): Query<Params>,
-        range: Option<TypedHeader<Range>>,
     ) -> ApiResponseResult {
         let payload: BackupJwtPayload = match state.config.jwt.verify(&data.token) {
             Ok(payload) => payload,
@@ -91,7 +93,11 @@ mod get {
         };
 
         match backup
-            .download(&state.config, data.archive_format, range)
+            .download(
+                &state.config,
+                data.archive_format,
+                ByteRange::from_headers(&headers),
+            )
             .await
         {
             Ok(response) => response,

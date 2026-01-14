@@ -10,6 +10,8 @@ use std::{
 };
 use tokio::{io::AsyncWriteExt, sync::RwLock};
 
+use crate::server::filesystem::virtualfs::VirtualWritableFilesystem;
+
 mod resolver;
 
 static DOWNLOAD_CLIENT: RwLock<Option<Arc<reqwest::Client>>> = RwLock::const_new(None);
@@ -44,12 +46,14 @@ pub struct Download {
     pub total: u64,
     pub destination: PathBuf,
     pub server: crate::server::Server,
+    pub filesystem: Arc<dyn VirtualWritableFilesystem>,
     pub response: Option<reqwest::Response>,
 }
 
 impl Download {
     pub async fn new(
         server: crate::server::Server,
+        filesystem: Arc<dyn VirtualWritableFilesystem>,
         destination: &Path,
         file_name: Option<compact_str::CompactString>,
         url: compact_str::CompactString,
@@ -138,8 +142,10 @@ impl Download {
             }
         }
 
-        if server.filesystem.is_ignored(&real_destination, false).await {
-            return Err(anyhow::anyhow!("file is ignored"));
+        if filesystem.is_primary_server_fs()
+            && server.filesystem.is_ignored(&real_destination, false).await
+        {
+            return Err(anyhow::anyhow!("file not found"));
         }
 
         Ok(Self {
@@ -155,6 +161,7 @@ impl Download {
             }),
             destination: real_destination,
             server,
+            filesystem,
             response: Some(response),
         })
     }
@@ -171,6 +178,7 @@ impl Download {
         let progress = Arc::clone(&self.progress);
         let destination = self.destination.clone();
         let server = self.server.clone();
+        let filesystem = self.filesystem.clone();
         let mut response = self
             .response
             .take()
@@ -182,19 +190,13 @@ impl Download {
             .operations
             .add_operation(
                 super::operations::FilesystemOperation::Pull {
-                    path: self.destination.clone(),
+                    destination_path: self.destination.clone(),
                     progress: self.progress.clone(),
                     total: Arc::new(AtomicU64::new(self.total)),
                 },
                 async move {
                     let mut run_inner = async || -> Result<(), anyhow::Error> {
-                        let mut writer = super::writer::AsyncFileSystemWriter::new(
-                            server.clone(),
-                            &destination,
-                            None,
-                            None,
-                        )
-                        .await?;
+                        let mut writer = filesystem.async_create_file(&destination).await?;
 
                         while let Some(chunk) = response.chunk().await? {
                             writer.write_all(&chunk).await?;

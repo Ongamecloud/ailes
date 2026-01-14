@@ -1,8 +1,11 @@
-use crate::io::{
-    abort::{AbortGuard, AbortWriter},
-    compression::{CompressionLevel, CompressionType, writer::CompressionWriter},
-    counting_reader::CountingReader,
-    fixed_reader::FixedReader,
+use crate::{
+    io::{
+        abort::{AbortGuard, AbortWriter},
+        compression::{CompressionLevel, CompressionType, writer::CompressionWriter},
+        counting_reader::CountingReader,
+        fixed_reader::FixedReader,
+    },
+    server::filesystem::virtualfs::IsIgnoredFn,
 };
 use cap_std::fs::PermissionsExt;
 use std::{
@@ -26,7 +29,7 @@ pub async fn create_tar<W: Write + Send + 'static>(
     base: &Path,
     sources: Vec<PathBuf>,
     bytes_archived: Option<Arc<AtomicU64>>,
-    ignored: Vec<ignore::gitignore::Gitignore>,
+    is_ignored: IsIgnoredFn,
     options: CreateTarOptions,
 ) -> Result<W, anyhow::Error> {
     let base = filesystem.relative_path(base);
@@ -51,12 +54,9 @@ pub async fn create_tar<W: Write + Send + 'static>(
                 Err(_) => continue,
             };
 
-            if ignored
-                .iter()
-                .any(|i| i.matched(&source, source_metadata.is_dir()).is_ignore())
-            {
+            let Some(source) = (is_ignored)(source_metadata.file_type().into(), source) else {
                 continue;
-            }
+            };
 
             let mut header = tar::Header::new_gnu();
             header.set_size(0);
@@ -81,7 +81,9 @@ pub async fn create_tar<W: Write + Send + 'static>(
                     bytes_archived.fetch_add(source_metadata.len(), Ordering::SeqCst);
                 }
 
-                let mut walker = filesystem.walk_dir(source)?.with_ignored(&ignored);
+                let mut walker = filesystem
+                    .walk_dir(source)?
+                    .with_is_ignored(is_ignored.clone());
                 while let Some(Ok((_, path))) = walker.next_entry() {
                     let relative = match path.strip_prefix(&base) {
                         Ok(path) => path,
@@ -185,7 +187,6 @@ pub async fn create_tar_distributed<W: Write + Send + 'static>(
     base: &Path,
     sources: async_channel::Receiver<PathBuf>,
     bytes_archived: Option<Arc<AtomicU64>>,
-    ignored: Vec<ignore::gitignore::Gitignore>,
     options: CreateTarOptions,
 ) -> Result<W, anyhow::Error> {
     let base = filesystem.relative_path(base);
@@ -209,13 +210,6 @@ pub async fn create_tar_distributed<W: Write + Send + 'static>(
                 Ok(metadata) => metadata,
                 Err(_) => continue,
             };
-
-            if ignored
-                .iter()
-                .any(|i| i.matched(&source, source_metadata.is_dir()).is_ignore())
-            {
-                continue;
-            }
 
             let mut header = tar::Header::new_gnu();
             header.set_size(0);

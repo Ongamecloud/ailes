@@ -1037,6 +1037,7 @@ impl ScheduleAction {
                             ArchiveFormat::Tar
                             | ArchiveFormat::TarGz
                             | ArchiveFormat::TarXz
+                            | ArchiveFormat::TarLzip
                             | ArchiveFormat::TarBz2
                             | ArchiveFormat::TarLz4
                             | ArchiveFormat::TarZstd => {
@@ -1046,7 +1047,7 @@ impl ScheduleAction {
                                     &root,
                                     files.into_iter().map(PathBuf::from).collect(),
                                     None,
-                                    vec![ignored],
+                                    ignored.into(),
                                     crate::server::filesystem::archive::create::CreateTarOptions {
                                         compression_type: format.compression_format(),
                                         compression_level: server
@@ -1071,7 +1072,7 @@ impl ScheduleAction {
                                     &root,
                                     files.into_iter().map(PathBuf::from).collect(),
                                     None,
-                                    vec![ignored],
+                                    ignored.into(),
                                     crate::server::filesystem::archive::create::CreateZipOptions {
                                         compression_level: server
                                             .app_state
@@ -1090,7 +1091,7 @@ impl ScheduleAction {
                                     &root,
                                     files.into_iter().map(PathBuf::from).collect(),
                                     None,
-                                    vec![ignored],
+                                    ignored.into(),
                                     crate::server::filesystem::archive::create::Create7zOptions {
                                         compression_level: server
                                             .app_state

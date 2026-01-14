@@ -5,25 +5,26 @@ mod post {
     use crate::{
         response::{ApiResponse, ApiResponseResult},
         routes::{ApiError, GetState, api::servers::_server_::GetServer},
+        server::filesystem::{cap::FileType, virtualfs::DirectoryWalkFn},
     };
     use axum::http::StatusCode;
     use ignore::{gitignore::GitignoreBuilder, overrides::OverrideBuilder};
     use serde::{Deserialize, Serialize};
     use std::{
-        path::PathBuf,
+        path::{Path, PathBuf},
         sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
         },
     };
     use tokio::{
-        io::{AsyncReadExt, AsyncSeekExt},
+        io::{AsyncBufReadExt, AsyncReadExt, BufReader},
         sync::Mutex,
     };
     use utoipa::ToSchema;
 
     async fn search_in_stream(
-        mut reader: impl tokio::io::AsyncRead + Unpin,
+        reader: &mut (dyn tokio::io::AsyncRead + Unpin + Send),
         substr: &str,
         case_insensitive: bool,
     ) -> Result<bool, std::io::Error> {
@@ -195,67 +196,52 @@ mod post {
                 let limit = data.limit.unwrap_or(100).min(500);
                 let max_size = data.max_size.unwrap_or(512 * 1024);
 
-                let root = match server.filesystem.async_canonicalize(&data.root).await {
-                    Ok(path) => path,
-                    Err(_) => {
-                        return ApiResponse::error("root not found")
-                            .with_status(StatusCode::NOT_FOUND)
-                            .ok();
-                    }
-                };
+                let (root, filesystem) = server
+                    .filesystem
+                    .resolve_readable_fs(&server, Path::new(&data.root))
+                    .await;
 
-                let metadata = server.filesystem.async_metadata(&root).await;
-                if !metadata.map(|m| m.is_dir()).unwrap_or(true) {
+                let metadata = filesystem.async_metadata(&root).await;
+                if !metadata.map_or(true, |m| m.file_type.is_dir()) {
                     return ApiResponse::error("root is not a directory")
                         .with_status(StatusCode::NOT_FOUND)
                         .ok();
                 }
 
-                let ignored = &[server.filesystem.get_ignored().await];
-                let mut walker = server
-                    .filesystem
-                    .async_walk_dir(&root)
-                    .await?
-                    .with_ignored(ignored);
+                let ignored = if filesystem.is_primary_server_fs() {
+                    server.filesystem.get_ignored().await.into()
+                } else {
+                    Default::default()
+                };
+                let mut walker = filesystem.async_walk_dir(&root, ignored).await?;
 
                 walker
                     .run_multithreaded(
                         state.config.api.file_search_threads,
-                        Arc::new({
-                            let server = server.clone();
+                        DirectoryWalkFn::from({
+                            let filesystem = filesystem.clone();
                             let results_count = Arc::clone(&results_count);
                             let results = Arc::clone(&results);
                             let data = Arc::new(data);
                             let root = Arc::new(root);
 
-                            move |is_dir, path: PathBuf| {
-                                let server = server.clone();
+                            move |file_type: FileType, path: PathBuf| {
+                                let filesystem = filesystem.clone();
                                 let results_count = Arc::clone(&results_count);
                                 let results = Arc::clone(&results);
                                 let data = Arc::clone(&data);
                                 let root = Arc::clone(&root);
 
                                 async move {
-                                    if is_dir || results_count.load(Ordering::Relaxed) >= limit {
-                                        return Ok(());
-                                    }
-
-                                    let metadata =
-                                        match server.filesystem.async_symlink_metadata(&path).await
-                                        {
-                                            Ok(metadata) => metadata,
-                                            Err(_) => return Ok(()),
-                                        };
-
-                                    if !metadata.is_file() {
+                                    if !file_type.is_file()
+                                        || results_count.load(Ordering::Relaxed) >= limit
+                                    {
                                         return Ok(());
                                     }
 
                                     if path.to_string_lossy().contains(data.query.as_str()) {
-                                        let mut entry = server
-                                            .filesystem
-                                            .to_api_entry(path.to_path_buf(), metadata)
-                                            .await;
+                                        let mut entry =
+                                            filesystem.async_directory_entry(&path).await?;
                                         entry.name = match path.strip_prefix(&data.root) {
                                             Ok(path) => path.to_string_lossy().into(),
                                             Err(_) => return Ok(()),
@@ -266,38 +252,35 @@ mod post {
                                         return Ok(());
                                     }
 
-                                    if data.include_content && metadata.len() <= max_size {
-                                        let mut file =
-                                            match server.filesystem.async_open(&path).await {
-                                                Ok(file) => file,
-                                                Err(_) => return Ok(()),
-                                            };
-
-                                        let mut buffer = [0; 128];
-                                        let bytes_read = match file.read(&mut buffer).await {
-                                            Ok(bytes_read) => bytes_read,
+                                    let metadata =
+                                        match filesystem.async_symlink_metadata(&path).await {
+                                            Ok(metadata) => metadata,
                                             Err(_) => return Ok(()),
                                         };
 
-                                        if !crate::utils::is_valid_utf8_slice(&buffer[..bytes_read])
-                                        {
+                                    if data.include_content
+                                        && metadata.size <= max_size
+                                        && filesystem.is_fast()
+                                    {
+                                        let file_read =
+                                            match filesystem.async_read_file(&path, None).await {
+                                                Ok(reader) => reader,
+                                                Err(_) => return Ok(()),
+                                            };
+                                        let mut reader = BufReader::new(file_read.reader);
+                                        let buffer = match reader.fill_buf().await {
+                                            Ok(buffer) => buffer[..64].to_vec(),
+                                            Err(_) => return Ok(()),
+                                        };
+
+                                        if !crate::utils::is_valid_utf8_slice(&buffer) {
                                             return Ok(());
                                         }
 
-                                        file.seek(std::io::SeekFrom::Start(0)).await?;
-
-                                        if search_in_stream(file, &data.query, true).await? {
-                                            let mut entry = server
-                                                .filesystem
-                                                .to_api_entry_buffer(
-                                                    path.to_path_buf(),
-                                                    &metadata,
-                                                    false,
-                                                    Some(&buffer[..bytes_read]),
-                                                    None,
-                                                    None,
-                                                )
-                                                .await;
+                                        if search_in_stream(&mut reader, &data.query, true).await? {
+                                            let mut entry = filesystem
+                                                .async_directory_entry_buffer(&path, &buffer)
+                                                .await?;
                                             entry.name = match path.strip_prefix(&*root) {
                                                 Ok(path) => path.to_string_lossy().into(),
                                                 Err(_) => return Ok(()),
@@ -316,17 +299,13 @@ mod post {
                     .await?;
             }
             Payload::V2(data) => {
-                let root = match server.filesystem.async_canonicalize(&data.root).await {
-                    Ok(path) => path,
-                    Err(_) => {
-                        return ApiResponse::error("root not found")
-                            .with_status(StatusCode::NOT_FOUND)
-                            .ok();
-                    }
-                };
+                let (root, filesystem) = server
+                    .filesystem
+                    .resolve_readable_fs(&server, Path::new(&data.root))
+                    .await;
 
-                let metadata = server.filesystem.async_metadata(&root).await;
-                if !metadata.map(|m| m.is_dir()).unwrap_or(true) {
+                let metadata = filesystem.async_metadata(&root).await;
+                if !metadata.map_or(true, |m| m.file_type.is_dir()) {
                     return ApiResponse::error("root is not a directory")
                         .with_status(StatusCode::NOT_FOUND)
                         .ok();
@@ -349,28 +328,29 @@ mod post {
 
                 let path_includes = Arc::new(override_builder.build()?);
 
-                let ignored = &[
-                    server.filesystem.get_ignored().await,
-                    ignore_builder.build()?,
-                ];
-                let mut walker = server
-                    .filesystem
-                    .async_walk_dir(&root)
-                    .await?
-                    .with_ignored(ignored);
+                let ignored = if filesystem.is_primary_server_fs() {
+                    vec![
+                        server.filesystem.get_ignored().await,
+                        ignore_builder.build()?,
+                    ]
+                    .into()
+                } else {
+                    ignore_builder.build()?.into()
+                };
+                let mut walker = filesystem.async_walk_dir(&root, ignored).await?;
 
                 walker
                     .run_multithreaded(
                         state.config.api.file_search_threads,
-                        Arc::new({
-                            let server = server.clone();
+                        DirectoryWalkFn::from({
+                            let filesystem = filesystem.clone();
                             let results_count = Arc::clone(&results_count);
                             let results = Arc::clone(&results);
                             let data = Arc::new(data);
                             let root = Arc::new(root);
 
-                            move |is_dir, path: PathBuf| {
-                                let server = server.clone();
+                            move |file_type: FileType, path: PathBuf| {
+                                let filesystem = filesystem.clone();
                                 let results_count = Arc::clone(&results_count);
                                 let results = Arc::clone(&results);
                                 let path_includes = Arc::clone(&path_includes);
@@ -378,7 +358,7 @@ mod post {
                                 let root = Arc::clone(&root);
 
                                 async move {
-                                    if is_dir
+                                    if !file_type.is_file()
                                         || results_count.load(Ordering::Relaxed) >= data.per_page
                                     {
                                         return Ok(());
@@ -386,53 +366,54 @@ mod post {
 
                                     if data.path_filter.is_some()
                                         && !path_includes
-                                            .matched(path.clone(), is_dir)
+                                            .matched(path.clone(), file_type.is_dir())
                                             .is_whitelist()
                                     {
                                         return Ok(());
                                     }
 
                                     let metadata =
-                                        match server.filesystem.async_symlink_metadata(&path).await
-                                        {
+                                        match filesystem.async_symlink_metadata(&path).await {
                                             Ok(metadata) => metadata,
                                             Err(_) => return Ok(()),
                                         };
 
                                     if let Some(size_filter) = &data.size_filter
                                         && !(size_filter.min..size_filter.max)
-                                            .contains(&metadata.len())
+                                            .contains(&metadata.size)
                                     {
                                         return Ok(());
                                     }
 
                                     let mut local_buffer = [0; 128];
                                     let buffer = if let Some(content_filter) = &data.content_filter
-                                        && (metadata.len() <= content_filter.max_search_size
+                                        && filesystem.is_fast()
+                                        && (metadata.size <= content_filter.max_search_size
                                             || content_filter.include_unmatched)
                                     {
-                                        let mut file =
-                                            match server.filesystem.async_open(&path).await {
-                                                Ok(file) => file,
+                                        let file_read =
+                                            match filesystem.async_read_file(&path, None).await {
+                                                Ok(reader) => reader,
                                                 Err(_) => return Ok(()),
                                             };
-
-                                        let bytes_read = match file.read(&mut local_buffer).await {
-                                            Ok(bytes_read) => bytes_read,
+                                        let mut reader = BufReader::new(file_read.reader);
+                                        let buffer = match reader.fill_buf().await {
+                                            Ok(buffer) => buffer,
                                             Err(_) => return Ok(()),
                                         };
 
-                                        if metadata.len() <= content_filter.max_search_size {
+                                        let buf_len = buffer.len().min(128);
+                                        local_buffer[..buf_len].copy_from_slice(&buffer[..buf_len]);
+
+                                        if metadata.size <= content_filter.max_search_size {
                                             if !crate::utils::is_valid_utf8_slice(
-                                                &local_buffer[..bytes_read],
+                                                &local_buffer[..buf_len],
                                             ) {
                                                 return Ok(());
                                             }
 
-                                            file.seek(std::io::SeekFrom::Start(0)).await?;
-
                                             if !search_in_stream(
-                                                file,
+                                                &mut reader,
                                                 &content_filter.query,
                                                 content_filter.case_insensitive,
                                             )
@@ -442,39 +423,33 @@ mod post {
                                             }
                                         }
 
-                                        &local_buffer[..bytes_read]
+                                        &local_buffer[..buf_len]
                                     } else if data
                                         .content_filter
                                         .as_ref()
                                         .is_some_and(|cf| !cf.include_unmatched)
                                     {
                                         return Ok(());
-                                    } else {
-                                        let mut file =
-                                            match server.filesystem.async_open(&path).await {
-                                                Ok(file) => file,
+                                    } else if filesystem.is_fast() {
+                                        let mut file_read =
+                                            match filesystem.async_read_file(&path, None).await {
+                                                Ok(reader) => reader,
+                                                Err(_) => return Ok(()),
+                                            };
+                                        let bytes_read =
+                                            match file_read.reader.read(&mut local_buffer).await {
+                                                Ok(bytes_read) => bytes_read,
                                                 Err(_) => return Ok(()),
                                             };
 
-                                        let bytes_read = match file.read(&mut local_buffer).await {
-                                            Ok(bytes_read) => bytes_read,
-                                            Err(_) => return Ok(()),
-                                        };
-
                                         &local_buffer[..bytes_read]
+                                    } else {
+                                        &[]
                                     };
 
-                                    let mut entry = server
-                                        .filesystem
-                                        .to_api_entry_buffer(
-                                            path.to_path_buf(),
-                                            &metadata,
-                                            false,
-                                            Some(buffer),
-                                            None,
-                                            None,
-                                        )
-                                        .await;
+                                    let mut entry = filesystem
+                                        .async_directory_entry_buffer(&path, buffer)
+                                        .await?;
                                     entry.name = match path.strip_prefix(&*root) {
                                         Ok(path) => path.to_string_lossy().into(),
                                         Err(_) => return Ok(()),

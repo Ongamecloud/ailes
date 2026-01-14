@@ -4,36 +4,33 @@ use crate::{
         counting_reader::CountingReader,
         fixed_reader::FixedReader,
     },
-    models::DirectoryEntry,
     remote::backups::RawServerBackup,
     response::ApiResponse,
     server::{
-        backup::{
-            Backup, BackupBrowseExt, BackupCleanExt, BackupCreateExt, BackupExt, BackupFindExt,
-            BrowseBackup,
+        backup::{Backup, BackupCleanExt, BackupCreateExt, BackupExt, BackupFindExt},
+        filesystem::{
+            archive::StreamableArchiveFormat,
+            virtualfs::{
+                ByteRange, VirtualReadableFilesystem, archive::ddup_bak::VirtualDdupBakArchive,
+            },
         },
-        filesystem::{archive::StreamableArchiveFormat, encode_mode},
     },
 };
 use axum::http::HeaderMap;
-use axum_extra::{TypedHeader, headers::Range};
 use cap_std::fs::Permissions;
 use chrono::{Datelike, Timelike};
 use ddup_bak::archive::entries::Entry;
 use ignore::{WalkBuilder, overrides::OverrideBuilder};
 use sha1::Digest;
 use std::{
-    io::{Read, Write},
+    io::Write,
     path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
 };
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    sync::RwLock,
-};
+use tokio::{io::AsyncReadExt, sync::RwLock};
 
 static REPOSITORY: RwLock<Option<Arc<ddup_bak::repository::Repository>>> = RwLock::const_new(None);
 
@@ -240,13 +237,11 @@ impl BackupCreateExt for DdupBakBackup {
             let ignore = ignore.clone();
 
             async move {
-                let ignored = [ignore];
-
                 let mut walker = server
                     .filesystem
                     .async_walk_dir(Path::new(""))
                     .await?
-                    .with_ignored(&ignored);
+                    .with_is_ignored(ignore.into());
                 while let Some(Ok((_, path))) = walker.next_entry().await {
                     let metadata = match server.filesystem.async_symlink_metadata(&path).await {
                         Ok(metadata) => metadata,
@@ -398,7 +393,7 @@ impl BackupExt for DdupBakBackup {
         &self,
         config: &Arc<crate::config::Config>,
         archive_format: StreamableArchiveFormat,
-        _range: Option<TypedHeader<Range>>,
+        _range: Option<ByteRange>,
     ) -> Result<ApiResponse, anyhow::Error> {
         let repository = get_repository(config).await;
 
@@ -602,11 +597,15 @@ impl BackupExt for DdupBakBackup {
         Ok(())
     }
 
-    async fn browse(&self, server: &crate::server::Server) -> Result<BrowseBackup, anyhow::Error> {
-        Ok(BrowseBackup::DdupBak(BrowseDdupBakBackup {
-            server: server.clone(),
-            archive: self.archive.clone(),
-        }))
+    async fn browse(
+        &self,
+        server: &crate::server::Server,
+    ) -> Result<Arc<dyn VirtualReadableFilesystem>, anyhow::Error> {
+        Ok(Arc::new(VirtualDdupBakArchive::new(
+            server.clone(),
+            self.archive.clone(),
+            Some(get_repository(&server.app_state.config).await),
+        )))
     }
 }
 
@@ -624,497 +623,5 @@ impl BackupCleanExt for DdupBakBackup {
         .await??;
 
         Ok(())
-    }
-}
-
-pub struct BrowseDdupBakBackup {
-    server: crate::server::Server,
-    archive: Arc<ddup_bak::archive::Archive>,
-}
-
-impl BrowseDdupBakBackup {
-    fn ddup_bak_entry_to_directory_entry(
-        path: &Path,
-        entry: &ddup_bak::archive::entries::Entry,
-    ) -> DirectoryEntry {
-        let size = match entry {
-            ddup_bak::archive::entries::Entry::File(file) => file.size_real,
-            ddup_bak::archive::entries::Entry::Directory(dir) => {
-                fn recursive_size(entry: &ddup_bak::archive::entries::Entry) -> u64 {
-                    match entry {
-                        ddup_bak::archive::entries::Entry::File(file) => file.size_real,
-                        ddup_bak::archive::entries::Entry::Directory(dir) => {
-                            dir.entries.iter().map(recursive_size).sum()
-                        }
-                        ddup_bak::archive::entries::Entry::Symlink(link) => {
-                            link.target.len() as u64
-                        }
-                    }
-                }
-
-                dir.entries.iter().map(recursive_size).sum()
-            }
-            ddup_bak::archive::entries::Entry::Symlink(link) => link.target.len() as u64,
-        };
-
-        let mime = if entry.is_directory() {
-            "inode/directory"
-        } else if entry.is_symlink() {
-            "inode/symlink"
-        } else {
-            new_mime_guess::from_path(entry.name())
-                .iter_raw()
-                .next()
-                .unwrap_or("application/octet-stream")
-        };
-
-        DirectoryEntry {
-            name: path
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into(),
-            created: chrono::DateTime::from_timestamp(0, 0).unwrap_or_default(),
-            modified: chrono::DateTime::from_timestamp(
-                entry
-                    .mtime()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs() as i64,
-                0,
-            )
-            .unwrap_or_default(),
-            mode: encode_mode(entry.mode().bits()),
-            mode_bits: compact_str::format_compact!("{:o}", entry.mode().bits() & 0o777),
-            size,
-            directory: entry.is_directory(),
-            file: entry.is_file(),
-            symlink: entry.is_symlink(),
-            mime,
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl BackupBrowseExt for BrowseDdupBakBackup {
-    async fn read_dir(
-        &self,
-        path: PathBuf,
-        per_page: Option<usize>,
-        page: usize,
-        is_ignored: impl Fn(PathBuf, bool) -> bool + Send + Sync + 'static,
-    ) -> Result<(usize, Vec<crate::models::DirectoryEntry>), anyhow::Error> {
-        let archive = self.archive.clone();
-
-        let entries = tokio::task::spawn_blocking(
-            move || -> Result<(usize, Vec<DirectoryEntry>), anyhow::Error> {
-                let entry = match archive.find_archive_entry(&path) {
-                    Some(entry) => entry,
-                    None => {
-                        let directory_entry_count = archive
-                            .entries()
-                            .iter()
-                            .filter(|e| e.is_directory())
-                            .count();
-
-                        let mut directory_entries = Vec::new();
-                        directory_entries.reserve_exact(directory_entry_count);
-                        let mut other_entries = Vec::new();
-                        other_entries
-                            .reserve_exact(archive.entries().len() - directory_entry_count);
-
-                        for entry in archive.entries() {
-                            if is_ignored(PathBuf::from(entry.name()), entry.is_directory()) {
-                                continue;
-                            }
-
-                            if entry.is_directory() {
-                                directory_entries.push(entry);
-                            } else {
-                                other_entries.push(entry);
-                            }
-                        }
-
-                        directory_entries.sort_unstable_by(|a, b| a.name().cmp(b.name()));
-                        other_entries.sort_unstable_by(|a, b| a.name().cmp(b.name()));
-
-                        let total_entries = directory_entries.len() + other_entries.len();
-                        let mut entries = Vec::new();
-
-                        if let Some(per_page) = per_page {
-                            let start = (page - 1) * per_page;
-
-                            for entry in directory_entries
-                                .into_iter()
-                                .chain(other_entries.into_iter())
-                                .skip(start)
-                                .take(per_page)
-                            {
-                                let path = path.join(entry.name());
-
-                                entries.push(Self::ddup_bak_entry_to_directory_entry(&path, entry));
-                            }
-                        } else {
-                            for entry in directory_entries
-                                .into_iter()
-                                .chain(other_entries.into_iter())
-                            {
-                                let path = path.join(entry.name());
-
-                                entries.push(Self::ddup_bak_entry_to_directory_entry(&path, entry));
-                            }
-                        }
-
-                        return Ok((total_entries, entries));
-                    }
-                };
-
-                match entry {
-                    ddup_bak::archive::entries::Entry::Directory(dir) => {
-                        let mut directory_entries = Vec::new();
-                        directory_entries
-                            .reserve_exact(dir.entries.iter().filter(|e| e.is_directory()).count());
-                        let mut other_entries = Vec::new();
-                        other_entries.reserve_exact(
-                            dir.entries.iter().filter(|e| !e.is_directory()).count(),
-                        );
-
-                        for entry in &dir.entries {
-                            if is_ignored(PathBuf::from(entry.name()), entry.is_directory()) {
-                                continue;
-                            }
-
-                            if entry.is_directory() {
-                                directory_entries.push(entry);
-                            } else {
-                                other_entries.push(entry);
-                            }
-                        }
-
-                        directory_entries.sort_unstable_by(|a, b| a.name().cmp(b.name()));
-                        other_entries.sort_unstable_by(|a, b| a.name().cmp(b.name()));
-
-                        let total_entries = directory_entries.len() + other_entries.len();
-                        let mut entries = Vec::new();
-
-                        if let Some(per_page) = per_page {
-                            let start = (page - 1) * per_page;
-
-                            for entry in directory_entries
-                                .into_iter()
-                                .chain(other_entries.into_iter())
-                                .skip(start)
-                                .take(per_page)
-                            {
-                                let path = path.join(&dir.name).join(entry.name());
-
-                                entries.push(Self::ddup_bak_entry_to_directory_entry(&path, entry));
-                            }
-                        } else {
-                            for entry in directory_entries
-                                .into_iter()
-                                .chain(other_entries.into_iter())
-                            {
-                                let path = path.join(&dir.name).join(entry.name());
-
-                                entries.push(Self::ddup_bak_entry_to_directory_entry(&path, entry));
-                            }
-                        }
-
-                        Ok((total_entries, entries))
-                    }
-                    _ => Err(anyhow::anyhow!("Expected a directory entry")),
-                }
-            },
-        )
-        .await??;
-
-        Ok(entries)
-    }
-
-    async fn read_file(
-        &self,
-        path: PathBuf,
-        _range: Option<TypedHeader<Range>>,
-    ) -> Result<(HeaderMap, Box<dyn tokio::io::AsyncRead + Unpin + Send>), anyhow::Error> {
-        let archive = self.archive.clone();
-
-        let entry = match archive.find_archive_entry(&path) {
-            Some(entry) => entry,
-            None => {
-                return Err(anyhow::anyhow!(std::io::Error::from(
-                    rustix::io::Errno::NOENT
-                )));
-            }
-        };
-
-        let size = match entry {
-            ddup_bak::archive::entries::Entry::File(file) => file.size_real,
-            _ => {
-                return Err(anyhow::anyhow!(std::io::Error::from(
-                    rustix::io::Errno::NOENT
-                )));
-            }
-        };
-
-        let repository = get_repository(&self.server.app_state.config).await;
-        let mut entry_reader = repository.entry_reader(entry.clone())?;
-        let (reader, mut writer) = tokio::io::duplex(crate::BUFFER_SIZE);
-
-        tokio::task::spawn_blocking(move || {
-            let runtime = tokio::runtime::Handle::current();
-
-            let mut buffer = vec![0; crate::BUFFER_SIZE];
-            loop {
-                match entry_reader.read(&mut buffer) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        if runtime.block_on(writer.write_all(&buffer[..n])).is_err() {
-                            break;
-                        }
-                    }
-                    Err(err) => {
-                        tracing::error!("error reading from ddup_bak entry: {:?}", err);
-                        break;
-                    }
-                }
-            }
-        });
-
-        let mut headers = HeaderMap::new();
-        headers.insert("Content-Length", size.into());
-
-        Ok((headers, Box::new(reader)))
-    }
-
-    async fn read_directory_archive(
-        &self,
-        path: PathBuf,
-        archive_format: StreamableArchiveFormat,
-    ) -> Result<tokio::io::DuplexStream, anyhow::Error> {
-        let archive = self.archive.clone();
-
-        match archive.find_archive_entry(&path) {
-            Some(ddup_bak::archive::entries::Entry::Directory(_)) | None => {}
-            Some(_) => {
-                return Err(anyhow::anyhow!(std::io::Error::from(
-                    rustix::io::Errno::NOENT
-                )));
-            }
-        };
-
-        let repository = get_repository(&self.server.app_state.config).await;
-        let compression_level = self
-            .server
-            .app_state
-            .config
-            .system
-            .backups
-            .compression_level;
-        let (reader, writer) = tokio::io::duplex(crate::BUFFER_SIZE);
-
-        match archive_format {
-            StreamableArchiveFormat::Zip => {
-                crate::spawn_blocking_handled(move || -> Result<(), anyhow::Error> {
-                    let writer = tokio_util::io::SyncIoBridge::new(writer);
-                    let mut zip = zip::ZipWriter::new_stream(writer);
-
-                    match archive.find_archive_entry(&path) {
-                        Some(entry) => {
-                            let entry = match entry {
-                                ddup_bak::archive::entries::Entry::Directory(entry) => entry,
-                                _ => {
-                                    return Err(anyhow::anyhow!(std::io::Error::from(
-                                        rustix::io::Errno::NOENT
-                                    )));
-                                }
-                            };
-
-                            for entry in entry.entries.iter() {
-                                DdupBakBackup::zip_recursive_convert_entries(
-                                    entry,
-                                    &repository,
-                                    &mut zip,
-                                    compression_level,
-                                    Path::new(""),
-                                )?;
-                            }
-
-                            let mut inner = zip.finish()?;
-                            inner.flush()?;
-                        }
-                        None => {
-                            if path.components().count() == 0 {
-                                for entry in archive.entries() {
-                                    DdupBakBackup::zip_recursive_convert_entries(
-                                        entry,
-                                        &repository,
-                                        &mut zip,
-                                        compression_level,
-                                        Path::new(""),
-                                    )?;
-                                }
-
-                                let mut inner = zip.finish()?;
-                                inner.flush()?;
-                            }
-                        }
-                    };
-
-                    Ok(())
-                });
-            }
-            _ => {
-                let writer = CompressionWriter::new(
-                    tokio_util::io::SyncIoBridge::new(writer),
-                    archive_format.compression_format(),
-                    compression_level,
-                    self.server.app_state.config.api.file_compression_threads,
-                );
-
-                crate::spawn_blocking_handled(move || -> Result<(), anyhow::Error> {
-                    let mut tar = tar::Builder::new(writer);
-                    tar.mode(tar::HeaderMode::Complete);
-
-                    match archive.find_archive_entry(&path) {
-                        Some(entry) => {
-                            let entry = match entry {
-                                ddup_bak::archive::entries::Entry::Directory(entry) => entry,
-                                _ => {
-                                    return Err(anyhow::anyhow!(std::io::Error::from(
-                                        rustix::io::Errno::NOENT
-                                    )));
-                                }
-                            };
-
-                            for entry in entry.entries.iter() {
-                                DdupBakBackup::tar_recursive_convert_entries(
-                                    entry,
-                                    &repository,
-                                    &mut tar,
-                                    Path::new(""),
-                                )?;
-                            }
-
-                            tar.finish()?;
-                            let mut inner = tar.into_inner()?.finish()?;
-                            inner.flush()?;
-                        }
-                        None => {
-                            if path.components().count() == 0 {
-                                for entry in archive.entries() {
-                                    DdupBakBackup::tar_recursive_convert_entries(
-                                        entry,
-                                        &repository,
-                                        &mut tar,
-                                        Path::new(""),
-                                    )?;
-                                }
-
-                                tar.finish()?;
-                                let mut inner = tar.into_inner()?.finish()?;
-                                inner.flush()?;
-                            }
-                        }
-                    };
-
-                    Ok(())
-                });
-            }
-        }
-
-        Ok(reader)
-    }
-
-    async fn read_files_archive(
-        &self,
-        path: PathBuf,
-        file_paths: Vec<PathBuf>,
-        archive_format: StreamableArchiveFormat,
-    ) -> Result<tokio::io::DuplexStream, anyhow::Error> {
-        let archive = self.archive.clone();
-
-        match archive.find_archive_entry(&path) {
-            Some(ddup_bak::archive::entries::Entry::Directory(_)) | None => {}
-            Some(_) => {
-                return Err(anyhow::anyhow!(std::io::Error::from(
-                    rustix::io::Errno::NOENT
-                )));
-            }
-        };
-
-        let repository = get_repository(&self.server.app_state.config).await;
-        let compression_level = self
-            .server
-            .app_state
-            .config
-            .system
-            .backups
-            .compression_level;
-        let (reader, writer) = tokio::io::duplex(crate::BUFFER_SIZE);
-
-        match archive_format {
-            StreamableArchiveFormat::Zip => {
-                crate::spawn_blocking_handled(move || -> Result<(), anyhow::Error> {
-                    let writer = tokio_util::io::SyncIoBridge::new(writer);
-                    let mut zip = zip::ZipWriter::new_stream(writer);
-
-                    for file in file_paths {
-                        let entry = match archive.find_archive_entry(&path.join(&file)) {
-                            Some(entry) => entry,
-                            None => continue,
-                        };
-
-                        DdupBakBackup::zip_recursive_convert_entries(
-                            entry,
-                            &repository,
-                            &mut zip,
-                            compression_level,
-                            Path::new(""),
-                        )?;
-                    }
-
-                    let mut inner = zip.finish()?;
-                    inner.flush()?;
-
-                    Ok(())
-                });
-            }
-            _ => {
-                let writer = CompressionWriter::new(
-                    tokio_util::io::SyncIoBridge::new(writer),
-                    archive_format.compression_format(),
-                    compression_level,
-                    self.server.app_state.config.api.file_compression_threads,
-                );
-
-                crate::spawn_blocking_handled(move || -> Result<(), anyhow::Error> {
-                    let mut tar = tar::Builder::new(writer);
-                    tar.mode(tar::HeaderMode::Complete);
-
-                    for file in file_paths {
-                        let entry = match archive.find_archive_entry(&path.join(&file)) {
-                            Some(entry) => entry,
-                            None => continue,
-                        };
-
-                        DdupBakBackup::tar_recursive_convert_entries(
-                            entry,
-                            &repository,
-                            &mut tar,
-                            Path::new(""),
-                        )?;
-                    }
-
-                    tar.finish()?;
-                    let mut inner = tar.into_inner()?.finish()?;
-                    inner.flush()?;
-
-                    Ok(())
-                });
-            }
-        }
-
-        Ok(reader)
     }
 }

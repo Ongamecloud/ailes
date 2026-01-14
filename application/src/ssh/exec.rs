@@ -174,7 +174,7 @@ impl ExecSession {
                                 base,
                                 paths,
                                 None,
-                                vec![self.server.filesystem.get_ignored().await],
+                                self.server.filesystem.get_ignored().await.into(),
                                 crate::server::filesystem::archive::create::CreateTarOptions {
                                     compression_type: match destination
                                         .extension()

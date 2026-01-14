@@ -10,8 +10,8 @@ mod get {
     use compact_str::ToCompactString;
     use serde::{Deserialize, Serialize};
     use sha1::Digest;
-    use std::collections::HashMap;
-    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+    use std::{collections::HashMap, path::Path};
+    use tokio::io::{AsyncReadExt, BufReader};
     use utoipa::ToSchema;
 
     #[derive(ToSchema, Deserialize, Clone, Copy)]
@@ -31,6 +31,8 @@ mod get {
     #[derive(ToSchema, Deserialize)]
     pub struct Params {
         algorithm: Algorithm,
+        #[serde(default)]
+        root: compact_str::CompactString,
         files: Vec<compact_str::CompactString>,
     }
 
@@ -61,28 +63,43 @@ mod get {
         fingerprint_handles.reserve_exact(data.files.len());
 
         for path_raw in data.files {
-            let path = match server.filesystem.async_canonicalize(&path_raw).await {
-                Ok(path) => path,
-                Err(_) => continue,
+            let path = Path::new(&data.root).join(&path_raw);
+
+            let parent = match path.parent() {
+                Some(parent) => parent,
+                None => continue,
             };
-            let metadata = match server.filesystem.async_metadata(&path).await {
+
+            let file_name = match path.file_name() {
+                Some(name) => name,
+                None => continue,
+            };
+
+            let (path, filesystem) = server.filesystem.resolve_readable_fs(&server, parent).await;
+            let path = path.join(file_name);
+
+            let metadata = match filesystem.async_metadata(&path).await {
                 Ok(metadata) => metadata,
                 Err(_) => continue,
             };
 
-            if !metadata.is_file() || server.filesystem.is_ignored(&path, metadata.is_dir()).await {
+            if !metadata.file_type.is_file()
+                || (filesystem.is_primary_server_fs()
+                    && server.filesystem.is_ignored(&path, false).await)
+            {
                 continue;
             }
 
-            let mut file = match server.filesystem.async_open(&path).await {
+            let file_read = match filesystem.async_read_file(&path, None).await {
                 Ok(file) => file,
                 Err(_) => continue,
             };
+            let mut file = BufReader::new(file_read.reader);
 
             let mut buffer = vec![0; crate::BUFFER_SIZE];
 
             fingerprint_handles.push(async move {
-                Ok::<_, std::io::Error>((
+                Ok::<_, anyhow::Error>((
                     path_raw,
                     match data.algorithm {
                         Algorithm::Md5 => {
@@ -206,7 +223,9 @@ mod get {
                                 }
                             }
 
-                            file.seek(std::io::SeekFrom::Start(0)).await?;
+                            drop(file);
+                            let file_read = filesystem.async_read_file(&path, None).await?;
+                            let mut file = BufReader::new(file_read.reader);
 
                             let mut num2: u32 = 1 ^ normalized_length;
                             let mut num3: u32 = 0;

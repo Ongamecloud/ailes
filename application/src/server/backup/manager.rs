@@ -1,73 +1,43 @@
-use crate::{remote::backups::RawServerBackup, server::backup::adapters::BackupAdapter};
-use ignore::gitignore::GitignoreBuilder;
-use std::{
-    collections::HashMap,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+use crate::{
+    remote::backups::RawServerBackup,
+    server::{backup::adapters::BackupAdapter, filesystem::virtualfs::VirtualReadableFilesystem},
 };
-use tokio::sync::RwLock;
+use ignore::gitignore::GitignoreBuilder;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
-type BackupValue = (Arc<super::Backup>, std::time::Instant);
-type BrowseBackupValue = (Arc<super::BrowseBackup>, std::time::Instant);
 pub struct BackupManager {
     config: Arc<crate::config::Config>,
-    cached_backups: Arc<RwLock<HashMap<uuid::Uuid, BackupValue>>>,
-    cached_browse_backups: Arc<RwLock<HashMap<uuid::Uuid, BrowseBackupValue>>>,
-    cached_browse_backup_locks: Arc<RwLock<HashMap<uuid::Uuid, Arc<tokio::sync::Mutex<()>>>>>,
-    cached_backup_adapters: RwLock<HashMap<uuid::Uuid, BackupAdapter>>,
-
-    task: tokio::task::JoinHandle<()>,
+    cached_backups: moka::future::Cache<uuid::Uuid, Arc<super::Backup>>,
+    cached_browse_backups: moka::future::Cache<uuid::Uuid, Arc<dyn VirtualReadableFilesystem>>,
+    cached_browse_backup_locks: moka::future::Cache<uuid::Uuid, Arc<tokio::sync::Mutex<()>>>,
+    cached_backup_adapters: moka::future::Cache<uuid::Uuid, BackupAdapter>,
 }
 
 impl BackupManager {
     pub fn new(config: Arc<crate::config::Config>) -> Self {
-        let cached_backups = Arc::new(RwLock::new(HashMap::new()));
-        let cached_browse_backups = Arc::new(RwLock::new(HashMap::new()));
-        let cached_browse_backup_locks = Arc::new(RwLock::new(HashMap::new()));
-
         Self {
             config,
-            cached_backups: Arc::clone(&cached_backups),
-            cached_browse_backups: Arc::clone(&cached_browse_backups),
-            cached_backup_adapters: RwLock::new(HashMap::new()),
-            cached_browse_backup_locks: Arc::clone(&cached_browse_backup_locks),
-            task: tokio::spawn({
-                async move {
-                    loop {
-                        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-
-                        let mut cached_backups = cached_backups.write().await;
-                        cached_backups.retain(|_, (_, last_accessed)| {
-                            last_accessed.elapsed() < std::time::Duration::from_secs(300)
-                        });
-                        drop(cached_backups);
-
-                        let mut cached_browse_backups = cached_browse_backups.write().await;
-                        cached_browse_backups.retain(|_, (_, last_accessed)| {
-                            last_accessed.elapsed() < std::time::Duration::from_secs(300)
-                        });
-
-                        let mut cached_browse_backup_locks =
-                            cached_browse_backup_locks.write().await;
-                        cached_browse_backup_locks
-                            .retain(|uuid, _| cached_browse_backups.contains_key(uuid));
-                        drop(cached_browse_backups);
-                        drop(cached_browse_backup_locks);
-                    }
-                }
-            }),
+            cached_backups: moka::future::CacheBuilder::new(128)
+                .time_to_live(std::time::Duration::from_mins(10))
+                .build(),
+            cached_browse_backups: moka::future::CacheBuilder::new(64)
+                .time_to_live(std::time::Duration::from_mins(5))
+                .build(),
+            cached_backup_adapters: moka::future::Cache::new(1024),
+            cached_browse_backup_locks: moka::future::Cache::new(10240),
         }
     }
 
     pub async fn fast_contains(&self, server: &crate::server::Server, uuid: uuid::Uuid) -> bool {
-        self.cached_backups.read().await.contains_key(&uuid)
+        self.cached_backups.contains_key(&uuid)
             || server.configuration.read().await.backups.contains(&uuid)
     }
 
     pub async fn adapter_contains(&self, uuid: uuid::Uuid) -> bool {
-        if let Some(adapter) = self.cached_backup_adapters.read().await.get(&uuid) {
+        if let Some(adapter) = self.cached_backup_adapters.get(&uuid).await {
             match adapter.exists(&self.config, uuid).await {
                 Ok(exists) => exists,
                 Err(err) => {
@@ -190,7 +160,7 @@ impl BackupManager {
 
                 backup
             }
-            Err(e) => {
+            Err(err) => {
                 progress_task.abort();
 
                 if let Err(err) = adapter.clean(server, uuid).await {
@@ -226,12 +196,9 @@ impl BackupManager {
                         ]
                         .into(),
                     ))?;
-                self.cached_backup_adapters
-                    .write()
-                    .await
-                    .insert(uuid, adapter);
+                self.cached_backup_adapters.insert(uuid, adapter).await;
 
-                return Err(e);
+                return Err(err);
             }
         };
 
@@ -265,10 +232,7 @@ impl BackupManager {
                 .into(),
             ))?;
         server.configuration.write().await.backups.push(uuid);
-        self.cached_backup_adapters
-            .write()
-            .await
-            .insert(uuid, adapter);
+        self.cached_backup_adapters.insert(uuid, adapter).await;
 
         tracing::info!(
             server = %server.uuid,
@@ -437,33 +401,23 @@ impl BackupManager {
         &self,
         uuid: uuid::Uuid,
     ) -> Result<Option<Arc<super::Backup>>, anyhow::Error> {
-        if let Some(backup) = self.cached_backups.write().await.get_mut(&uuid) {
-            backup.1 = std::time::Instant::now();
-
-            return Ok(Some(Arc::clone(&backup.0)));
+        if let Some(backup) = self.cached_backups.get(&uuid).await {
+            return Ok(Some(backup));
         }
 
-        if let Some(adapter) = self.cached_backup_adapters.read().await.get(&uuid)
+        if let Some(adapter) = self.cached_backup_adapters.get(&uuid).await
             && let Some(backup) = adapter.find(&self.config, uuid).await?
         {
             let backup = Arc::new(backup);
-
-            let mut cache = self.cached_backups.write().await;
-            cache.insert(uuid, (Arc::clone(&backup), std::time::Instant::now()));
-            drop(cache);
+            self.cached_backups.insert(uuid, Arc::clone(&backup)).await;
 
             return Ok(Some(backup));
         }
 
         if let Some((adapter, backup)) = BackupAdapter::find_all(&self.config, uuid).await? {
             let backup = Arc::new(backup);
-
-            let mut cache = self.cached_backups.write().await;
-            cache.insert(uuid, (Arc::clone(&backup), std::time::Instant::now()));
-            drop(cache);
-            let mut adapter_cache = self.cached_backup_adapters.write().await;
-            adapter_cache.insert(uuid, adapter);
-            drop(adapter_cache);
+            self.cached_backups.insert(uuid, Arc::clone(&backup)).await;
+            self.cached_backup_adapters.insert(uuid, adapter).await;
 
             return Ok(Some(backup));
         }
@@ -476,18 +430,13 @@ impl BackupManager {
         adapter: BackupAdapter,
         uuid: uuid::Uuid,
     ) -> Result<Option<Arc<super::Backup>>, anyhow::Error> {
-        if let Some(backup) = self.cached_backups.write().await.get_mut(&uuid) {
-            backup.1 = std::time::Instant::now();
-
-            return Ok(Some(Arc::clone(&backup.0)));
+        if let Some(backup) = self.cached_backups.get(&uuid).await {
+            return Ok(Some(backup));
         }
 
         if let Some(backup) = adapter.find(&self.config, uuid).await? {
             let backup = Arc::new(backup);
-
-            let mut cache = self.cached_backups.write().await;
-            cache.insert(uuid, (Arc::clone(&backup), std::time::Instant::now()));
-            drop(cache);
+            self.cached_backups.insert(uuid, Arc::clone(&backup)).await;
 
             return Ok(Some(backup));
         }
@@ -499,47 +448,38 @@ impl BackupManager {
         &self,
         server: &crate::server::Server,
         uuid: uuid::Uuid,
-    ) -> Result<Option<Arc<super::BrowseBackup>>, anyhow::Error> {
-        if let Some(backup) = self.cached_browse_backups.write().await.get_mut(&uuid) {
-            backup.1 = std::time::Instant::now();
-
-            return Ok(Some(Arc::clone(&backup.0)));
+    ) -> Result<Option<Arc<dyn VirtualReadableFilesystem>>, anyhow::Error> {
+        if let Some(browse_backup) = self.cached_browse_backups.get(&uuid).await {
+            return Ok(Some(browse_backup));
         }
 
         if let Some(backup) = self.find(uuid).await? {
             let server = server.clone();
-            let cached_browse_backup_locks = Arc::clone(&self.cached_browse_backup_locks);
-            let cached_browse_backups = Arc::clone(&self.cached_browse_backups);
+            let cached_browse_backup_locks = self.cached_browse_backup_locks.clone();
+            let cached_browse_backups = self.cached_browse_backups.clone();
 
             return tokio::spawn(async move {
-                let read_cached_browse_backup_locks = cached_browse_backup_locks.read().await;
-                let _guard = if let Some(lock) = read_cached_browse_backup_locks.get(&uuid) {
-                    Arc::clone(lock)
+                let _guard = if let Some(lock) = cached_browse_backup_locks.get(&uuid).await {
+                    lock
                 } else {
-                    drop(read_cached_browse_backup_locks);
-
                     let lock = Arc::new(tokio::sync::Mutex::new(()));
                     cached_browse_backup_locks
-                        .write()
-                        .await
-                        .insert(uuid, Arc::clone(&lock));
+                        .insert(uuid, Arc::clone(&lock))
+                        .await;
 
-                    Arc::clone(&lock)
+                    lock
                 };
                 let _guard = _guard.lock().await;
 
-                if let Some(browse_backup) = cached_browse_backups.read().await.get(&uuid) {
-                    return Ok(Some(Arc::clone(&browse_backup.0)));
+                if let Some(browse_backup) = cached_browse_backups.get(&uuid).await {
+                    return Ok(Some(browse_backup));
                 }
 
-                let browse_backup = Arc::new(backup.browse(&server).await?);
+                let browse_backup = backup.browse(&server).await?;
 
-                let mut cache = cached_browse_backups.write().await;
-                cache.insert(
-                    uuid,
-                    (Arc::clone(&browse_backup), std::time::Instant::now()),
-                );
-                drop(cache);
+                cached_browse_backups
+                    .insert(uuid, Arc::clone(&browse_backup))
+                    .await;
 
                 Ok(Some(browse_backup))
             })
@@ -547,11 +487,5 @@ impl BackupManager {
         }
 
         Ok(None)
-    }
-}
-
-impl Drop for BackupManager {
-    fn drop(&mut self) {
-        self.task.abort();
     }
 }
