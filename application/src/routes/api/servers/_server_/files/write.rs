@@ -101,7 +101,7 @@ mod post {
             0
         };
 
-        if server.filesystem.is_ignored(parent, true).await {
+        if filesystem.is_primary_server_fs() && server.filesystem.is_ignored(parent, true).await {
             return ApiResponse::error("parent directory not found")
                 .with_status(StatusCode::EXPECTATION_FAILED)
                 .ok();

@@ -35,7 +35,7 @@ impl ApiResponse {
     pub fn json(body: impl serde::Serialize) -> Self {
         Self {
             body: axum::body::Body::from(
-                serde_json::to_string(&body).unwrap_or_else(|_| "{}".to_string()),
+                serde_json::to_vec(&body).unwrap_or_else(|_| b"{}".to_vec()),
             ),
             status: axum::http::StatusCode::OK,
             headers: axum::http::HeaderMap::from_iter([(
@@ -69,6 +69,19 @@ impl ApiResponse {
         }
 
         self
+    }
+
+    pub async fn into_string_error(self) -> String {
+        let bytes = match axum::body::to_bytes(self.body, 8192).await {
+            Ok(bytes) => bytes,
+            Err(_) => return "unknown error".into(),
+        };
+
+        if let Ok(api_error) = serde_json::from_slice::<ApiError>(&bytes) {
+            api_error.error.into()
+        } else {
+            String::from_utf8(bytes.into()).unwrap_or_else(|_| "unknown error".into())
+        }
     }
 
     #[inline]

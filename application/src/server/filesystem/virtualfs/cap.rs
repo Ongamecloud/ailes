@@ -4,8 +4,12 @@ use super::{
     IsIgnoredFn, WritableSeekableFileStream,
 };
 use crate::{
-    io::compression::CompressionLevel, models::DirectoryEntry,
-    server::filesystem::archive::StreamableArchiveFormat,
+    io::compression::CompressionLevel,
+    models::DirectoryEntry,
+    server::filesystem::{
+        archive::StreamableArchiveFormat,
+        virtualfs::{AsyncReadableWritableSeekableFileStream, ReadableWritableSeekableFileStream},
+    },
 };
 use std::{
     path::{Path, PathBuf},
@@ -521,6 +525,28 @@ impl super::VirtualWritableFilesystem for VirtualCapFilesystem {
 
             Ok(Box::new(file))
         }
+    }
+    fn open_file_with_options(
+        &self,
+        path: &(dyn AsRef<Path> + Send + Sync),
+        options: cap_std::fs::OpenOptions,
+    ) -> Result<ReadableWritableSeekableFileStream, anyhow::Error> {
+        let path = self.check_ignored(FileType::File, path.as_ref())?;
+
+        let file = self.inner.open_with(&path, options)?;
+
+        Ok(Box::new(file))
+    }
+    async fn async_open_file_with_options(
+        &self,
+        path: &(dyn AsRef<Path> + Send + Sync),
+        options: cap_std::fs::OpenOptions,
+    ) -> Result<AsyncReadableWritableSeekableFileStream, anyhow::Error> {
+        let path = self.check_ignored(FileType::File, path.as_ref())?;
+
+        let file = self.inner.async_open_with(&path, options).await?;
+
+        Ok(Box::new(file))
     }
 
     fn set_permissions(

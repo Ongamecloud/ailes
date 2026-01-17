@@ -1,5 +1,5 @@
 use bollard::Docker;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{sync::Arc, time::Instant};
 use utoipa::ToSchema;
 use utoipa_axum::router::OpenApiRouter;
@@ -68,7 +68,7 @@ pub struct AppState {
     pub mime_cache: moka::future::Cache<MimeCacheKey, &'static str>,
 }
 
-#[derive(ToSchema, Serialize)]
+#[derive(ToSchema, Serialize, Deserialize)]
 pub struct ApiError<'a> {
     pub error: &'a str,
 }

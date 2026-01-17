@@ -121,6 +121,8 @@ pub type WritableFileStream = Box<dyn std::io::Write + Send>;
 pub type AsyncWritableFileStream = Box<dyn AsyncWrite + Unpin + Send>;
 pub type WritableSeekableFileStream = Box<dyn crate::io::WriteSeek + Send>;
 pub type AsyncWritableSeekableFileStream = Box<dyn crate::io::AsyncWriteSeek + Send>;
+pub type ReadableWritableSeekableFileStream = Box<dyn crate::io::ReadWriteSeek + Send>;
+pub type AsyncReadableWritableSeekableFileStream = Box<dyn crate::io::AsyncReadWriteSeek + Send>;
 
 pub struct DirectoryListing {
     pub total_entries: usize,
@@ -551,6 +553,16 @@ pub trait VirtualWritableFilesystem: VirtualReadableFilesystem {
         &self,
         path: &(dyn AsRef<Path> + Send + Sync),
     ) -> Result<AsyncWritableSeekableFileStream, anyhow::Error>;
+    fn open_file_with_options(
+        &self,
+        path: &(dyn AsRef<Path> + Send + Sync),
+        options: cap_std::fs::OpenOptions,
+    ) -> Result<ReadableWritableSeekableFileStream, anyhow::Error>;
+    async fn async_open_file_with_options(
+        &self,
+        path: &(dyn AsRef<Path> + Send + Sync),
+        options: cap_std::fs::OpenOptions,
+    ) -> Result<AsyncReadableWritableSeekableFileStream, anyhow::Error>;
 
     fn set_permissions(
         &self,

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     borrow::Cow,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, atomic::AtomicU64},
 };
 use tokio::io::AsyncWriteExt;
 
@@ -571,7 +571,7 @@ impl ScheduleAction {
                 }
             }
             ScheduleAction::CreateDirectory { root, name, .. } => {
-                let root = match execution_context.resolve_parameter(root) {
+                let raw_root = match execution_context.resolve_parameter(root) {
                     Some(root) => root,
                     None => {
                         return Err("unable to resolve parameter `root` into a string.".into());
@@ -584,27 +584,31 @@ impl ScheduleAction {
                     }
                 };
 
-                let path = match server.filesystem.async_canonicalize(root).await {
-                    Ok(path) => path,
-                    Err(_) => PathBuf::from(root),
-                };
+                let (root, filesystem) = server
+                    .filesystem
+                    .resolve_writable_fs(server, raw_root)
+                    .await;
 
-                let metadata = server.filesystem.async_metadata(&root).await;
-                if !metadata.map(|m| m.is_dir()).unwrap_or(true) {
-                    return Err("root is not a directory".into());
+                let metadata = filesystem.async_metadata(&root).await;
+                if !metadata.map_or(true, |m| m.file_type.is_dir()) {
+                    return Err("path is not a directory".into());
                 }
 
-                if server.filesystem.is_ignored(&path, true).await {
-                    return Err("root not found".into());
+                if filesystem.is_primary_server_fs()
+                    && server.filesystem.is_ignored(&root, true).await
+                {
+                    return Err("path not found".into());
                 }
 
-                let destination = path.join(name);
+                let destination = root.join(name);
 
-                if server.filesystem.is_ignored(&destination, true).await {
+                if filesystem.is_primary_server_fs()
+                    && server.filesystem.is_ignored(&destination, true).await
+                {
                     return Err("destination not found".into());
                 }
 
-                if let Err(err) = server.filesystem.async_create_dir_all(&destination).await {
+                if let Err(err) = filesystem.async_create_dir_all(&destination).await {
                     tracing::error!(path = %destination.display(), "failed to create directory: {:?}", err);
 
                     return Err("failed to create directory".into());
@@ -617,14 +621,14 @@ impl ScheduleAction {
                         user: None,
                         ip: None,
                         metadata: Some(serde_json::json!({
-                            "directory": root,
+                            "directory": raw_root,
                             "name": name,
                         })),
                         timestamp: chrono::Utc::now(),
                     })
                     .await;
 
-                if let Err(err) = server.filesystem.chown_path(&destination).await {
+                if let Err(err) = filesystem.async_chown(&destination).await {
                     tracing::error!(path = %destination.display(), "failed to change ownership: {:?}", err);
 
                     return Err("failed to change ownership".into());
@@ -639,7 +643,7 @@ impl ScheduleAction {
                 let file_path = match execution_context.resolve_parameter(file_path) {
                     Some(file_path) => file_path,
                     None => {
-                        return Err("unable to resolve parameter `file_path` into a string.".into());
+                        return Err("unable to resolve parameter `file` into a string.".into());
                     }
                 };
                 let content = match execution_context.resolve_parameter(content) {
@@ -649,42 +653,45 @@ impl ScheduleAction {
                     }
                 };
 
-                let path = match server.filesystem.async_canonicalize(file_path).await {
-                    Ok(path) => path,
-                    Err(_) => PathBuf::from(file_path),
-                };
-
-                let metadata = server.filesystem.async_metadata(&path).await;
-
-                if server
-                    .filesystem
-                    .is_ignored(
-                        &path,
-                        metadata.as_ref().map(|m| m.is_dir()).unwrap_or(false),
-                    )
-                    .await
-                {
-                    return Err("file not found".into());
-                }
-
-                let old_content_size = if let Ok(metadata) = metadata {
-                    if !metadata.is_file() {
-                        return Err("file is not a file".into());
-                    }
-
-                    metadata.len() as i64
-                } else {
-                    0
-                };
-
-                let parent = match path.parent() {
+                let parent = match Path::new(&file_path).parent() {
                     Some(parent) => parent,
                     None => {
                         return Err("file has no parent".into());
                     }
                 };
 
-                if server.filesystem.is_ignored(parent, true).await {
+                let file_name = match Path::new(&file_path).file_name() {
+                    Some(name) => name,
+                    None => {
+                        return Err("invalid file name".into());
+                    }
+                };
+
+                let (root, filesystem) =
+                    server.filesystem.resolve_writable_fs(server, &parent).await;
+                let path = root.join(file_name);
+
+                let metadata = filesystem.async_metadata(&path).await;
+
+                if filesystem.is_primary_server_fs()
+                    && server.filesystem.is_ignored(parent, true).await
+                {
+                    return Err("file not found".into());
+                }
+
+                let old_content_size = if let Ok(metadata) = metadata {
+                    if !metadata.file_type.is_file() {
+                        return Err("file is not a file".into());
+                    }
+
+                    metadata.size as i64
+                } else {
+                    0
+                };
+
+                if filesystem.is_primary_server_fs()
+                    && server.filesystem.is_ignored(parent, true).await
+                {
                     return Err("parent directory not found".into());
                 }
 
@@ -699,10 +706,11 @@ impl ScheduleAction {
                 } else {
                     content.len() as i64 - old_content_size
                 };
-                if !server
-                    .filesystem
-                    .async_allocate_in_path(parent, added_content_size, false)
-                    .await
+                if filesystem.is_primary_server_fs()
+                    && !server
+                        .filesystem
+                        .async_allocate_in_path(parent, added_content_size, false)
+                        .await
                 {
                     return Err("failed to allocate space".into());
                 }
@@ -714,7 +722,10 @@ impl ScheduleAction {
                     .truncate(!*append)
                     .append(*append);
 
-                let mut file = match server.filesystem.async_open_with(&path, options).await {
+                let mut file = match filesystem
+                    .async_open_file_with_options(&path, options)
+                    .await
+                {
                     Ok(file) => file,
                     Err(err) => {
                         tracing::error!(path = %path.display(), "failed to open file: {:?}", err);
@@ -726,9 +737,9 @@ impl ScheduleAction {
                     tracing::error!(path = %path.display(), "failed to write file: {:?}", err);
                     return Err("failed to write file".into());
                 }
-                if let Err(err) = file.sync_all().await {
-                    tracing::error!(path = %path.display(), "failed to sync file: {:?}", err);
-                    return Err("failed to sync file".into());
+                if let Err(err) = file.shutdown().await {
+                    tracing::error!(path = %path.display(), "failed to shutdown file: {:?}", err);
+                    return Err("failed to shutdown file".into());
                 }
 
                 server
@@ -771,18 +782,32 @@ impl ScheduleAction {
                     }
                 };
 
-                let location = match server.filesystem.async_canonicalize(file).await {
-                    Ok(path) => path,
-                    Err(_) => return Err("file not found".into()),
+                let parent = match Path::new(file).parent() {
+                    Some(parent) => parent,
+                    None => {
+                        return Err("file has no parent".into());
+                    }
                 };
 
-                let metadata = match server.filesystem.async_metadata(&location).await {
+                let file_name = match Path::new(file).file_name() {
+                    Some(name) => name,
+                    None => {
+                        return Err("invalid file name".into());
+                    }
+                };
+
+                let (root, filesystem) =
+                    server.filesystem.resolve_readable_fs(server, parent).await;
+                let path = root.join(file_name);
+
+                let metadata = match filesystem.async_metadata(&path).await {
                     Ok(metadata) => {
-                        if !metadata.is_file()
-                            || server
-                                .filesystem
-                                .is_ignored(&location, metadata.is_dir())
-                                .await
+                        if !metadata.file_type.is_file()
+                            || (filesystem.is_primary_server_fs()
+                                && server
+                                    .filesystem
+                                    .is_ignored(&path, metadata.file_type.is_dir())
+                                    .await)
                         {
                             return Err("file not found".into());
                         } else {
@@ -794,38 +819,44 @@ impl ScheduleAction {
                     }
                 };
 
-                let parent = match location.parent() {
-                    Some(parent) => parent,
-                    None => {
-                        return Err("file has no parent".into());
-                    }
-                };
-
-                if server.filesystem.is_ignored(parent, true).await {
+                if filesystem.is_primary_server_fs()
+                    && server.filesystem.is_ignored(parent, true).await
+                {
                     return Err("parent directory not found".into());
                 }
 
                 let file_name = parent.join(destination);
 
+                let (destination_path, destination_filesystem) = server
+                    .filesystem
+                    .resolve_writable_fs(server, &file_name)
+                    .await;
+
                 if !server
                     .filesystem
-                    .async_allocate_in_path(parent, metadata.len() as i64, false)
+                    .async_allocate_in_path(parent, metadata.size as i64, false)
                     .await
                 {
                     return Err("failed to allocate space".into());
                 }
 
-                let thread = tokio::spawn({
-                    let file_name = file_name.clone();
-                    let server = server.clone();
-
-                    async move {
-                        server
-                            .filesystem
-                            .async_copy(&location, &server.filesystem, &file_name)
-                            .await
-                    }
-                });
+                if let Err(err) = server
+                    .filesystem
+                    .copy_path(
+                        server,
+                        metadata,
+                        path.clone(),
+                        &path,
+                        filesystem,
+                        destination_path.clone(),
+                        &file_name,
+                        destination_filesystem.clone(),
+                        *foreground,
+                    )
+                    .await
+                {
+                    return Err(err.into_string_error().await.into());
+                }
 
                 server
                     .activity
@@ -840,55 +871,45 @@ impl ScheduleAction {
                         timestamp: chrono::Utc::now(),
                     })
                     .await;
-
-                if *foreground && let Ok(Err(err)) = thread.await {
-                    tracing::error!(path = %file_name.display(), "failed to copy file: {:?}", err);
-
-                    return Err("failed to copy file".into());
-                }
             }
             ScheduleAction::DeleteFiles { root, files } => {
-                let root = match execution_context.resolve_parameter(root) {
+                let raw_root = match execution_context.resolve_parameter(root) {
                     Some(root) => root,
                     None => {
                         return Err("unable to resolve parameter `root` into a string.".into());
                     }
                 };
 
-                let root = match server.filesystem.async_canonicalize(root).await {
-                    Ok(path) => path,
-                    Err(_) => {
-                        return Err("root not found".into());
-                    }
-                };
-
-                let metadata = server.filesystem.async_symlink_metadata(&root).await;
-                if !metadata.map(|m| m.is_dir()).unwrap_or(false) {
-                    return Err("root is not a directory".into());
-                }
-
                 for file in files {
-                    let destination = root.join(file);
-                    if destination == root {
+                    let (source, filesystem) = server
+                        .filesystem
+                        .resolve_writable_fs(server, Path::new(&raw_root).join(file))
+                        .await;
+                    if source == Path::new(&raw_root) {
                         continue;
                     }
 
-                    if server
-                        .filesystem
-                        .is_ignored(
-                            &destination,
-                            server
-                                .filesystem
-                                .async_symlink_metadata(&destination)
-                                .await
-                                .is_ok_and(|m| m.is_dir()),
-                        )
-                        .await
+                    let metadata = match filesystem.async_symlink_metadata(&source).await {
+                        Ok(metadata) => metadata,
+                        Err(_) => continue,
+                    };
+
+                    if filesystem.is_primary_server_fs()
+                        && server
+                            .filesystem
+                            .is_ignored(&source, metadata.file_type.is_dir())
+                            .await
                     {
                         continue;
                     }
 
-                    server.filesystem.truncate_path(&destination).await.ok();
+                    if filesystem.is_primary_server_fs() {
+                        server.filesystem.truncate_path(&source).await.ok();
+                    } else if metadata.file_type.is_dir() {
+                        filesystem.async_remove_dir_all(&source).await.ok();
+                    } else {
+                        filesystem.async_remove_file(&source).await.ok();
+                    }
                 }
 
                 server
@@ -898,7 +919,7 @@ impl ScheduleAction {
                         user: None,
                         ip: None,
                         metadata: Some(serde_json::json!({
-                            "directory": root,
+                            "directory": raw_root,
                             "files": files,
                         })),
                         timestamp: chrono::Utc::now(),
@@ -906,17 +927,17 @@ impl ScheduleAction {
                     .await;
             }
             ScheduleAction::RenameFiles { root, files } => {
-                let root = match execution_context.resolve_parameter(root) {
+                let raw_root = match execution_context.resolve_parameter(root) {
                     Some(root) => Path::new(root),
                     None => {
                         return Err("unable to resolve parameter `root` into a string.".into());
                     }
                 };
 
-                let metadata = server.filesystem.async_metadata(&root).await;
-                if !metadata.map(|m| m.is_dir()).unwrap_or(true) {
-                    return Err("root is not a directory".into());
-                }
+                let (root, filesystem) = server
+                    .filesystem
+                    .resolve_writable_fs(server, &raw_root)
+                    .await;
 
                 for file in files {
                     let from = root.join(&file.from);
@@ -933,30 +954,35 @@ impl ScheduleAction {
                         continue;
                     }
 
-                    let from_metadata = match server.filesystem.async_metadata(&from).await {
+                    let from_metadata = match filesystem.async_metadata(&from).await {
                         Ok(metadata) => metadata,
                         Err(_) => continue,
                     };
 
-                    if server.filesystem.async_metadata(&to).await.is_ok()
-                        || server
-                            .filesystem
-                            .is_ignored(&from, from_metadata.is_dir())
-                            .await
-                        || server
-                            .filesystem
-                            .is_ignored(&to, from_metadata.is_dir())
-                            .await
+                    if filesystem.async_metadata(&to).await.is_ok()
+                        || (filesystem.is_primary_server_fs()
+                            && (server
+                                .filesystem
+                                .is_ignored(&from, from_metadata.file_type.is_dir())
+                                .await
+                                || server
+                                    .filesystem
+                                    .is_ignored(&to, from_metadata.file_type.is_dir())
+                                    .await))
                     {
                         continue;
                     }
 
-                    if let Err(err) = server.filesystem.rename_path(from, to).await {
-                        tracing::debug!(
-                            server = %server.uuid,
-                            "failed to rename file: {:#?}",
-                            err
-                        );
+                    if filesystem.is_primary_server_fs() {
+                        if let Err(err) = server.filesystem.rename_path(from, to).await {
+                            tracing::debug!(
+                                server = %server.uuid,
+                                "failed to rename file: {:#?}",
+                                err
+                            );
+                        }
+                    } else {
+                        filesystem.async_rename(&from, &to).await.ok();
                     }
                 }
 
@@ -967,7 +993,7 @@ impl ScheduleAction {
                         user: None,
                         ip: None,
                         metadata: Some(serde_json::json!({
-                            "directory": root,
+                            "directory": raw_root,
                             "files": files,
                         })),
                         timestamp: chrono::Utc::now(),
@@ -982,7 +1008,7 @@ impl ScheduleAction {
                 name,
                 ..
             } => {
-                let root = match execution_context.resolve_parameter(root) {
+                let raw_root = match execution_context.resolve_parameter(root) {
                     Some(root) => root,
                     None => {
                         return Err("unable to resolve parameter `root` into a string.".into());
@@ -995,122 +1021,159 @@ impl ScheduleAction {
                     }
                 };
 
-                let root = match server.filesystem.async_canonicalize(root).await {
-                    Ok(path) => path,
-                    Err(_) => {
-                        return Err("root not found".into());
-                    }
-                };
+                let (root, filesystem) = server
+                    .filesystem
+                    .resolve_readable_fs(server, Path::new(&raw_root))
+                    .await;
 
-                let metadata = server.filesystem.async_symlink_metadata(&root).await;
-                if !metadata.map(|m| m.is_dir()).unwrap_or(true) {
+                let metadata = filesystem.async_symlink_metadata(&root).await;
+                if !metadata.map_or(true, |m| m.file_type.is_dir()) {
                     return Err("root is not a directory".into());
                 }
 
                 let file_name = root.join(name);
 
-                if server.filesystem.is_ignored(&file_name, false).await {
+                let parent = match file_name.parent() {
+                    Some(parent) => parent,
+                    None => {
+                        return Err("file has no parent".into());
+                    }
+                };
+
+                let file_name = match file_name.file_name() {
+                    Some(name) => name,
+                    None => {
+                        return Err("invalid file name".into());
+                    }
+                };
+
+                let (destination_root, destination_filesystem) =
+                    server.filesystem.resolve_writable_fs(server, parent).await;
+                let destination_path = destination_root.join(file_name);
+
+                if destination_filesystem.is_primary_server_fs()
+                    && server.filesystem.is_ignored(&destination_path, false).await
+                {
                     return Err("file not found".into());
                 }
 
-                let thread = tokio::spawn({
-                    let root = root.clone();
-                    let files = files.clone();
-                    let file_name = file_name.clone();
-                    let server = server.clone();
-                    let format = *format;
+                let progress = Arc::new(AtomicU64::new(0));
+                let total = Arc::new(AtomicU64::new(0));
 
-                    async move {
-                        let ignored = server.filesystem.get_ignored().await;
-                        let writer = tokio::task::spawn_blocking({
+                let (_, task) = server
+                    .filesystem
+                    .operations
+                    .add_operation(
+                        crate::server::filesystem::operations::FilesystemOperation::Compress {
+                            path: PathBuf::from(&raw_root),
+                            files: files.iter().map(PathBuf::from).collect(),
+                            destination_path: PathBuf::from(&raw_root).join(file_name),
+                            progress: progress.clone(),
+                            total: total.clone(),
+                        },
+                        {
+                            let state = state.clone();
+                            let root = root.clone();
+                            let files = files.clone();
+                            let format = *format;
                             let server = server.clone();
+                            let filesystem = filesystem.clone();
+                            let destination_path = destination_path.clone();
+                            let destination_filesystem = destination_filesystem.clone();
 
-                            move || {
-                                crate::server::filesystem::writer::FileSystemWriter::new(
-                                    server, &file_name, None, None,
-                                )
-                            }
-                        })
-                        .await??;
+                            async move {
+                                let ignored = server.filesystem.get_ignored().await;
+                                let writer = tokio::task::spawn_blocking(move || {
+                                    destination_filesystem.create_seekable_file(&destination_path)
+                                })
+                                .await??;
 
-                        match format {
-                            ArchiveFormat::Tar
-                            | ArchiveFormat::TarGz
-                            | ArchiveFormat::TarXz
-                            | ArchiveFormat::TarLzip
-                            | ArchiveFormat::TarBz2
-                            | ArchiveFormat::TarLz4
-                            | ArchiveFormat::TarZstd => {
-                                crate::server::filesystem::archive::create::create_tar(
-                                    server.filesystem.clone(),
-                                    writer,
-                                    &root,
-                                    files.into_iter().map(PathBuf::from).collect(),
-                                    None,
-                                    ignored.into(),
-                                    crate::server::filesystem::archive::create::CreateTarOptions {
-                                        compression_type: format.compression_format(),
-                                        compression_level: server
-                                            .app_state
-                                            .config
-                                            .system
-                                            .backups
-                                            .compression_level,
-                                        threads: server
-                                            .app_state
-                                            .config
-                                            .api
-                                            .file_compression_threads,
-                                    },
-                                )
-                                .await
+                                let mut total_size = 0;
+                                for file in &files {
+                                    let directory_entry = match filesystem
+                                        .async_directory_entry_buffer(&root.join(file), &[])
+                                        .await
+                                    {
+                                        Ok(entry) => entry,
+                                        Err(_) => continue,
+                                    };
+
+                                    total_size += directory_entry.size;
+                                }
+
+                                total.store(total_size, std::sync::atomic::Ordering::Relaxed);
+
+                                match format {
+                                    ArchiveFormat::Tar
+                                    | ArchiveFormat::TarGz
+                                    | ArchiveFormat::TarXz
+                                    | ArchiveFormat::TarLzip
+                                    | ArchiveFormat::TarBz2
+                                    | ArchiveFormat::TarLz4
+                                    | ArchiveFormat::TarZstd => {
+                                        crate::server::filesystem::archive::create::create_tar(
+                                            server.filesystem.clone(),
+                                            writer,
+                                            &root,
+                                            files.into_iter().map(PathBuf::from).collect(),
+                                            Some(progress),
+                                            ignored.into(),
+                                            crate::server::filesystem::archive::create::CreateTarOptions {
+                                                compression_type: format.compression_format(),
+                                                compression_level: state
+                                                    .config
+                                                    .system
+                                                    .backups
+                                                    .compression_level,
+                                                threads: state.config.api.file_compression_threads,
+                                            },
+                                        )
+                                        .await
+                                    }
+                                    ArchiveFormat::Zip => {
+                                        crate::server::filesystem::archive::create::create_zip(
+                                            server.filesystem.clone(),
+                                            writer,
+                                            &root,
+                                            files.into_iter().map(PathBuf::from).collect(),
+                                            Some(progress),
+                                            ignored.into(),
+                                            crate::server::filesystem::archive::create::CreateZipOptions {
+                                                compression_level: state
+                                                    .config
+                                                    .system
+                                                    .backups
+                                                    .compression_level,
+                                            },
+                                        )
+                                        .await
+                                    }
+                                    ArchiveFormat::SevenZip => {
+                                        crate::server::filesystem::archive::create::create_7z(
+                                            server.filesystem.clone(),
+                                            writer,
+                                            &root,
+                                            files.into_iter().map(PathBuf::from).collect(),
+                                            Some(progress),
+                                            ignored.into(),
+                                            crate::server::filesystem::archive::create::Create7zOptions {
+                                                compression_level: state
+                                                    .config
+                                                    .system
+                                                    .backups
+                                                    .compression_level,
+                                                threads: state.config.api.file_compression_threads,
+                                            },
+                                        )
+                                        .await
+                                    }
+                                }?;
+
+                                Ok(())
                             }
-                            ArchiveFormat::Zip => {
-                                crate::server::filesystem::archive::create::create_zip(
-                                    server.filesystem.clone(),
-                                    writer,
-                                    &root,
-                                    files.into_iter().map(PathBuf::from).collect(),
-                                    None,
-                                    ignored.into(),
-                                    crate::server::filesystem::archive::create::CreateZipOptions {
-                                        compression_level: server
-                                            .app_state
-                                            .config
-                                            .system
-                                            .backups
-                                            .compression_level,
-                                    },
-                                )
-                                .await
-                            }
-                            ArchiveFormat::SevenZip => {
-                                crate::server::filesystem::archive::create::create_7z(
-                                    server.filesystem.clone(),
-                                    writer,
-                                    &root,
-                                    files.into_iter().map(PathBuf::from).collect(),
-                                    None,
-                                    ignored.into(),
-                                    crate::server::filesystem::archive::create::Create7zOptions {
-                                        compression_level: server
-                                            .app_state
-                                            .config
-                                            .system
-                                            .backups
-                                            .compression_level,
-                                        threads: server
-                                            .app_state
-                                            .config
-                                            .api
-                                            .file_compression_threads,
-                                    },
-                                )
-                                .await
-                            }
-                        }
-                    }
-                });
+                        },
+                    )
+                    .await;
 
                 server
                     .activity
@@ -1119,7 +1182,7 @@ impl ScheduleAction {
                         user: None,
                         ip: None,
                         metadata: Some(serde_json::json!({
-                            "directory": root.display().to_string(),
+                            "directory": raw_root,
                             "name": name,
                             "files": files,
                         })),
@@ -1127,10 +1190,33 @@ impl ScheduleAction {
                     })
                     .await;
 
-                if *foreground && let Ok(Err(err)) = thread.await {
-                    tracing::error!(path = %file_name.display(), "failed to compress files: {:?}", err);
+                if *foreground {
+                    match task.await {
+                        Ok(Some(Ok(()))) => {}
+                        Ok(None) => {
+                            return Err("archive compression aborted by another source".into());
+                        }
+                        Ok(Some(Err(err))) => {
+                            tracing::error!(
+                                server = %server.uuid,
+                                root = %root.display(),
+                                "failed to compress files: {:#?}",
+                                err,
+                            );
 
-                    return Err("failed to compress files".into());
+                            return Err(format!("failed to compress files: {err}").into());
+                        }
+                        Err(err) => {
+                            tracing::error!(
+                                server = %server.uuid,
+                                root = %root.display(),
+                                "failed to compress files: {:#?}",
+                                err,
+                            );
+
+                            return Err("failed to compress files".into());
+                        }
+                    }
                 }
             }
             ScheduleAction::DecompressFile {
