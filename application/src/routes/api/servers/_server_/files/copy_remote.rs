@@ -112,11 +112,8 @@ mod post {
         if data.url.is_empty() {
             let destination_server = match state
                 .server_manager
-                .get_servers()
+                .get_server(data.destination_server)
                 .await
-                .iter()
-                .find(|s| s.uuid == data.destination_server)
-                .cloned()
             {
                 Some(server) => server,
                 None => {

@@ -7,6 +7,7 @@ use crate::{
 };
 use cap_std::fs::{Metadata, OpenOptions, PermissionsExt};
 use compact_str::ToCompactString;
+use positioned_io::{ReadAt, WriteAt};
 use russh_sftp::protocol::{
     Data, File, FileAttributes, Handle, Name, OpenFlags, Status, StatusCode,
 };
@@ -16,9 +17,8 @@ use sha1::Digest;
 use std::{
     collections::HashMap,
     io::SeekFrom,
-    os::unix::fs::FileExt,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, RwLock},
 };
 use sysinfo::Disks;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -27,7 +27,7 @@ pub struct FileHandle {
     path: PathBuf,
     path_components: Vec<String>,
 
-    file: Arc<std::fs::File>,
+    file: Arc<RwLock<std::fs::File>>,
 }
 
 pub struct DirHandle {
@@ -1011,7 +1011,7 @@ impl russh_sftp::server::Handler for SftpSession {
             ServerHandle::File(FileHandle {
                 path,
                 path_components,
-                file: Arc::new(file),
+                file: Arc::new(RwLock::new(file)),
             }),
         );
 
@@ -1039,7 +1039,7 @@ impl russh_sftp::server::Handler for SftpSession {
 
             move || -> Result<Vec<u8>, std::io::Error> {
                 let mut data = vec![0; len.min(256 * 1024) as usize];
-                let bytes_read = file.read_at(&mut data, offset)?;
+                let bytes_read = file.read().unwrap().read_at(offset, &mut data)?;
 
                 data.truncate(bytes_read);
                 Ok(data)
@@ -1092,7 +1092,7 @@ impl russh_sftp::server::Handler for SftpSession {
         tokio::task::spawn_blocking({
             let file = Arc::clone(&handle.file);
 
-            move || file.write_all_at(&data, offset)
+            move || file.write().unwrap().write_all_at(offset, &data)
         })
         .await
         .map_err(|_| StatusCode::Failure)?
@@ -1716,7 +1716,7 @@ impl russh_sftp::server::Handler for SftpSession {
                 tokio::task::spawn_blocking({
                     let file = Arc::clone(&handle.file);
 
-                    move || file.sync_all()
+                    move || file.read().unwrap().sync_all()
                 })
                 .await
                 .map_err(|_| StatusCode::Failure)?

@@ -133,14 +133,7 @@ impl<'a> FuseQuotaLimiter<'a> {
                         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
 
                         for (uuid, delta) in registry_map.read().await.iter() {
-                            let Some(server) = state
-                                .server_manager
-                                .get_servers()
-                                .await
-                                .iter()
-                                .find(|s| &s.uuid == uuid)
-                                .cloned()
-                            else {
+                            let Some(server) = state.server_manager.get_server(*uuid).await else {
                                 continue;
                             };
 

@@ -67,15 +67,7 @@ mod get {
                 .ok();
         }
 
-        let server = state
-            .server_manager
-            .get_servers()
-            .await
-            .iter()
-            .find(|s| s.uuid == payload.server_uuid)
-            .cloned();
-
-        let server = match server {
+        let server = match state.server_manager.get_server(payload.server_uuid).await {
             Some(server) => server,
             None => {
                 return ApiResponse::error("server not found")

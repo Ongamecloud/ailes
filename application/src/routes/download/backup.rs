@@ -69,18 +69,12 @@ mod get {
                 .ok();
         }
 
-        if let Some(server_uuid) = payload.server_uuid {
-            let server = state
-                .server_manager
-                .get_servers()
-                .await
-                .iter()
-                .any(|s| s.uuid == server_uuid);
-            if !server {
-                return ApiResponse::error("server not found")
-                    .with_status(StatusCode::NOT_FOUND)
-                    .ok();
-            }
+        if let Some(server_uuid) = payload.server_uuid
+            && state.server_manager.get_server(server_uuid).await.is_none()
+        {
+            return ApiResponse::error("server not found")
+                .with_status(StatusCode::NOT_FOUND)
+                .ok();
         }
 
         let backup = match state.backup_manager.find(payload.backup_uuid).await? {

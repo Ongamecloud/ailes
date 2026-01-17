@@ -111,15 +111,7 @@ impl russh::server::Handler for SshSession {
             .finish_attempt(&self.user_ip, AuthenticationType::Password)
             .await;
 
-        let server = match self
-            .state
-            .server_manager
-            .get_servers()
-            .await
-            .iter()
-            .find(|s| s.uuid == server)
-            .cloned()
-        {
+        let server = match self.state.server_manager.get_server(server).await {
             Some(server) => server,
             None => {
                 return Ok(Auth::Reject {
@@ -209,15 +201,7 @@ impl russh::server::Handler for SshSession {
             .finish_attempt(&self.user_ip, AuthenticationType::PublicKey)
             .await;
 
-        let server = match self
-            .state
-            .server_manager
-            .get_servers()
-            .await
-            .iter()
-            .find(|s| s.uuid == server)
-            .cloned()
-        {
+        let server = match self.state.server_manager.get_server(server).await {
             Some(server) => server,
             None => return Ok(Auth::reject()),
         };

@@ -47,14 +47,7 @@ pub async fn auth(
         }
     };
 
-    let server = match state
-        .server_manager
-        .get_servers()
-        .await
-        .iter()
-        .find(|s| s.uuid == uuid)
-        .cloned()
-    {
+    let server = match state.server_manager.get_server(uuid).await {
         Some(server) => server,
         None => {
             return Ok(ApiResponse::error("server not found")

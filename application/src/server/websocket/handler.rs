@@ -20,15 +20,7 @@ pub async fn handle_ws(
     state: GetState,
     Path(server): Path<uuid::Uuid>,
 ) -> Response {
-    let server = state
-        .server_manager
-        .get_servers()
-        .await
-        .iter()
-        .find(|s| s.uuid == server)
-        .cloned();
-
-    let server = match server {
+    let server = match state.server_manager.get_server(server).await {
         Some(server) => server,
         None => {
             return ApiResponse::error("server not found")

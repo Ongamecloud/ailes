@@ -53,13 +53,7 @@ mod post {
         state: GetState,
         axum::Json(data): axum::Json<Payload>,
     ) -> ApiResponseResult {
-        if state
-            .server_manager
-            .get_servers()
-            .await
-            .iter()
-            .any(|s| s.uuid == data.uuid)
-        {
+        if state.server_manager.get_server(data.uuid).await.is_some() {
             return ApiResponse::error("server with this uuid already exists")
                 .with_status(StatusCode::CONFLICT)
                 .ok();

@@ -102,13 +102,7 @@ mod post {
             .map_or(Ok(0), |v| v.to_str().unwrap_or_default().parse())?;
 
         let server = if !is_multiplex {
-            if state
-                .server_manager
-                .get_servers()
-                .await
-                .iter()
-                .any(|s| s.uuid == subject)
-            {
+            if state.server_manager.get_server(subject).await.is_some() {
                 return ApiResponse::error("server with this uuid already exists")
                     .with_status(StatusCode::CONFLICT)
                     .ok();
@@ -129,14 +123,7 @@ mod post {
             let mut server;
 
             loop {
-                server = state
-                    .server_manager
-                    .get_servers()
-                    .await
-                    .iter()
-                    .find(|s| s.uuid == subject)
-                    .cloned();
-
+                server = state.server_manager.get_server(subject).await;
                 tries += 1;
 
                 if server.is_none() {

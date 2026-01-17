@@ -1,7 +1,7 @@
+use positioned_io::ReadAt;
 use std::{
     fs::File,
     io::{Read, Seek, SeekFrom},
-    os::unix::fs::FileExt,
     sync::Arc,
 };
 
@@ -26,7 +26,7 @@ impl MultiReader {
 
 impl Read for MultiReader {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let bytes_read = self.file.read_at(buf, self.offset)?;
+        let bytes_read = self.file.read_at(self.offset, buf)?;
         self.offset += bytes_read as u64;
 
         Ok(bytes_read)
@@ -41,14 +41,15 @@ impl Seek for MultiReader {
                 if offset >= 0 {
                     self.file_size.saturating_add(offset as u64)
                 } else {
-                    self.file_size.saturating_sub((-offset) as u64)
+                    self.file_size
+                        .saturating_sub(offset.saturating_abs() as u64)
                 }
             }
             SeekFrom::Current(offset) => {
                 if offset >= 0 {
                     self.offset.saturating_add(offset as u64)
                 } else {
-                    self.offset.saturating_sub((-offset) as u64)
+                    self.offset.saturating_sub(offset.saturating_abs() as u64)
                 }
             }
         };

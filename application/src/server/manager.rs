@@ -263,6 +263,13 @@ impl ServerManager {
         self.servers.read().await
     }
 
+    #[inline]
+    pub async fn get_server(&self, server: uuid::Uuid) -> Option<Server> {
+        let servers = self.servers.read().await;
+
+        servers.iter().find(|s| s.uuid == server).cloned()
+    }
+
     pub async fn create_server(
         &self,
         app_state: &crate::routes::State,
