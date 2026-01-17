@@ -9,9 +9,10 @@ pub async fn version(
     _config: Option<&Arc<crate::config::Config>>,
 ) -> Result<i32, anyhow::Error> {
     println!(
-        "github.com/calagopus/wings {}:{} ({TARGET})",
+        "github.com/calagopus/wings {}:{}@{} ({TARGET})",
         crate::VERSION,
-        crate::GIT_COMMIT
+        crate::GIT_COMMIT,
+        crate::GIT_BRANCH
     );
     if !crate::bins::FUSEQUOTA_VERSION.is_empty() {
         println!(

@@ -379,7 +379,12 @@ async fn main() {
             Ok(_) => wings_rs::routes::AppContainerType::Unknown,
             Err(_) => wings_rs::routes::AppContainerType::None,
         },
-        version: format!("{}:{}", wings_rs::VERSION, wings_rs::GIT_COMMIT),
+        version: format!(
+            "{}:{}@{}",
+            wings_rs::VERSION,
+            wings_rs::GIT_COMMIT,
+            wings_rs::GIT_BRANCH
+        ),
 
         config: Arc::clone(&config),
         docker: Arc::clone(&docker),

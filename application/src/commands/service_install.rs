@@ -30,13 +30,14 @@ pub async fn service_install(
 
     let service_content = format!(
         "[Unit]
-Description=Pterodactyl Wings Daemon
+Description=Calagopus Wings Daemon
 After=docker.service
 Requires=docker.service
 PartOf=docker.service
 
 [Service]
 User=root
+KillMode=process
 WorkingDirectory=/etc/pterodactyl
 LimitNOFILE=4096
 PIDFile=/var/run/wings/daemon.pid

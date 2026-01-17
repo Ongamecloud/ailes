@@ -16,6 +16,7 @@ pub mod utils;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const GIT_COMMIT: &str = env!("CARGO_GIT_COMMIT");
+pub const GIT_BRANCH: &str = env!("CARGO_GIT_BRANCH");
 pub const BUFFER_SIZE: usize = 32 * 1024;
 
 pub fn spawn_blocking_handled<

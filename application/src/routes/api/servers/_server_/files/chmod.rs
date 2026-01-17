@@ -28,7 +28,7 @@ mod post {
 
     #[derive(ToSchema, Serialize)]
     struct Response {
-        pub updated: usize,
+        updated: usize,
     }
 
     #[utoipa::path(post, path = "/", responses(
