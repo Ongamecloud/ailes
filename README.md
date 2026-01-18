@@ -51,6 +51,9 @@ api:
   max_jwt_uses: 5
 
 system:
+  # path for temporary mountpoints for servers
+  vmount_directory: /var/lib/pterodactyl/vmounts
+
   # apply a real quota limit to each server
   # none, btrfs_subvolume, zfs_dataset, xfs_quota, (experimental) fuse_quota
   disk_limiter_mode: none
