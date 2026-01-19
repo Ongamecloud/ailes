@@ -832,14 +832,6 @@ impl ScheduleAction {
                     .resolve_writable_fs(server, &file_name)
                     .await;
 
-                if !server
-                    .filesystem
-                    .async_allocate_in_path(parent, metadata.size as i64, false)
-                    .await
-                {
-                    return Err("failed to allocate space".into());
-                }
-
                 if let Err(err) = server
                     .filesystem
                     .copy_path(

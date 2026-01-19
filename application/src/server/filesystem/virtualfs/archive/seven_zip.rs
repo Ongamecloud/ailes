@@ -14,8 +14,8 @@ use crate::{
             VirtualReadableFilesystem,
         },
     },
+    utils::PortableModeExt,
 };
-use cap_std::fs::PermissionsExt;
 use chrono::{Datelike, Timelike};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -187,6 +187,10 @@ impl VirtualSevenZipArchive {
 
 #[async_trait::async_trait]
 impl VirtualReadableFilesystem for VirtualSevenZipArchive {
+    fn backing_server(&self) -> &crate::server::Server {
+        &self.server
+    }
+
     fn metadata(
         &self,
         path: &(dyn AsRef<Path> + Send + Sync),
@@ -194,7 +198,7 @@ impl VirtualReadableFilesystem for VirtualSevenZipArchive {
         if path.as_ref() == Path::new("") || path.as_ref() == Path::new("/") {
             return Ok(FileMetadata {
                 file_type: FileType::Dir,
-                permissions: cap_std::fs::Permissions::from_mode(0o755),
+                permissions: cap_std::fs::Permissions::from_portable_mode(0o755),
                 size: 0,
                 modified: None,
                 created: None,
@@ -213,9 +217,9 @@ impl VirtualReadableFilesystem for VirtualSevenZipArchive {
         Ok(FileMetadata {
             file_type: Self::seven_zip_entry_to_file_type(entry),
             permissions: if entry.is_directory() {
-                cap_std::fs::Permissions::from_mode(0o755)
+                cap_std::fs::Permissions::from_portable_mode(0o755)
             } else {
-                cap_std::fs::Permissions::from_mode(0o644)
+                cap_std::fs::Permissions::from_portable_mode(0o644)
             },
             size: entry.size(),
             modified: if entry.has_last_modified_date {

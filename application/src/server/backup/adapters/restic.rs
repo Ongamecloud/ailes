@@ -18,9 +18,9 @@ use crate::{
             },
         },
     },
+    utils::PortableModeExt,
 };
 use axum::http::HeaderMap;
-use cap_std::fs::PermissionsExt;
 use chrono::{Datelike, Timelike};
 use human_bytes::human_bytes;
 use serde::Deserialize;
@@ -912,6 +912,10 @@ impl VirtualResticBackup {
 
 #[async_trait::async_trait]
 impl VirtualReadableFilesystem for VirtualResticBackup {
+    fn backing_server(&self) -> &crate::server::Server {
+        &self.server
+    }
+
     fn metadata(
         &self,
         path: &(dyn AsRef<Path> + Send + Sync),
@@ -919,7 +923,7 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
         if path.as_ref() == Path::new("") || path.as_ref() == Path::new("/") {
             return Ok(FileMetadata {
                 file_type: FileType::Dir,
-                permissions: cap_std::fs::Permissions::from_mode(0o755),
+                permissions: cap_std::fs::Permissions::from_portable_mode(0o755),
                 size: 0,
                 modified: None,
                 created: None,
@@ -935,7 +939,7 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
 
         Ok(FileMetadata {
             file_type: Self::restic_entry_to_file_type(entry),
-            permissions: cap_std::fs::Permissions::from_mode(entry.mode & 0o777),
+            permissions: cap_std::fs::Permissions::from_portable_mode(entry.mode & 0o777),
             size: entry.size.unwrap_or(0),
             modified: Some(entry.mtime.into()),
             created: None,

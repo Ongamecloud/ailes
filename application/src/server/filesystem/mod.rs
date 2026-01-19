@@ -4,9 +4,10 @@ use crate::{
     server::filesystem::virtualfs::{
         DirectoryStreamWalkFn, VirtualReadableFilesystem, VirtualWritableFilesystem,
     },
+    utils::PortableModeExt,
 };
 use axum::http::StatusCode;
-use cap_std::fs::{Metadata, MetadataExt, PermissionsExt};
+use cap_std::fs::Metadata;
 use compact_str::ToCompactString;
 use std::{
     collections::{HashMap, HashSet},
@@ -167,29 +168,34 @@ impl Filesystem {
                                                 };
                                                 let size = metadata.len();
 
-                                                if !metadata.is_dir() && metadata.nlink() > 1 {
-                                                    if seen_inodes
-                                                        .read()
-                                                        .await
-                                                        .contains(&metadata.ino())
-                                                    {
-                                                        if let Some(disk_usage) =
-                                                            &mut *disk_usage.lock().await
-                                                            && let Some(parent) = path.parent()
-                                                        {
-                                                            disk_usage.update_size(
-                                                                parent,
-                                                                (0, size as i64).into(),
-                                                            );
-                                                        }
-                                                        apparent_total_size
-                                                            .fetch_add(size, Ordering::Relaxed);
-                                                        return Ok(());
-                                                    } else {
-                                                        seen_inodes
-                                                            .write()
+                                                #[cfg(unix)]
+                                                {
+                                                    use cap_std::fs::MetadataExt;
+
+                                                    if !metadata.is_dir() && metadata.nlink() > 1 {
+                                                        if seen_inodes
+                                                            .read()
                                                             .await
-                                                            .insert(metadata.ino());
+                                                            .contains(&metadata.ino())
+                                                        {
+                                                            if let Some(disk_usage) =
+                                                                &mut *disk_usage.lock().await
+                                                                && let Some(parent) = path.parent()
+                                                            {
+                                                                disk_usage.update_size(
+                                                                    parent,
+                                                                    (0, size as i64).into(),
+                                                                );
+                                                            }
+                                                            apparent_total_size
+                                                                .fetch_add(size, Ordering::Relaxed);
+                                                            return Ok(());
+                                                        } else {
+                                                            seen_inodes
+                                                                .write()
+                                                                .await
+                                                                .insert(metadata.ino());
+                                                        }
                                                     }
                                                 }
 
@@ -688,104 +694,47 @@ impl Filesystem {
         foreground: bool,
     ) -> Result<Option<uuid::Uuid>, ApiResponse> {
         if metadata.file_type.is_file() {
-            if foreground {
-                if filesystem.is_primary_server_fs()
-                    && destination_filesystem.is_primary_server_fs()
-                    && let Some(parent) = destination_path.as_ref().parent()
-                {
-                    if !self
-                        .async_allocate_in_path(parent, metadata.size as i64, false)
-                        .await
-                    {
-                        return Err(ApiResponse::error("failed to allocate space")
-                            .with_status(StatusCode::EXPECTATION_FAILED));
-                    }
+            let progress = Arc::new(AtomicU64::new(0));
+            let total = Arc::new(AtomicU64::new(metadata.size));
 
-                    self.async_copy(&path, &self.cap_filesystem, &destination_path)
-                        .await?;
-                } else {
-                    let progress = Arc::new(AtomicU64::new(0));
-                    let total = Arc::new(AtomicU64::new(metadata.size));
+            let (identifier, task) = if filesystem.is_primary_server_fs()
+                && destination_filesystem.is_primary_server_fs()
+            {
+                self.operations
+                    .add_operation(
+                        crate::server::filesystem::operations::FilesystemOperation::Copy {
+                            path: full_path,
+                            destination_path: full_destination_path,
+                            progress: progress.clone(),
+                            total,
+                        },
+                        {
+                            let server = server.clone();
+                            let path = path.as_ref().to_path_buf();
+                            let destination_path =
+                                Arc::new(destination_path.as_ref().to_path_buf());
 
-                    let (_, task) = self
-                        .operations
-                        .add_operation(
-                            crate::server::filesystem::operations::FilesystemOperation::Copy {
-                                path: full_path,
-                                destination_path: full_destination_path,
-                                progress: progress.clone(),
-                                total,
-                            },
-                            {
-                                let path = path.as_ref().to_path_buf();
-                                let destination_path = destination_path.as_ref().to_path_buf();
+                            async move {
+                                server
+                                    .filesystem
+                                    .async_quota_copy(
+                                        &path,
+                                        &*destination_path,
+                                        &server,
+                                        Some(&progress),
+                                    )
+                                    .await?;
+                                destination_filesystem
+                                    .async_set_permissions(&*destination_path, metadata.permissions)
+                                    .await?;
 
-                                async move {
-                                    let file_read = filesystem.async_read_file(&path, None).await?;
-                                    let mut reader = AsyncCountingReader::new_with_bytes_read(
-                                        file_read.reader,
-                                        Arc::clone(&progress),
-                                    );
-
-                                    let mut writer = destination_filesystem
-                                        .async_create_file(&destination_path)
-                                        .await?;
-                                    destination_filesystem
-                                        .async_set_permissions(
-                                            &destination_path,
-                                            metadata.permissions,
-                                        )
-                                        .await?;
-
-                                    tokio::io::copy(&mut reader, &mut writer).await?;
-                                    writer.shutdown().await?;
-
-                                    Ok(())
-                                }
-                            },
-                        )
-                        .await;
-
-                    match task.await {
-                        Ok(Some(Ok(()))) => {}
-                        Ok(None) => {
-                            return Err(ApiResponse::error(
-                                "archive compression aborted by another source",
-                            )
-                            .with_status(StatusCode::EXPECTATION_FAILED));
-                        }
-                        Ok(Some(Err(err))) => {
-                            tracing::error!(
-                                server = %self.uuid,
-                                path = %path.as_ref().display(),
-                                "failed to copy directory: {:#?}",
-                                err,
-                            );
-
-                            return Err(ApiResponse::error(&format!(
-                                "failed to copy directory: {err}"
-                            ))
-                            .with_status(StatusCode::EXPECTATION_FAILED));
-                        }
-                        Err(err) => {
-                            tracing::error!(
-                                server = %self.uuid,
-                                path = %path.as_ref().display(),
-                                "failed to copy directory: {:#?}",
-                                err,
-                            );
-
-                            return Err(ApiResponse::error("failed to copy directory")
-                                .with_status(StatusCode::EXPECTATION_FAILED));
-                        }
-                    }
-                }
+                                Ok(())
+                            }
+                        },
+                    )
+                    .await
             } else {
-                let progress = Arc::new(AtomicU64::new(0));
-                let total = Arc::new(AtomicU64::new(metadata.size));
-
-                let (identifier, _) = self
-                    .operations
+                self.operations
                     .add_operation(
                         crate::server::filesystem::operations::FilesystemOperation::Copy {
                             path: full_path,
@@ -799,7 +748,7 @@ impl Filesystem {
 
                             async move {
                                 let file_read = filesystem.async_read_file(&path, None).await?;
-                                let mut counting_reader = AsyncCountingReader::new_with_bytes_read(
+                                let mut reader = AsyncCountingReader::new_with_bytes_read(
                                     file_read.reader,
                                     Arc::clone(&progress),
                                 );
@@ -811,15 +760,47 @@ impl Filesystem {
                                     .async_set_permissions(&destination_path, metadata.permissions)
                                     .await?;
 
-                                tokio::io::copy(&mut counting_reader, &mut writer).await?;
+                                tokio::io::copy(&mut reader, &mut writer).await?;
                                 writer.shutdown().await?;
 
                                 Ok(())
                             }
                         },
                     )
-                    .await;
+                    .await
+            };
 
+            if foreground {
+                match task.await {
+                    Ok(Some(Ok(()))) => {}
+                    Ok(None) => {
+                        return Err(ApiResponse::error("file copy aborted by another source")
+                            .with_status(StatusCode::EXPECTATION_FAILED));
+                    }
+                    Ok(Some(Err(err))) => {
+                        tracing::error!(
+                            server = %self.uuid,
+                            path = %path.as_ref().display(),
+                            "failed to copy file: {:#?}",
+                            err,
+                        );
+
+                        return Err(ApiResponse::error(&format!("failed to copy file: {err}"))
+                            .with_status(StatusCode::EXPECTATION_FAILED));
+                    }
+                    Err(err) => {
+                        tracing::error!(
+                            server = %self.uuid,
+                            path = %path.as_ref().display(),
+                            "failed to copy file: {:#?}",
+                            err,
+                        );
+
+                        return Err(ApiResponse::error("failed to copy file")
+                            .with_status(StatusCode::EXPECTATION_FAILED));
+                    }
+                }
+            } else {
                 return Ok(Some(identifier));
             }
         } else {
@@ -851,6 +832,7 @@ impl Filesystem {
                                 .run_multithreaded(
                                     server.app_state.config.api.file_copy_threads,
                                     DirectoryStreamWalkFn::from({
+                                        let server = server.clone();
                                         let filesystem = filesystem.clone();
                                         let source_path = Arc::new(path);
                                         let destination_path = Arc::new(destination_path);
@@ -858,6 +840,7 @@ impl Filesystem {
                                         let progress = Arc::clone(&progress);
 
                                         move |_, path: PathBuf, stream| {
+                                            let server = server.clone();
                                             let filesystem = filesystem.clone();
                                             let source_path = Arc::clone(&source_path);
                                             let destination_path = Arc::clone(&destination_path);
@@ -882,20 +865,38 @@ impl Filesystem {
                                                         destination_filesystem.async_create_dir_all(&parent).await?;
                                                     }
 
-                                                    let mut reader = AsyncCountingReader::new_with_bytes_read(
-                                                        stream,
-                                                        Arc::clone(&progress),
-                                                    );
+                                                    if filesystem.is_primary_server_fs()
+                                                        && destination_filesystem.is_primary_server_fs()
+                                                        && filesystem.backing_server().uuid == destination_filesystem.backing_server().uuid
+                                                    {
+                                                        server
+                                                            .filesystem
+                                                            .async_quota_copy(
+                                                                &path,
+                                                                &destination_path,
+                                                                &server,
+                                                                Some(&progress),
+                                                            )
+                                                            .await?;
+                                                        destination_filesystem
+                                                            .async_set_permissions(&destination_path, metadata.permissions)
+                                                            .await?;
+                                                    } else {
+                                                        let mut reader = AsyncCountingReader::new_with_bytes_read(
+                                                            stream,
+                                                            Arc::clone(&progress),
+                                                        );
 
-                                                    let mut writer = destination_filesystem
-                                                        .async_create_file(&destination_path)
-                                                        .await?;
-                                                    destination_filesystem
-                                                        .async_set_permissions(&destination_path, metadata.permissions)
-                                                        .await?;
+                                                        let mut writer = destination_filesystem
+                                                            .async_create_file(&destination_path)
+                                                            .await?;
+                                                        destination_filesystem
+                                                            .async_set_permissions(&destination_path, metadata.permissions)
+                                                            .await?;
 
-                                                    tokio::io::copy(&mut reader, &mut writer).await?;
-                                                    writer.shutdown().await?;
+                                                        tokio::io::copy(&mut reader, &mut writer).await?;
+                                                        writer.shutdown().await?;
+                                                    }
                                                 } else if metadata.file_type.is_dir() {
                                                     destination_filesystem.async_create_dir_all(&destination_path).await?;
                                                     destination_filesystem
@@ -925,10 +926,8 @@ impl Filesystem {
                 match task.await {
                     Ok(Some(Ok(()))) => {}
                     Ok(None) => {
-                        return Err(ApiResponse::error(
-                            "archive compression aborted by another source",
-                        )
-                        .with_status(StatusCode::EXPECTATION_FAILED));
+                        return Err(ApiResponse::error("file copy aborted by another source")
+                            .with_status(StatusCode::EXPECTATION_FAILED));
                     }
                     Ok(Some(Err(err))) => {
                         tracing::error!(
@@ -963,6 +962,65 @@ impl Filesystem {
         Ok(None)
     }
 
+    fn try_update_atomics(&self, delta: i64, ignorant: bool) -> bool {
+        if crate::unlikely(delta == 0) {
+            return true;
+        }
+
+        if delta > 0 {
+            let delta_u64 = delta as u64;
+
+            if !ignorant && self.disk_limit() != 0 {
+                let limit = self.disk_limit() as u64;
+
+                let result = self.disk_usage_cached.fetch_update(
+                    Ordering::SeqCst,
+                    Ordering::Relaxed,
+                    |current| {
+                        if current + delta_u64 > limit {
+                            None
+                        } else {
+                            Some(current + delta_u64)
+                        }
+                    },
+                );
+
+                if result.is_err() {
+                    tracing::debug!(
+                        "failed to allocate {} bytes: disk limit of {} bytes would be exceeded",
+                        delta_u64,
+                        limit
+                    );
+                    return false;
+                }
+            } else {
+                self.disk_usage_cached
+                    .fetch_add(delta_u64, Ordering::Relaxed);
+            }
+
+            self.apparent_disk_usage_cached
+                .fetch_add(delta_u64, Ordering::Relaxed);
+        } else {
+            let abs_size = delta.unsigned_abs();
+
+            self.disk_usage_cached
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                    Some(current.saturating_sub(abs_size))
+                })
+                .ok();
+            self.apparent_disk_usage_cached
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                    Some(current.saturating_sub(abs_size))
+                })
+                .ok();
+        }
+
+        self.disk_usage_delta_cached
+            .fetch_add(delta, Ordering::Relaxed);
+
+        true
+    }
+
     /// Allocates (or deallocates) space for a path in the filesystem.
     /// Updates both the disk_usage map for directories and the cached total.
     ///
@@ -972,45 +1030,8 @@ impl Filesystem {
     ///
     /// Returns `true` if allocation was successful, `false` if it would exceed disk limit
     pub async fn async_allocate_in_path(&self, path: &Path, delta: i64, ignorant: bool) -> bool {
-        if crate::unlikely(delta == 0) {
-            return true;
-        }
-
-        if delta > 0 && !ignorant {
-            let current_usage = self.disk_usage_cached.load(Ordering::Relaxed) as i64;
-
-            if self.disk_limit() != 0 && current_usage + delta > self.disk_limit() {
-                return false;
-            }
-        }
-
-        self.disk_usage_delta_cached
-            .fetch_add(delta, Ordering::Relaxed);
-
-        if delta > 0 {
-            self.disk_usage_cached
-                .fetch_add(delta as u64, Ordering::Relaxed);
-            self.apparent_disk_usage_cached
-                .fetch_add(delta as u64, Ordering::Relaxed);
-        } else {
-            let abs_size = delta.unsigned_abs();
-            let current = self.disk_usage_cached.load(Ordering::Relaxed);
-
-            if current >= abs_size {
-                self.disk_usage_cached
-                    .fetch_sub(abs_size, Ordering::Relaxed);
-            } else {
-                self.disk_usage_cached.store(0, Ordering::Relaxed);
-            }
-
-            let current_apparent = self.apparent_disk_usage_cached.load(Ordering::Relaxed);
-
-            if current_apparent >= abs_size {
-                self.apparent_disk_usage_cached
-                    .fetch_sub(abs_size, Ordering::Relaxed);
-            } else {
-                self.apparent_disk_usage_cached.store(0, Ordering::Relaxed);
-            }
+        if !self.try_update_atomics(delta, ignorant) {
+            return false;
         }
 
         self.disk_usage
@@ -1035,45 +1056,8 @@ impl Filesystem {
         delta: i64,
         ignorant: bool,
     ) -> bool {
-        if crate::unlikely(delta == 0) {
-            return true;
-        }
-
-        if delta > 0 && !ignorant {
-            let current_usage = self.disk_usage_cached.load(Ordering::Relaxed) as i64;
-
-            if self.disk_limit() != 0 && current_usage + delta > self.disk_limit() {
-                return false;
-            }
-        }
-
-        self.disk_usage_delta_cached
-            .fetch_add(delta, Ordering::Relaxed);
-
-        if delta > 0 {
-            self.disk_usage_cached
-                .fetch_add(delta as u64, Ordering::Relaxed);
-        } else {
-            let abs_size = delta.unsigned_abs();
-            let current = self.disk_usage_cached.load(Ordering::Relaxed);
-
-            if current >= abs_size {
-                self.disk_usage_cached
-                    .fetch_sub(abs_size, Ordering::Relaxed);
-                self.apparent_disk_usage_cached
-                    .fetch_add(delta as u64, Ordering::Relaxed);
-            } else {
-                self.disk_usage_cached.store(0, Ordering::Relaxed);
-            }
-
-            let current_apparent = self.apparent_disk_usage_cached.load(Ordering::Relaxed);
-
-            if current_apparent >= abs_size {
-                self.apparent_disk_usage_cached
-                    .fetch_sub(abs_size, Ordering::Relaxed);
-            } else {
-                self.apparent_disk_usage_cached.store(0, Ordering::Relaxed);
-            }
+        if !self.try_update_atomics(delta, ignorant) {
+            return false;
         }
 
         self.disk_usage
@@ -1093,45 +1077,8 @@ impl Filesystem {
     ///
     /// Returns `true` if allocation was successful, `false` if it would exceed disk limit
     pub fn allocate_in_path(&self, path: &Path, delta: i64, ignorant: bool) -> bool {
-        if crate::unlikely(delta == 0) {
-            return true;
-        }
-
-        if delta > 0 && !ignorant {
-            let current_usage = self.disk_usage_cached.load(Ordering::Relaxed) as i64;
-
-            if self.disk_limit() != 0 && current_usage + delta > self.disk_limit() {
-                return false;
-            }
-        }
-
-        self.disk_usage_delta_cached
-            .fetch_add(delta, Ordering::Relaxed);
-
-        if delta > 0 {
-            self.disk_usage_cached
-                .fetch_add(delta as u64, Ordering::Relaxed);
-            self.apparent_disk_usage_cached
-                .fetch_add(delta as u64, Ordering::Relaxed);
-        } else {
-            let abs_size = delta.unsigned_abs();
-            let current = self.disk_usage_cached.load(Ordering::Relaxed);
-
-            if current >= abs_size {
-                self.disk_usage_cached
-                    .fetch_sub(abs_size, Ordering::Relaxed);
-            } else {
-                self.disk_usage_cached.store(0, Ordering::Relaxed);
-            }
-
-            let current_apparent = self.apparent_disk_usage_cached.load(Ordering::Relaxed);
-
-            if current_apparent >= abs_size {
-                self.apparent_disk_usage_cached
-                    .fetch_sub(abs_size, Ordering::Relaxed);
-            } else {
-                self.apparent_disk_usage_cached.store(0, Ordering::Relaxed);
-            }
+        if !self.try_update_atomics(delta, ignorant) {
+            return false;
         }
 
         self.disk_usage
@@ -1155,45 +1102,8 @@ impl Filesystem {
         delta: i64,
         ignorant: bool,
     ) -> bool {
-        if crate::unlikely(delta == 0) {
-            return true;
-        }
-
-        if delta > 0 && !ignorant {
-            let current_usage = self.disk_usage_cached.load(Ordering::Relaxed) as i64;
-
-            if self.disk_limit() != 0 && current_usage + delta > self.disk_limit() {
-                return false;
-            }
-        }
-
-        self.disk_usage_delta_cached
-            .fetch_add(delta, Ordering::Relaxed);
-
-        if delta > 0 {
-            self.disk_usage_cached
-                .fetch_add(delta as u64, Ordering::Relaxed);
-            self.apparent_disk_usage_cached
-                .fetch_add(delta as u64, Ordering::Relaxed);
-        } else {
-            let abs_size = delta.unsigned_abs();
-            let current = self.disk_usage_cached.load(Ordering::Relaxed);
-
-            if current >= abs_size {
-                self.disk_usage_cached
-                    .fetch_sub(abs_size, Ordering::Relaxed);
-            } else {
-                self.disk_usage_cached.store(0, Ordering::Relaxed);
-            }
-
-            let current_apparent = self.apparent_disk_usage_cached.load(Ordering::Relaxed);
-
-            if current_apparent >= abs_size {
-                self.apparent_disk_usage_cached
-                    .fetch_sub(abs_size, Ordering::Relaxed);
-            } else {
-                self.apparent_disk_usage_cached.store(0, Ordering::Relaxed);
-            }
+        if !self.try_update_atomics(delta, ignorant) {
+            return false;
         }
 
         self.disk_usage
@@ -1220,76 +1130,83 @@ impl Filesystem {
     }
 
     pub async fn chown_path(&self, path: impl AsRef<Path>) -> Result<(), anyhow::Error> {
-        let metadata = self.async_metadata(path.as_ref()).await?;
+        #[cfg(unix)]
+        {
+            let metadata = self.async_metadata(path.as_ref()).await?;
 
-        let owner_uid = rustix::fs::Uid::from_raw_unchecked(self.config.system.user.uid);
-        let owner_gid = rustix::fs::Gid::from_raw_unchecked(self.config.system.user.gid);
+            let owner_uid = rustix::fs::Uid::from_raw_unchecked(self.config.system.user.uid);
+            let owner_gid = rustix::fs::Gid::from_raw_unchecked(self.config.system.user.gid);
 
-        tokio::task::spawn_blocking({
-            let cap_filesystem = self.cap_filesystem.clone();
-            let path = self.relative_path(path.as_ref());
-            let base_path = self.base_path.clone();
-            let base_fs_path = self.get_base_fs_path().await;
+            tokio::task::spawn_blocking({
+                let cap_filesystem = self.cap_filesystem.clone();
+                let path = self.relative_path(path.as_ref());
+                let base_path = self.base_path.clone();
+                let base_fs_path = self.get_base_fs_path().await;
 
-            move || {
-                if crate::unlikely(path == Path::new("") || path == Path::new("/")) {
-                    std::os::unix::fs::chown(
-                        &base_path,
-                        Some(owner_uid.as_raw()),
-                        Some(owner_gid.as_raw()),
-                    )?;
-
-                    if base_path != base_fs_path {
+                move || {
+                    if crate::unlikely(path == Path::new("") || path == Path::new("/")) {
                         std::os::unix::fs::chown(
-                            base_fs_path,
+                            &base_path,
                             Some(owner_uid.as_raw()),
                             Some(owner_gid.as_raw()),
                         )?;
-                    }
 
-                    Ok::<_, anyhow::Error>(())
-                } else {
-                    Ok(rustix::fs::chownat(
-                        cap_filesystem.get_inner()?.as_fd(),
-                        path,
-                        Some(owner_uid),
-                        Some(owner_gid),
-                        rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
-                    )?)
-                }
-            }
-        })
-        .await??;
-
-        if metadata.is_dir() {
-            let cap_filesystem = self.cap_filesystem.clone();
-
-            self.async_walk_dir(path)
-                .await?
-                .run_multithreaded(
-                    self.config.system.check_permissions_on_boot_threads,
-                    Arc::new(move |_, path: PathBuf| {
-                        let cap_filesystem = cap_filesystem.clone();
-
-                        async move {
-                            tokio::task::spawn_blocking(move || {
-                                rustix::fs::chownat(
-                                    cap_filesystem.get_inner()?.as_fd(),
-                                    path,
-                                    Some(owner_uid),
-                                    Some(owner_gid),
-                                    rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
-                                )
-                                .ok();
-
-                                Ok(())
-                            })
-                            .await?
+                        if base_path != base_fs_path {
+                            std::os::unix::fs::chown(
+                                base_fs_path,
+                                Some(owner_uid.as_raw()),
+                                Some(owner_gid.as_raw()),
+                            )?;
                         }
-                    }),
-                )
-                .await
-        } else {
+
+                        Ok::<_, anyhow::Error>(())
+                    } else {
+                        Ok(rustix::fs::chownat(
+                            cap_filesystem.get_inner()?.as_fd(),
+                            path,
+                            Some(owner_uid),
+                            Some(owner_gid),
+                            rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+                        )?)
+                    }
+                }
+            })
+            .await??;
+
+            if metadata.is_dir() {
+                let cap_filesystem = self.cap_filesystem.clone();
+
+                self.async_walk_dir(path)
+                    .await?
+                    .run_multithreaded(
+                        self.config.system.check_permissions_on_boot_threads,
+                        Arc::new(move |_, path: PathBuf| {
+                            let cap_filesystem = cap_filesystem.clone();
+
+                            async move {
+                                tokio::task::spawn_blocking(move || {
+                                    rustix::fs::chownat(
+                                        cap_filesystem.get_inner()?.as_fd(),
+                                        path,
+                                        Some(owner_uid),
+                                        Some(owner_gid),
+                                        rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+                                    )
+                                    .ok();
+
+                                    Ok(())
+                                })
+                                .await?
+                            }
+                        }),
+                    )
+                    .await
+            } else {
+                Ok(())
+            }
+        }
+        #[cfg(not(unix))]
+        {
             Ok(())
         }
     }

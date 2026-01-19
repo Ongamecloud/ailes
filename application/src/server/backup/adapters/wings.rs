@@ -19,9 +19,10 @@ use crate::{
             },
         },
     },
+    utils::PortableModeExt,
 };
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
-use cap_std::fs::{Permissions, PermissionsExt};
+use cap_std::fs::Permissions;
 use sha1::Digest;
 use std::{
     io::Write,
@@ -369,7 +370,9 @@ impl BackupExt for WingsBackup {
                         match header.entry_type() {
                             tar::EntryType::Directory => {
                                 server.filesystem.create_dir_all(destination_path)?;
-                                if let Ok(permissions) = header.mode().map(Permissions::from_mode) {
+                                if let Ok(permissions) =
+                                    header.mode().map(Permissions::from_portable_mode)
+                                {
                                     server
                                         .filesystem
                                         .set_permissions(destination_path, permissions)?;
@@ -393,7 +396,7 @@ impl BackupExt for WingsBackup {
                                     crate::server::filesystem::writer::FileSystemWriter::new(
                                         server.clone(),
                                         destination_path,
-                                        header.mode().map(Permissions::from_mode).ok(),
+                                        header.mode().map(Permissions::from_portable_mode).ok(),
                                         header
                                             .mtime()
                                             .map(|t| {
@@ -514,7 +517,7 @@ impl BackupExt for WingsBackup {
                                         server.filesystem.create_dir_all(&path)?;
                                         server.filesystem.set_permissions(
                                             &path,
-                                            Permissions::from_mode(
+                                            Permissions::from_portable_mode(
                                                 entry.unix_mode().unwrap_or(0o755),
                                             ),
                                         )?;
@@ -531,7 +534,7 @@ impl BackupExt for WingsBackup {
                                         let mut writer = crate::server::filesystem::writer::FileSystemWriter::new(
                                             server.clone(),
                                             &path,
-                                            entry.unix_mode().map(Permissions::from_mode),
+                                            entry.unix_mode().map(Permissions::from_portable_mode),
                                             crate::server::filesystem::archive::zip_entry_get_modified_time(&entry),
                                         )?;
                                         let mut reader = CountingReader::new_with_bytes_read(

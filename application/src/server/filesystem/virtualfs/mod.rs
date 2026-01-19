@@ -374,6 +374,8 @@ pub trait VirtualReadableFilesystem: Send + Sync {
         false
     }
 
+    fn backing_server(&self) -> &crate::server::Server;
+
     fn metadata(
         &self,
         path: &(dyn AsRef<Path> + Send + Sync),

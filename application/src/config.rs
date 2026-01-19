@@ -9,7 +9,6 @@ use std::{
     fs::File,
     io::BufRead,
     ops::{Deref, DerefMut},
-    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     str::FromStr,
     sync::Arc,
@@ -65,26 +64,76 @@ fn api_max_jwt_uses() -> usize {
 }
 
 fn system_root_directory() -> String {
-    "/var/lib/pterodactyl".to_string()
+    #[cfg(unix)]
+    {
+        "/var/lib/pterodactyl".to_string()
+    }
+    #[cfg(windows)]
+    {
+        "C:\\ProgramData\\Calagopus".to_string()
+    }
 }
 fn system_log_directory() -> String {
-    "/var/log/pterodactyl".to_string()
+    #[cfg(unix)]
+    {
+        "/var/log/pterodactyl".to_string()
+    }
+    #[cfg(windows)]
+    {
+        "C:\\ProgramData\\Calagopus\\logs".to_string()
+    }
 }
 fn system_vmount_directory() -> String {
-    "/var/lib/pterodactyl/vmounts".to_string()
+    #[cfg(unix)]
+    {
+        "/var/lib/pterodactyl/vmounts".to_string()
+    }
+    #[cfg(windows)]
+    {
+        "C:\\ProgramData\\Calagopus\\vmounts".to_string()
+    }
 }
 fn system_data() -> String {
-    "/var/lib/pterodactyl/volumes".to_string()
+    #[cfg(unix)]
+    {
+        "/var/lib/pterodactyl/volumes".to_string()
+    }
+    #[cfg(windows)]
+    {
+        "C:\\ProgramData\\Calagopus\\volumes".to_string()
+    }
 }
 fn system_archive_directory() -> String {
-    "/var/lib/pterodactyl/archives".to_string()
+    #[cfg(unix)]
+    {
+        "/var/lib/pterodactyl/archives".to_string()
+    }
+    #[cfg(windows)]
+    {
+        "C:\\ProgramData\\Calagopus\\archives".to_string()
+    }
 }
 fn system_backup_directory() -> String {
-    "/var/lib/pterodactyl/backups".to_string()
+    #[cfg(unix)]
+    {
+        "/var/lib/pterodactyl/backups".to_string()
+    }
+    #[cfg(windows)]
+    {
+        "C:\\ProgramData\\Calagopus\\backups".to_string()
+    }
 }
 fn system_tmp_directory() -> String {
-    "/tmp/pterodactyl".to_string()
+    #[cfg(unix)]
+    {
+        "/tmp/pterodactyl".to_string()
+    }
+    #[cfg(windows)]
+    {
+        "C:\\ProgramData\\Calagopus\\tmp".to_string()
+    }
 }
+#[cfg(unix)]
 fn system_username() -> compact_str::CompactString {
     "pterodactyl".into()
 }
@@ -101,6 +150,7 @@ fn system_timezone() -> compact_str::CompactString {
 
     chrono::Local::now().offset().to_compact_string()
 }
+#[cfg(unix)]
 fn system_passwd_directory() -> String {
     "/run/wings/etc".to_string()
 }
@@ -202,10 +252,24 @@ fn system_backup_ddup_bak_create_threads() -> usize {
 }
 
 fn system_backup_restic_repository() -> String {
-    "/var/lib/pterodactyl/backups/restic".to_string()
+    #[cfg(unix)]
+    {
+        "/var/lib/pterodactyl/backups/restic".to_string()
+    }
+    #[cfg(windows)]
+    {
+        "C:\\ProgramData\\Calagopus\\backups\\restic".to_string()
+    }
 }
 fn system_backup_restic_password_file() -> String {
-    "/var/lib/pterodactyl/backups/restic_password".to_string()
+    #[cfg(unix)]
+    {
+        "/var/lib/pterodactyl/backups/restic_password".to_string()
+    }
+    #[cfg(windows)]
+    {
+        "C:\\ProgramData\\Calagopus\\backups\\restic_password".to_string()
+    }
 }
 fn system_backup_restic_retry_lock_seconds() -> u64 {
     60
@@ -223,7 +287,14 @@ fn system_backup_zfs_restore_threads() -> usize {
 }
 
 fn docker_socket() -> String {
-    "/var/run/docker.sock".to_string()
+    #[cfg(unix)]
+    {
+        "/var/run/docker.sock".to_string()
+    }
+    #[cfg(windows)]
+    {
+        "//./pipe/docker_engine".to_string()
+    }
 }
 fn docker_delete_container_on_stop() -> bool {
     true
@@ -406,36 +477,47 @@ nestify::nest! {
             #[serde(default = "system_tmp_directory")]
             pub tmp_directory: String,
 
+            #[cfg(unix)]
             #[serde(default = "system_username")]
             pub username: compact_str::CompactString,
             #[serde(default = "system_timezone")]
             pub timezone: compact_str::CompactString,
 
+            #[cfg(unix)]
             #[serde(default)]
             #[schema(inline)]
             pub user: #[derive(ToSchema, Deserialize, Serialize, DefaultFromSerde)] #[serde(default)] pub struct SystemUser {
+                #[cfg(unix)]
                 #[serde(default)]
                 #[schema(inline)]
                 pub rootless: #[derive(ToSchema, Deserialize, Serialize, DefaultFromSerde)] #[serde(default)] pub struct SystemUserRootless {
+                    #[cfg(unix)]
                     #[serde(default)]
                     pub enabled: bool,
+                    #[cfg(unix)]
                     #[serde(default)]
                     pub container_uid: u32,
+                    #[cfg(unix)]
                     #[serde(default)]
                     pub container_gid: u32,
                 },
 
+                #[cfg(unix)]
                 #[serde(default)]
                 pub uid: u32,
+                #[cfg(unix)]
                 #[serde(default)]
                 pub gid: u32,
             },
 
+            #[cfg(unix)]
             #[serde(default)]
             #[schema(inline)]
             pub passwd: #[derive(ToSchema, Deserialize, Serialize, DefaultFromSerde)] #[serde(default)] pub struct SystemPasswd {
+                #[cfg(unix)]
                 #[serde(default)]
                 pub enabled: bool,
+                #[cfg(unix)]
                 #[serde(default = "system_passwd_directory")]
                 pub directory: String,
             },
@@ -866,8 +948,11 @@ impl Config {
             .buffered_lines_limit(50)
             .finish(latest_file.and(rolling_appender));
 
-        config.ensure_user()?;
-        config.ensure_passwd()?;
+        #[cfg(unix)]
+        {
+            config.ensure_user()?;
+            config.ensure_passwd()?;
+        }
         config.save()?;
 
         if debug {
@@ -993,13 +1078,19 @@ impl Config {
         for dir in directories {
             if !std::path::Path::new(dir).exists() {
                 std::fs::create_dir_all(dir)?;
-                std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+                }
             }
         }
 
+        #[cfg(unix)]
         if self.system.passwd.enabled
             && !std::path::Path::new(&self.system.passwd.directory).exists()
         {
+            use std::os::unix::fs::PermissionsExt;
             std::fs::create_dir_all(&self.system.passwd.directory)?;
             std::fs::set_permissions(
                 &self.system.passwd.directory,
@@ -1010,6 +1101,7 @@ impl Config {
         Ok(())
     }
 
+    #[cfg(unix)]
     fn ensure_user(&mut self) -> Result<(), anyhow::Error> {
         let release =
             std::fs::read_to_string("/etc/os-release").unwrap_or_else(|_| "unknown".to_string());
@@ -1090,7 +1182,10 @@ impl Config {
         Ok(())
     }
 
+    #[cfg(unix)]
     fn ensure_passwd(&self) -> Result<(), anyhow::Error> {
+        use std::os::unix::fs::PermissionsExt;
+
         if self.system.passwd.enabled {
             std::fs::write(
                 std::path::Path::new(&self.system.passwd.directory).join("group"),

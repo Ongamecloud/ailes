@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     fs::Permissions,
-    os::unix::fs::PermissionsExt,
     path::Path,
     sync::{Arc, atomic::Ordering},
 };
@@ -898,7 +897,11 @@ impl ServerInstaller {
             container_script.script.replace("\r\n", "\n"),
         )
         .await?;
-        tokio::fs::set_permissions(&tmp_dir, Permissions::from_mode(0o755)).await?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            tokio::fs::set_permissions(&tmp_dir, Permissions::from_mode(0o755)).await?;
+        }
 
         Ok(bollard::container::Config {
             host_config: Some(bollard::secret::HostConfig {

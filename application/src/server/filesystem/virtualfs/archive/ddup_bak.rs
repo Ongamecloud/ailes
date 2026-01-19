@@ -15,8 +15,8 @@ use crate::{
             ReadableFileStream, VirtualReadableFilesystem,
         },
     },
+    utils::PortableModeExt,
 };
-use cap_std::fs::PermissionsExt;
 use chrono::{Datelike, Timelike};
 use ddup_bak::archive::entries::Entry;
 use std::{
@@ -303,6 +303,10 @@ impl VirtualDdupBakArchive {
 
 #[async_trait::async_trait]
 impl VirtualReadableFilesystem for VirtualDdupBakArchive {
+    fn backing_server(&self) -> &crate::server::Server {
+        &self.server
+    }
+
     fn metadata(
         &self,
         path: &(dyn AsRef<Path> + Send + Sync),
@@ -310,7 +314,7 @@ impl VirtualReadableFilesystem for VirtualDdupBakArchive {
         if path.as_ref() == Path::new("") || path.as_ref() == Path::new("/") {
             return Ok(FileMetadata {
                 file_type: FileType::Dir,
-                permissions: cap_std::fs::Permissions::from_mode(0o755),
+                permissions: cap_std::fs::Permissions::from_portable_mode(0o755),
                 size: 0,
                 modified: None,
                 created: None,
@@ -326,7 +330,7 @@ impl VirtualReadableFilesystem for VirtualDdupBakArchive {
 
         Ok(FileMetadata {
             file_type: Self::ddup_bak_entry_to_file_type(entry),
-            permissions: cap_std::fs::Permissions::from_mode(entry.mode().bits() & 0o777),
+            permissions: cap_std::fs::Permissions::from_portable_mode(entry.mode().bits() & 0o777),
             size: match &entry {
                 ddup_bak::archive::entries::Entry::File(f) => f.size_real,
                 _ => 0,

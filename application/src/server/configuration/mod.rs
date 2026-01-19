@@ -176,6 +176,7 @@ impl ServerConfiguration {
             read_only: false,
         });
 
+        #[cfg(unix)]
         if self.container.hugepages_passthrough_enabled {
             mounts.push(Mount {
                 default: false,
@@ -185,6 +186,7 @@ impl ServerConfiguration {
             });
         }
 
+        #[cfg(unix)]
         if config.system.passwd.enabled {
             mounts.push(Mount {
                 default: false,

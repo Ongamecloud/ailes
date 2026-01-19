@@ -9,7 +9,7 @@ use std::{
 };
 use tokio::io::{AsyncSeek, AsyncWrite};
 
-const ALLOCATION_THRESHOLD: i64 = 1024 * 1024;
+pub const ALLOCATION_THRESHOLD: i64 = 1024 * 1024;
 
 pub struct FileSystemWriter {
     server: crate::server::Server,

@@ -150,9 +150,11 @@ mod post {
                         total: total.clone(),
                     },
                     {
+                        let server = server.clone();
                         let root = root.clone();
                         let files = data.files.clone();
                         let filesystem = filesystem.clone();
+                        let destination_server = destination_server.clone();
                         let destination_path = Arc::new(destination_path);
                         let destination_filesystem = destination_filesystem.clone();
                         let progress = progress.clone();
@@ -171,15 +173,19 @@ mod post {
                                     .run_multithreaded(
                                         state.config.api.file_copy_threads,
                                         DirectoryStreamWalkFn::from({
+                                            let server = server.clone();
                                             let filesystem = filesystem.clone();
                                             let source_path = Arc::new(root);
+                                            let destination_server = destination_server.clone();
                                             let destination_path = Arc::new(destination_path);
                                             let destination_filesystem = destination_filesystem.clone();
                                             let progress = Arc::clone(&progress);
 
                                             move |_, path: PathBuf, stream| {
+                                                let server = server.clone();
                                                 let filesystem = filesystem.clone();
                                                 let source_path = Arc::clone(&source_path);
+                                                let destination_server = destination_server.clone();
                                                 let destination_path = Arc::clone(&destination_path);
                                                 let destination_filesystem = destination_filesystem.clone();
                                                 let progress = Arc::clone(&progress);
@@ -203,20 +209,34 @@ mod post {
                                                             destination_filesystem.async_create_dir_all(&parent).await?;
                                                         }
 
-                                                        let mut reader = AsyncCountingReader::new_with_bytes_read(
-                                                            stream,
-                                                            Arc::clone(&progress),
-                                                        );
+                                                        if filesystem.is_primary_server_fs()
+                                                            && destination_filesystem.is_primary_server_fs()
+                                                        {
+                                                            server
+                                                                .filesystem
+                                                                .async_quota_copy(
+                                                                    &source_path,
+                                                                    &destination_path,
+                                                                    &destination_server,
+                                                                    Some(&progress),
+                                                                )
+                                                                .await?;
+                                                        } else {
+                                                            let mut reader = AsyncCountingReader::new_with_bytes_read(
+                                                                stream,
+                                                                Arc::clone(&progress),
+                                                            );
 
-                                                        let mut writer = destination_filesystem
-                                                            .async_create_file(&destination_path)
-                                                            .await?;
-                                                        destination_filesystem
-                                                            .async_set_permissions(&destination_path, metadata.permissions)
-                                                            .await?;
+                                                            let mut writer = destination_filesystem
+                                                                .async_create_file(&destination_path)
+                                                                .await?;
+                                                            destination_filesystem
+                                                                .async_set_permissions(&destination_path, metadata.permissions)
+                                                                .await?;
 
-                                                        tokio::io::copy(&mut reader, &mut writer).await?;
-                                                        writer.shutdown().await?;
+                                                            tokio::io::copy(&mut reader, &mut writer).await?;
+                                                            writer.shutdown().await?;
+                                                        }
                                                     } else if metadata.file_type.is_dir() {
                                                         destination_filesystem.async_create_dir_all(&destination_path).await?;
                                                         destination_filesystem

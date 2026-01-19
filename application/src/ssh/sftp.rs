@@ -4,8 +4,9 @@ use crate::{
         activity::{Activity, ActivityEvent},
         permissions::Permission,
     },
+    utils::PortableModeExt,
 };
-use cap_std::fs::{Metadata, OpenOptions, PermissionsExt};
+use cap_std::fs::{Metadata, OpenOptions};
 use compact_str::ToCompactString;
 use positioned_io::{ReadAt, WriteAt};
 use russh_sftp::protocol::{
@@ -496,8 +497,7 @@ impl russh_sftp::server::Handler for SftpSession {
             return Err(StatusCode::Failure);
         }
         if let Some(permissions) = attrs.permissions {
-            let mut permissions = cap_std::fs::Permissions::from_mode(permissions);
-            permissions.set_mode(permissions.mode() & 0o777);
+            let permissions = cap_std::fs::Permissions::from_portable_mode(permissions);
 
             if self
                 .server
@@ -645,8 +645,7 @@ impl russh_sftp::server::Handler for SftpSession {
         }
 
         if let Some(permissions) = attrs.permissions {
-            let mut permissions = cap_std::fs::Permissions::from_mode(permissions);
-            permissions.set_mode(permissions.mode() & 0o777);
+            let permissions = cap_std::fs::Permissions::from_portable_mode(permissions);
 
             self.server
                 .filesystem
@@ -1755,8 +1754,7 @@ impl russh_sftp::server::Handler for SftpSession {
                 };
 
                 if let Some(permissions) = request.attrs.permissions {
-                    let mut permissions = cap_std::fs::Permissions::from_mode(permissions);
-                    permissions.set_mode(permissions.mode() & 0o777);
+                    let permissions = cap_std::fs::Permissions::from_portable_mode(permissions);
 
                     self.server
                         .filesystem

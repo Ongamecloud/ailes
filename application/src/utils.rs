@@ -63,3 +63,58 @@ pub fn is_valid_utf8_slice(s: &[u8]) -> bool {
 
     false
 }
+
+pub trait PortableModeExt {
+    fn from_portable_mode(mode: u32) -> Self;
+    fn mode(&self) -> u32;
+}
+
+#[cfg(unix)]
+impl PortableModeExt for std::fs::Permissions {
+    fn from_portable_mode(mode: u32) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        Self::from_mode(mode)
+    }
+
+    fn mode(&self) -> u32 {
+        std::os::unix::fs::PermissionsExt::mode(self)
+    }
+}
+
+#[cfg(unix)]
+impl PortableModeExt for cap_std::fs::Permissions {
+    fn from_portable_mode(mode: u32) -> Self {
+        use cap_std::fs::PermissionsExt;
+        Self::from_mode(mode)
+    }
+
+    fn mode(&self) -> u32 {
+        cap_std::fs::PermissionsExt::mode(self)
+    }
+}
+
+#[cfg(windows)]
+impl PortableModeExt for std::fs::Permissions {
+    fn from_portable_mode(mode: u32) -> Self {
+        let mut perms: Self = unsafe { std::mem::zeroed() };
+        perms.set_readonly(mode & 0o200 == 0);
+        perms
+    }
+
+    fn mode(&self) -> u32 {
+        if self.readonly() { 0o444 } else { 0o666 }
+    }
+}
+
+#[cfg(windows)]
+impl PortableModeExt for cap_std::fs::Permissions {
+    fn from_portable_mode(mode: u32) -> Self {
+        let mut perms: Self = unsafe { std::mem::zeroed() };
+        perms.set_readonly(mode & 0o200 == 0);
+        perms
+    }
+
+    fn mode(&self) -> u32 {
+        if self.readonly() { 0o444 } else { 0o666 }
+    }
+}

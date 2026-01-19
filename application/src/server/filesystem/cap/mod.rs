@@ -1,16 +1,24 @@
-use cap_std::fs::{Metadata, OpenOptions, PermissionsExt};
+use cap_std::fs::{Metadata, OpenOptions};
 use std::{
     collections::VecDeque,
     io::{Read, Write},
-    os::{fd::AsFd, unix::fs::PermissionsExt as StdPermissionsExt},
+    os::fd::AsFd,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     sync::RwLock,
 };
 pub use utils::{AsyncReadDir, AsyncWalkDir, FileType, ReadDir, WalkDir};
+
+use crate::{
+    io::abort::{AbortGuard, AbortListener},
+    utils::PortableModeExt,
+};
 
 mod utils;
 
@@ -570,6 +578,111 @@ impl CapFilesystem {
         Ok(bytes_copied)
     }
 
+    pub async fn async_quota_copy(
+        &self,
+        path: impl AsRef<Path>,
+        destination_path: impl AsRef<Path>,
+        destination_server: &crate::server::Server,
+        progress: Option<&Arc<AtomicU64>>,
+    ) -> Result<u64, anyhow::Error> {
+        let (guard, listener) = AbortGuard::new();
+
+        let bytes_copied = tokio::task::spawn_blocking({
+            let self_clone = self.clone();
+            let destination_server = destination_server.clone();
+            let path = path.as_ref().to_owned();
+            let destination_path = destination_path.as_ref().to_owned();
+            let progress = progress.cloned();
+
+            move || {
+                self_clone.quota_copy(
+                    &path,
+                    &destination_path,
+                    &destination_server,
+                    progress.as_ref(),
+                    listener,
+                )
+            }
+        })
+        .await??;
+
+        drop(guard);
+
+        Ok(bytes_copied)
+    }
+
+    pub fn quota_copy(
+        &self,
+        path: impl AsRef<Path>,
+        destination_path: impl AsRef<Path>,
+        destination_server: &crate::server::Server,
+        progress: Option<&Arc<AtomicU64>>,
+        listener: AbortListener,
+    ) -> Result<u64, anyhow::Error> {
+        let path = self.relative_path(path.as_ref());
+        let destination_path = destination_server
+            .filesystem
+            .relative_path(destination_path.as_ref());
+
+        let mut reader = self.open(&path)?;
+        let mut writer = destination_server.filesystem.create(&destination_path)?;
+
+        let Some(destination_parent) = destination_path.parent() else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Destination path has no parent",
+            )
+            .into());
+        };
+
+        let mut cached_allocation_progress = 0i64;
+
+        let bytes_copied = crate::io::copy_file_progress(
+            &mut reader,
+            &mut writer,
+            |bytes_read| {
+                if let Some(progress) = progress {
+                    progress.fetch_add(bytes_read as u64, Ordering::Relaxed);
+                }
+                cached_allocation_progress += bytes_read as i64;
+
+                if cached_allocation_progress >= super::writer::ALLOCATION_THRESHOLD {
+                    if !destination_server.filesystem.allocate_in_path(
+                        destination_parent,
+                        cached_allocation_progress,
+                        false,
+                    ) {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::StorageFull,
+                            "Failed to allocate space",
+                        ));
+                    }
+
+                    cached_allocation_progress = 0;
+                }
+
+                Ok(())
+            },
+            listener,
+        )?;
+
+        if cached_allocation_progress > 0
+            && !destination_server.filesystem.allocate_in_path(
+                destination_parent,
+                cached_allocation_progress,
+                false,
+            )
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::StorageFull,
+                "Failed to allocate space",
+            )
+            .into());
+        }
+
+        Ok(bytes_copied)
+    }
+
     pub async fn async_set_permissions(
         &self,
         path: impl AsRef<Path>,
@@ -580,7 +693,7 @@ impl CapFilesystem {
         if path.components().next().is_none() {
             tokio::fs::set_permissions(
                 &*self.base_path,
-                std::fs::Permissions::from_mode(permissions.mode()),
+                std::fs::Permissions::from_portable_mode(permissions.mode()),
             )
             .await?;
         } else {
@@ -615,7 +728,7 @@ impl CapFilesystem {
         if path.components().next().is_none() {
             tokio::fs::set_permissions(
                 &*self.base_path,
-                std::fs::Permissions::from_mode(permissions.mode()),
+                std::fs::Permissions::from_portable_mode(permissions.mode()),
             )
             .await?;
         } else {
@@ -645,17 +758,20 @@ impl CapFilesystem {
         if path.components().next().is_none() {
             std::fs::set_permissions(
                 &*self.base_path,
-                std::fs::Permissions::from_mode(permissions.mode()),
+                std::fs::Permissions::from_portable_mode(permissions.mode()),
             )?;
         } else {
             let inner = self.get_inner()?;
 
+            #[cfg(unix)]
             rustix::fs::chmodat(
                 inner.as_fd(),
                 path,
                 rustix::fs::Mode::from_raw_mode(permissions.mode()),
                 rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
             )?;
+            #[cfg(not(unix))]
+            self.set_permissions(path, permissions)?;
         }
 
         Ok(())
@@ -667,30 +783,53 @@ impl CapFilesystem {
         modification_time: std::time::SystemTime,
         access_time: Option<std::time::SystemTime>,
     ) -> Result<(), anyhow::Error> {
-        let path = self.relative_path(path.as_ref());
-        let inner = self.async_get_inner().await?;
+        #[cfg(unix)]
+        {
+            let path = self.relative_path(path.as_ref());
+            let inner = self.async_get_inner().await?;
 
-        let elapsed_modification = modification_time.duration_since(std::time::UNIX_EPOCH)?;
-        let elapsed_access = access_time
-            .unwrap_or_else(std::time::SystemTime::now)
-            .duration_since(std::time::UNIX_EPOCH)?;
+            let elapsed_modification = modification_time.duration_since(std::time::UNIX_EPOCH)?;
+            let elapsed_access = access_time
+                .unwrap_or_else(std::time::SystemTime::now)
+                .duration_since(std::time::UNIX_EPOCH)?;
 
-        let times = rustix::fs::Timestamps {
-            last_modification: elapsed_modification.try_into()?,
-            last_access: elapsed_access.try_into()?,
-        };
+            let times = rustix::fs::Timestamps {
+                last_modification: elapsed_modification.try_into()?,
+                last_access: elapsed_access.try_into()?,
+            };
 
-        tokio::task::spawn_blocking(move || {
-            rustix::fs::utimensat(
-                inner.as_fd(),
-                path,
-                &times,
-                rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
-            )
-        })
-        .await??;
+            tokio::task::spawn_blocking(move || {
+                rustix::fs::utimensat(
+                    inner.as_fd(),
+                    path,
+                    &times,
+                    rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+                )
+            })
+            .await??;
 
-        Ok(())
+            Ok(())
+        }
+        #[cfg(not(unix))]
+        {
+            let path = self.relative_path(path.as_ref());
+            let inner = self.async_get_inner().await?;
+
+            let mut times = std::fs::FileTimes::new();
+            times.set_modified(modification_time);
+            if let Some(atime) = access_time {
+                times.set_accessed(atime);
+            }
+
+            let mut file = tokio::task::spawn_blocking(move || {
+                let file = inner.open(path)?.into_std();
+
+                file.set_times(times)
+            })
+            .await??;
+
+            Ok(())
+        }
     }
 
     pub fn set_times(
@@ -699,27 +838,46 @@ impl CapFilesystem {
         modification_time: std::time::SystemTime,
         access_time: Option<std::time::SystemTime>,
     ) -> Result<(), anyhow::Error> {
-        let path = self.relative_path(path.as_ref());
-        let inner = self.get_inner()?;
+        #[cfg(unix)]
+        {
+            let path = self.relative_path(path.as_ref());
+            let inner = self.get_inner()?;
 
-        let elapsed_modification = modification_time.duration_since(std::time::UNIX_EPOCH)?;
-        let elapsed_access = access_time
-            .unwrap_or_else(std::time::SystemTime::now)
-            .duration_since(std::time::UNIX_EPOCH)?;
+            let elapsed_modification = modification_time.duration_since(std::time::UNIX_EPOCH)?;
+            let elapsed_access = access_time
+                .unwrap_or_else(std::time::SystemTime::now)
+                .duration_since(std::time::UNIX_EPOCH)?;
 
-        let times = rustix::fs::Timestamps {
-            last_modification: elapsed_modification.try_into()?,
-            last_access: elapsed_access.try_into()?,
-        };
+            let times = rustix::fs::Timestamps {
+                last_modification: elapsed_modification.try_into()?,
+                last_access: elapsed_access.try_into()?,
+            };
 
-        rustix::fs::utimensat(
-            inner.as_fd(),
-            path,
-            &times,
-            rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
-        )?;
+            rustix::fs::utimensat(
+                inner.as_fd(),
+                path,
+                &times,
+                rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+            )?;
 
-        Ok(())
+            Ok(())
+        }
+        #[cfg(not(unix))]
+        {
+            let path = self.relative_path(path.as_ref());
+            let inner = self.get_inner()?;
+
+            let mut times = std::fs::FileTimes::new();
+            times.set_modified(modification_time);
+            if let Some(atime) = access_time {
+                times.set_accessed(atime);
+            }
+
+            let mut file = inner.open(path)?.into_std();
+            file.set_times(times)?;
+
+            Ok(())
+        }
     }
 
     pub async fn async_symlink(
@@ -745,7 +903,20 @@ impl CapFilesystem {
         let link = self.relative_path(link.as_ref());
 
         let inner = self.get_inner()?;
-        inner.symlink(target, link)?;
+
+        #[cfg(unix)]
+        {
+            inner.symlink(target, link)?;
+        }
+        #[cfg(windows)]
+        {
+            let metadata = inner.metadata(&target)?;
+            if metadata.is_dir() {
+                inner.symlink_dir(target, link)?;
+            } else {
+                inner.symlink_file(target, link)?;
+            }
+        }
 
         Ok(())
     }

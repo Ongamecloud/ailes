@@ -13,8 +13,9 @@ use crate::{
             virtualfs::{ByteRange, VirtualReadableFilesystem},
         },
     },
+    utils::PortableModeExt,
 };
-use cap_std::fs::{Permissions, PermissionsExt};
+use cap_std::fs::Permissions;
 use futures::TryStreamExt;
 use sha1::Digest;
 use std::{
@@ -447,9 +448,8 @@ impl BackupExt for S3Backup {
                             .filesystem
                             .set_permissions(
                                 path.as_ref(),
-                                Permissions::from_mode(header.mode().unwrap_or(0o755)),
-                            )
-                            ?;
+                                Permissions::from_portable_mode(header.mode().unwrap_or(0o755)),
+                            )?;
 
                         if let Ok(modified_time) = header.mtime() {
                             directory_entries.push((path.to_path_buf(), modified_time));
@@ -468,7 +468,7 @@ impl BackupExt for S3Backup {
                         let mut writer = crate::server::filesystem::writer::FileSystemWriter::new(
                             server.clone(),
                             &path,
-                            Some(Permissions::from_mode(header.mode().unwrap_or(0o644))),
+                            Some(Permissions::from_portable_mode(header.mode().unwrap_or(0o644))),
                             header
                                 .mtime()
                                 .map(|t| {

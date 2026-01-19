@@ -23,6 +23,7 @@ pub struct MimeCacheKey {
     pub modified: u64,
 }
 
+#[cfg(unix)]
 impl From<&std::fs::Metadata> for MimeCacheKey {
     fn from(metadata: &std::fs::Metadata) -> Self {
         use std::os::unix::fs::MetadataExt;
@@ -39,6 +40,7 @@ impl From<&std::fs::Metadata> for MimeCacheKey {
     }
 }
 
+#[cfg(unix)]
 impl From<&cap_std::fs::Metadata> for MimeCacheKey {
     fn from(metadata: &cap_std::fs::Metadata) -> Self {
         use cap_std::fs::MetadataExt;
@@ -50,6 +52,23 @@ impl From<&cap_std::fs::Metadata> for MimeCacheKey {
                 .modified()
                 .ok()
                 .and_then(|time| time.into_std().duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |duration| duration.as_secs()),
+        }
+    }
+}
+
+#[cfg(windows)]
+impl From<&std::fs::Metadata> for MimeCacheKey {
+    fn from(metadata: &std::fs::Metadata) -> Self {
+        use std::os::windows::fs::MetadataExt;
+
+        Self {
+            ino: metadata.file_index().unwrap_or(0),
+            dev: metadata.volume_serial_number().map_or(0, |v| v as u64),
+            modified: metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
                 .map_or(0, |duration| duration.as_secs()),
         }
     }

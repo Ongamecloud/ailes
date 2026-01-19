@@ -66,6 +66,10 @@ impl super::VirtualReadableFilesystem for VirtualCapFilesystem {
         self.is_writable
     }
 
+    fn backing_server(&self) -> &crate::server::Server {
+        &self.server
+    }
+
     fn metadata(
         &self,
         path: &(dyn AsRef<Path> + Send + Sync),

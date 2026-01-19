@@ -19,12 +19,13 @@ mod post {
         response::{ApiResponse, ApiResponseResult},
         routes::{ApiError, GetState},
         server::transfer::TransferArchiveFormat,
+        utils::PortableModeExt,
     };
     use axum::{
         extract::Multipart,
         http::{HeaderMap, StatusCode},
     };
-    use cap_std::fs::{Permissions, PermissionsExt};
+    use cap_std::fs::Permissions;
     use futures::TryStreamExt;
     use serde::Serialize;
     use sha1::Digest;
@@ -207,7 +208,7 @@ mod post {
                                         tar::EntryType::Directory => {
                                             server.filesystem.create_dir_all(destination_path)?;
                                             if let Ok(permissions) =
-                                                header.mode().map(Permissions::from_mode)
+                                                header.mode().map(Permissions::from_portable_mode)
                                             {
                                                 server.filesystem.set_permissions(
                                                     destination_path,
@@ -231,7 +232,7 @@ mod post {
                                                 crate::server::filesystem::writer::FileSystemWriter::new(
                                                     server.clone(),
                                                     destination_path,
-                                                    header.mode().map(Permissions::from_mode).ok(),
+                                                    header.mode().map(Permissions::from_portable_mode).ok(),
                                                     header
                                                         .mtime()
                                                         .map(|t| {
