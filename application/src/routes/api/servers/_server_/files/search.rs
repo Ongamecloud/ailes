@@ -269,7 +269,7 @@ mod post {
                                             };
                                         let mut reader = BufReader::new(file_read.reader);
                                         let buffer = match reader.fill_buf().await {
-                                            Ok(buffer) => buffer[..64].to_vec(),
+                                            Ok(buffer) => buffer[..buffer.len().min(64)].to_vec(),
                                             Err(_) => return Ok(()),
                                         };
 
