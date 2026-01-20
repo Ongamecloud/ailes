@@ -187,7 +187,7 @@ mod post {
                                     reader,
                                     TransferArchiveFormat::from_str(&file_name)
                                         .map_or(CompressionType::Gz, |f| f.compression_format()),
-                                );
+                                )?;
 
                                 let mut archive = tar::Archive::new(reader);
                                 let mut directory_entries = chunked_vec::ChunkedVec::new();

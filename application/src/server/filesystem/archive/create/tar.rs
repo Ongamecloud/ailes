@@ -41,7 +41,7 @@ pub async fn create_tar<W: Write + Send + 'static>(
             options.compression_type,
             options.compression_level,
             options.threads,
-        );
+        )?;
         let writer = AbortWriter::new(writer, listener);
         let mut archive = tar::Builder::new(writer);
 
@@ -198,7 +198,7 @@ pub async fn create_tar_distributed<W: Write + Send + 'static>(
             options.compression_type,
             options.compression_level,
             options.threads,
-        );
+        )?;
         let writer = AbortWriter::new(writer, listener);
         let mut archive = tar::Builder::new(writer);
 

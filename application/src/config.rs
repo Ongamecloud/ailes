@@ -975,37 +975,7 @@ impl Config {
                 .finish(),
         )?;
 
-        if config.api.send_offline_server_logs && config.docker.delete_container_on_stop {
-            tracing::warn!(
-                "you have enabled sending offline server logs, but also deleting containers on stop. This will result in no logs being sent for stopped servers."
-            );
-        }
-        if matches!(
-            config.system.disk_limiter_mode,
-            crate::server::filesystem::limiter::DiskLimiterMode::FuseQuota
-        ) && !config.docker.delete_container_on_stop
-        {
-            tracing::warn!(
-                "you have enabled FUSE quota disk limiting, but also disabled deleting containers on stop. This can cause issues if you try manually starting things. this setup is not recommended."
-            );
-        }
-        if matches!(
-            config.system.disk_limiter_mode,
-            crate::server::filesystem::limiter::DiskLimiterMode::FuseQuota
-        ) && std::env::var("OCI_CONTAINER").is_ok()
-        {
-            for _ in 0..5 {
-                tracing::error!(
-                    "you have enabled FUSE quota disk limiting while running in a container. this setup is NOT recommended and WILL cause issues when the container recreates."
-                );
-            }
-
-            tracing::info!("waiting 10 seconds to allow you to read the above message...");
-            if std::env::var("ALLOW_FUSE_QUOTA_CONTAINER_USAGE").is_err() {
-                std::thread::sleep(std::time::Duration::from_secs(10));
-            }
-            tracing::warn!("you are treading on thin ice. proceed at your own risk.");
-        }
+        config.validate()?;
 
         Ok((Arc::new(config), guard))
     }
@@ -1024,6 +994,8 @@ impl Config {
     }
 
     pub fn save(&self) -> Result<(), anyhow::Error> {
+        self.validate()?;
+
         let file = File::create(&self.path)
             .context(format!("failed to create config file {}", self.path))?;
         let writer = std::io::BufWriter::new(file);
@@ -1057,6 +1029,70 @@ impl Config {
         }
 
         connect_info.ip()
+    }
+
+    pub fn validate(&self) -> Result<(), anyhow::Error> {
+        if self.api.send_offline_server_logs && self.docker.delete_container_on_stop {
+            tracing::warn!(
+                "you have enabled sending offline server logs, but also deleting containers on stop. This will result in no logs being sent for stopped servers."
+            );
+        }
+        if matches!(
+            self.system.disk_limiter_mode,
+            crate::server::filesystem::limiter::DiskLimiterMode::FuseQuota
+        ) && !self.docker.delete_container_on_stop
+        {
+            tracing::warn!(
+                "you have enabled FUSE quota disk limiting, but also disabled deleting containers on stop. This can cause issues if you try manually starting things. this setup is not recommended."
+            );
+        }
+        if matches!(
+            self.system.disk_limiter_mode,
+            crate::server::filesystem::limiter::DiskLimiterMode::FuseQuota
+        ) && std::env::var("OCI_CONTAINER").is_ok()
+        {
+            for _ in 0..5 {
+                tracing::error!(
+                    "you have enabled FUSE quota disk limiting while running in a container. this setup is NOT recommended and WILL cause issues when the container recreates."
+                );
+            }
+
+            tracing::info!("waiting 10 seconds to allow you to read the above message...");
+            if std::env::var("ALLOW_FUSE_QUOTA_CONTAINER_USAGE").is_err() {
+                std::thread::sleep(std::time::Duration::from_secs(10));
+            }
+            tracing::warn!("you are treading on thin ice. proceed at your own risk.");
+        }
+
+        // Do not allow directory paths with less than 1 segment (e.g. "/")
+        const MIN_DIRECTORY_SEGMENTS: usize = 1;
+        let directories = vec![
+            (&self.system.root_directory, "root_directory"),
+            (&self.system.log_directory, "log_directory"),
+            (&self.system.vmount_directory, "vmount_directory"),
+            (&self.system.data_directory, "data_directory"),
+            (&self.system.archive_directory, "archive_directory"),
+            (&self.system.backup_directory, "backup_directory"),
+            (&self.system.tmp_directory, "tmp_directory"),
+        ];
+
+        for (dir, name) in directories {
+            let path = std::path::Path::new(dir);
+            let segments = path
+                .components()
+                .filter(|c| matches!(c, std::path::Component::Normal(_)))
+                .count();
+            if segments < MIN_DIRECTORY_SEGMENTS {
+                return Err(anyhow::anyhow!(
+                    "the {} '{}' must have at least {} segment(s)",
+                    name,
+                    dir,
+                    MIN_DIRECTORY_SEGMENTS
+                ));
+            }
+        }
+
+        Ok(())
     }
 
     #[allow(clippy::mut_from_ref)]

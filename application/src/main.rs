@@ -4,6 +4,7 @@ use axum::{
     extract::Request,
     http::{HeaderMap, HeaderValue, Method, Response, StatusCode},
     middleware::Next,
+    response::IntoResponse,
 };
 use clap::{Arg, Command};
 use colored::Colorize;
@@ -205,10 +206,13 @@ async fn handle_cors(
     }
 
     if !headers.contains_key("Access-Control-Allow-Origin") {
-        headers.insert(
-            "Access-Control-Allow-Origin",
-            state.config.remote.parse().unwrap(),
-        );
+        if let Ok(origin) = state.config.remote.parse() {
+            headers.insert("Access-Control-Allow-Origin", origin);
+        } else {
+            return Ok(ApiResponse::error("invalid remote URL configured")
+                .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+                .into_response());
+        }
     }
 
     if method == Method::OPTIONS {

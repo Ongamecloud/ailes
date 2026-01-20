@@ -1,6 +1,6 @@
 use crate::{
     io::{
-        compression::reader::CompressionReader, counting_reader::CountingReader,
+        compression::reader::CompressionReaderMt, counting_reader::CountingReader,
         limited_reader::LimitedReader, limited_writer::LimitedWriter,
         range_reader::AsyncRangeReader,
     },
@@ -350,7 +350,11 @@ impl BackupExt for WingsBackup {
                         server.app_state.config.system.backups.read_limit * 1024 * 1024,
                     );
                     let reader = CountingReader::new_with_bytes_read(reader, progress);
-                    let reader = CompressionReader::new(reader, compression_type);
+                    let reader = CompressionReaderMt::new(
+                        reader,
+                        compression_type,
+                        server.app_state.config.api.file_decompression_threads,
+                    )?;
 
                     let mut archive = tar::Archive::new(reader);
                     let mut directory_entries = Vec::new();

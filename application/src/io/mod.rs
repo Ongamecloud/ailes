@@ -15,9 +15,6 @@ pub mod limited_reader;
 pub mod limited_writer;
 pub mod range_reader;
 
-pub trait ReadSeek: Read + std::io::Seek {}
-impl<T: Read + std::io::Seek> ReadSeek for T {}
-
 pub fn copy(
     reader: &mut (impl ?Sized + Read),
     writer: &mut (impl ?Sized + Write),
@@ -113,6 +110,10 @@ pub trait WriteSeek: Write + std::io::Seek {}
 impl<T: Write + std::io::Seek> WriteSeek for T {}
 pub trait AsyncWriteSeek: tokio::io::AsyncWrite + tokio::io::AsyncSeek + Unpin {}
 impl<T: tokio::io::AsyncWrite + tokio::io::AsyncSeek + Unpin> AsyncWriteSeek for T {}
+pub trait ReadSeek: Read + std::io::Seek {}
+impl<T: Read + std::io::Seek> ReadSeek for T {}
+pub trait AsyncReadSeek: tokio::io::AsyncRead + tokio::io::AsyncSeek + Unpin {}
+impl<T: tokio::io::AsyncRead + tokio::io::AsyncSeek + Unpin> AsyncReadSeek for T {}
 pub trait ReadWriteSeek: Read + Write + std::io::Seek {}
 impl<T: Read + Write + std::io::Seek> ReadWriteSeek for T {}
 pub trait AsyncReadWriteSeek:

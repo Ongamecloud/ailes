@@ -23,78 +23,63 @@ impl<'a, W: Write + Send + 'static> CompressionWriter<'a, W> {
         compression_type: CompressionType,
         compression_level: CompressionLevel,
         threads: usize,
-    ) -> Self {
-        match compression_type {
+    ) -> Result<Self, anyhow::Error> {
+        Ok(match compression_type {
             CompressionType::None => CompressionWriter::None(writer),
             CompressionType::Gz => CompressionWriter::Gz(
                 gzp::par::compress::ParCompressBuilder::new()
-                    .num_threads(threads)
-                    .unwrap()
+                    .num_threads(threads)?
                     .compression_level(gzp::Compression::new(compression_level.to_deflate_level()))
                     .from_writer(writer),
             ),
             CompressionType::Xz => CompressionWriter::Xz(
                 0,
-                Box::new(
-                    lzma_rust2::XzWriterMt::new(
-                        writer,
-                        {
-                            let mut options =
-                                lzma_rust2::XzOptions::with_preset(compression_level.to_xz_level());
-                            options.set_block_size(Some(
-                                std::num::NonZeroU64::new(32 * 1024).unwrap(),
-                            ));
+                Box::new(lzma_rust2::XzWriterMt::new(
+                    writer,
+                    {
+                        let mut options =
+                            lzma_rust2::XzOptions::with_preset(compression_level.to_xz_level());
+                        options.set_block_size(Some(std::num::NonZeroU64::new(32 * 1024).unwrap()));
 
-                            options
-                        },
-                        threads as u32,
-                    )
-                    .unwrap(),
-                ),
+                        options
+                    },
+                    threads as u32,
+                )?),
             ),
             CompressionType::Lzip => CompressionWriter::Lzip(
                 0,
-                Box::new(
-                    lzma_rust2::LzipWriterMt::new(
-                        writer,
-                        {
-                            let mut options = lzma_rust2::LzipOptions::with_preset(
-                                compression_level.to_lzip_level(),
-                            );
-                            options.set_member_size(Some(
-                                std::num::NonZeroU64::new(32 * 1024).unwrap(),
-                            ));
+                Box::new(lzma_rust2::LzipWriterMt::new(
+                    writer,
+                    {
+                        let mut options =
+                            lzma_rust2::LzipOptions::with_preset(compression_level.to_lzip_level());
+                        options
+                            .set_member_size(Some(std::num::NonZeroU64::new(32 * 1024).unwrap()));
 
-                            options
-                        },
-                        threads as u32,
-                    )
-                    .unwrap(),
-                ),
+                        options
+                    },
+                    threads as u32,
+                )?),
             ),
             CompressionType::Bz2 => CompressionWriter::Bz2(bzip2::write::BzEncoder::new(
                 writer,
                 bzip2::Compression::new(compression_level.to_bz2_level()),
             )),
-            CompressionType::Lz4 => CompressionWriter::Lz4(
-                lzzzz::lz4f::WriteCompressor::new(
-                    writer,
-                    lzzzz::lz4f::PreferencesBuilder::new()
-                        .compression_level(compression_level.to_lz4_level())
-                        .build(),
-                )
-                .unwrap(),
-            ),
+            CompressionType::Lz4 => CompressionWriter::Lz4(lzzzz::lz4f::WriteCompressor::new(
+                writer,
+                lzzzz::lz4f::PreferencesBuilder::new()
+                    .compression_level(compression_level.to_lz4_level())
+                    .build(),
+            )?),
             CompressionType::Zstd => CompressionWriter::Zstd(0, threads > 1, {
-                let mut encoder =
-                    zstd::Encoder::new(writer, compression_level.to_zstd_level()).unwrap();
+                let mut encoder = zstd::Encoder::new(writer, compression_level.to_zstd_level())?;
                 if threads > 1 {
                     encoder.multithread(threads as u32).ok();
                 }
 
                 encoder
             }),
-        }
+        })
     }
 
     pub fn finish(self) -> std::io::Result<W> {
@@ -186,8 +171,18 @@ impl AsyncCompressionWriter {
 
         tokio::task::spawn_blocking(move || {
             let mut reader = tokio_util::io::SyncIoBridge::new(inner_reader);
-            let mut stream =
-                CompressionWriter::new(writer, compression_type, compression_level, threads);
+            let mut stream = match CompressionWriter::new(
+                writer,
+                compression_type,
+                compression_level,
+                threads,
+            ) {
+                Ok(stream) => stream,
+                Err(err) => {
+                    let _ = inner_error_sender.send(std::io::Error::other(err));
+                    return;
+                }
+            };
 
             match crate::io::copy(&mut reader, &mut stream) {
                 Ok(_) => {}

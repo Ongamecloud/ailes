@@ -38,9 +38,10 @@ mod get {
         };
 
         let reader: Box<dyn AsyncRead + Send + Unpin> = if file_path.ends_with(".gz") {
-            Box::new(AsyncCompressionReader::new(
+            Box::new(AsyncCompressionReader::new_mt(
                 file.into_std().await,
                 crate::io::compression::CompressionType::Gz,
+                state.config.api.file_decompression_threads,
             ))
         } else {
             Box::new(file)

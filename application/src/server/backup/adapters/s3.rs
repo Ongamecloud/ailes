@@ -425,7 +425,10 @@ impl BackupExt for S3Backup {
                 server.app_state.config.system.backups.read_limit * 1024 * 1024,
             );
             let reader = CountingReader::new_with_bytes_read(reader, progress);
-            let reader = CompressionReader::new(reader, CompressionType::Gz);
+            let reader = CompressionReader::new(
+                reader,
+                CompressionType::Gz,
+            )?;
 
             let mut archive = tar::Archive::new(reader);
             let mut directory_entries = Vec::new();

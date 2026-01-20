@@ -1,6 +1,6 @@
 use super::CompressionType;
 use std::{
-    io::Read,
+    io::{Read, Seek},
     pin::Pin,
     task::{Context, Poll},
 };
@@ -17,8 +17,8 @@ pub enum CompressionReader<'a, R: Read> {
 }
 
 impl<'a, R: Read> CompressionReader<'a, R> {
-    pub fn new(reader: R, compression_type: CompressionType) -> Self {
-        match compression_type {
+    pub fn new(reader: R, compression_type: CompressionType) -> Result<Self, anyhow::Error> {
+        Ok(match compression_type {
             CompressionType::None => CompressionReader::None(reader),
             CompressionType::Gz => CompressionReader::Gz(flate2::read::MultiGzDecoder::new(reader)),
             CompressionType::Xz => {
@@ -31,10 +31,10 @@ impl<'a, R: Read> CompressionReader<'a, R> {
                 CompressionReader::Bz2(bzip2::read::MultiBzDecoder::new(reader))
             }
             CompressionType::Lz4 => {
-                CompressionReader::Lz4(lzzzz::lz4f::ReadDecompressor::new(reader).unwrap())
+                CompressionReader::Lz4(lzzzz::lz4f::ReadDecompressor::new(reader)?)
             }
-            CompressionType::Zstd => CompressionReader::Zstd(zstd::Decoder::new(reader).unwrap()),
-        }
+            CompressionType::Zstd => CompressionReader::Zstd(zstd::Decoder::new(reader)?),
+        })
     }
 
     pub fn into_inner(self) -> R {
@@ -65,6 +65,59 @@ impl<'a, R: Read> Read for CompressionReader<'a, R> {
     }
 }
 
+pub enum CompressionReaderMt<'a, R: Read + Seek> {
+    None(R),
+    Gz(flate2::read::MultiGzDecoder<R>),
+    XzMt(Box<lzma_rust2::XzReaderMt<R>>),
+    LzipMt(lzma_rust2::LzipReaderMt<R>),
+    Bz2(bzip2::read::MultiBzDecoder<R>),
+    Lz4(lzzzz::lz4f::ReadDecompressor<'a, R>),
+    Zstd(zstd::Decoder<'a, std::io::BufReader<R>>),
+}
+
+impl<'a, R: Read + Seek> CompressionReaderMt<'a, R> {
+    pub fn new(
+        reader: R,
+        compression_type: CompressionType,
+        threads: usize,
+    ) -> Result<Self, anyhow::Error> {
+        Ok(match compression_type {
+            CompressionType::None => CompressionReaderMt::None(reader),
+            CompressionType::Gz => {
+                CompressionReaderMt::Gz(flate2::read::MultiGzDecoder::new(reader))
+            }
+            CompressionType::Xz => CompressionReaderMt::XzMt(Box::new(
+                lzma_rust2::XzReaderMt::new(reader, true, threads as u32)?,
+            )),
+            CompressionType::Lzip => {
+                CompressionReaderMt::LzipMt(lzma_rust2::LzipReaderMt::new(reader, threads as u32)?)
+            }
+            CompressionType::Bz2 => {
+                CompressionReaderMt::Bz2(bzip2::read::MultiBzDecoder::new(reader))
+            }
+            CompressionType::Lz4 => {
+                CompressionReaderMt::Lz4(lzzzz::lz4f::ReadDecompressor::new(reader)?)
+            }
+            CompressionType::Zstd => CompressionReaderMt::Zstd(zstd::Decoder::new(reader)?),
+        })
+    }
+}
+
+impl<'a, R: Read + Seek> Read for CompressionReaderMt<'a, R> {
+    #[inline]
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            CompressionReaderMt::None(reader) => reader.read(buf),
+            CompressionReaderMt::Gz(decoder) => decoder.read(buf),
+            CompressionReaderMt::XzMt(decoder) => decoder.read(buf),
+            CompressionReaderMt::LzipMt(decoder) => decoder.read(buf),
+            CompressionReaderMt::Bz2(decoder) => decoder.read(buf),
+            CompressionReaderMt::Lz4(decoder) => decoder.read(buf),
+            CompressionReaderMt::Zstd(decoder) => decoder.read(buf),
+        }
+    }
+}
+
 pub struct AsyncCompressionReader {
     inner_error_receiver: tokio::sync::oneshot::Receiver<std::io::Error>,
     inner_reader: tokio::io::DuplexStream,
@@ -77,7 +130,45 @@ impl AsyncCompressionReader {
 
         tokio::task::spawn_blocking(move || {
             let mut writer = tokio_util::io::SyncIoBridge::new(inner_writer);
-            let mut stream = CompressionReader::new(reader, compression_type);
+            let mut stream = match CompressionReader::new(reader, compression_type) {
+                Ok(stream) => stream,
+                Err(err) => {
+                    let _ = inner_error_sender.send(std::io::Error::other(err));
+                    return;
+                }
+            };
+
+            match crate::io::copy(&mut stream, &mut writer) {
+                Ok(_) => {}
+                Err(err) => {
+                    let _ = inner_error_sender.send(err);
+                }
+            }
+        });
+
+        Self {
+            inner_error_receiver,
+            inner_reader,
+        }
+    }
+
+    pub fn new_mt(
+        reader: impl Read + Seek + Send + 'static,
+        compression_type: CompressionType,
+        threads: usize,
+    ) -> Self {
+        let (inner_reader, inner_writer) = tokio::io::duplex(crate::BUFFER_SIZE * 4);
+        let (inner_error_sender, inner_error_receiver) = tokio::sync::oneshot::channel();
+
+        tokio::task::spawn_blocking(move || {
+            let mut writer = tokio_util::io::SyncIoBridge::new(inner_writer);
+            let mut stream = match CompressionReaderMt::new(reader, compression_type, threads) {
+                Ok(stream) => stream,
+                Err(err) => {
+                    let _ = inner_error_sender.send(std::io::Error::other(err));
+                    return;
+                }
+            };
 
             match crate::io::copy(&mut stream, &mut writer) {
                 Ok(_) => {}

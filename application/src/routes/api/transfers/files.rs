@@ -177,8 +177,8 @@ mod post {
                                         let reader = CompressionReader::new(
                                             reader,
                                             TransferArchiveFormat::from_str(&file_name)
-                                                .map_or(CompressionType::Gz, |f| f.compression_format())
-                                        );
+                                                .map_or(CompressionType::Gz, |f| f.compression_format()),
+                                        )?;
 
                                         let mut archive = tar::Archive::new(reader);
                                         archive.set_ignore_zeros(true);

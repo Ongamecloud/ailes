@@ -656,7 +656,7 @@ impl BackupExt for ResticBackup {
                         archive_format.compression_format(),
                         compression_level,
                         file_compression_threads,
-                    );
+                    )?;
 
                     if let Err(err) = crate::io::copy(&mut child.stdout.unwrap(), &mut writer) {
                         tracing::error!(
@@ -1339,7 +1339,7 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
                         archive_format.compression_format(),
                         compression_level,
                         file_compression_threads,
-                    );
+                    )?;
 
                     let mut subtar = tar::Archive::new(child.stdout.take().unwrap());
                     let mut entries = subtar.entries()?;

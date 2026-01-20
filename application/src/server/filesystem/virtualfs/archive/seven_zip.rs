@@ -927,7 +927,7 @@ impl VirtualReadableFilesystem for VirtualSevenZipArchive {
                     archive_format.compression_format(),
                     compression_level,
                     self.server.app_state.config.api.file_compression_threads,
-                );
+                )?;
 
                 crate::spawn_blocking_handled(move || -> Result<(), anyhow::Error> {
                     let mut tar = tar::Builder::new(writer);

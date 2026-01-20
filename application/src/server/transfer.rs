@@ -645,8 +645,6 @@ impl OutgoingServerTransfer {
 
             Self::log(&server, "Finished streaming archive to destination.");
 
-            crate::server::installation::ServerInstaller::delete_install_logs(&server).await;
-
             if delete_backups {
                 for backup in backups {
                     match backup_manager.find(backup).await {

@@ -698,7 +698,15 @@ impl Server {
     > {
         let container = match &*self.container.read().await {
             Some(container) => container.docker_id.clone(),
-            None => return Box::new(futures::stream::empty()),
+            None => {
+                return Box::new(futures::stream::empty())
+                    as Box<
+                        dyn futures::Stream<
+                                Item = Result<compact_str::CompactString, anyhow::Error>,
+                            > + Unpin
+                            + Send,
+                    >;
+            }
         };
 
         let logs_stream = self.app_state.docker.logs(
@@ -1450,6 +1458,8 @@ impl Server {
             .await
             .remove_vmounts(&self.app_state.config)
             .await;
+
+        crate::server::installation::ServerInstaller::delete_install_logs(self).await;
 
         tokio::spawn({
             let server = self.clone();

@@ -1,9 +1,10 @@
 use crate::{
     io::{
+        ReadSeek,
         abort::{AbortGuard, AbortListener, AbortReader, AbortWriter},
         compression::{
             CompressionType,
-            reader::{AsyncCompressionReader, CompressionReader},
+            reader::{AsyncCompressionReader, CompressionReaderMt},
         },
         counting_reader::CountingReader,
         counting_writer::CountingWriter,
@@ -379,9 +380,10 @@ impl Archive {
     pub async fn reader(mut self) -> Result<AsyncCompressionReader, anyhow::Error> {
         self.file.seek(SeekFrom::Start(0)).await?;
 
-        Ok(AsyncCompressionReader::new(
+        Ok(AsyncCompressionReader::new_mt(
             self.file.into_std().await,
             self.compression,
+            self.server.app_state.config.api.file_decompression_threads,
         ))
     }
 
@@ -406,14 +408,18 @@ impl Archive {
                 let (guard, listener) = AbortGuard::new();
 
                 tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
-                    let reader = CompressionReader::new(file, self.compression);
-                    let reader = AbortReader::new(reader, listener);
-                    let mut reader: Box<dyn Read> = match progress {
+                    let reader: Box<dyn ReadSeek> = match progress {
                         Some(progress) => {
-                            Box::new(CountingReader::new_with_bytes_read(reader, progress))
+                            Box::new(CountingReader::new_with_bytes_read(file, progress))
                         }
-                        None => Box::new(reader),
+                        None => Box::new(file),
                     };
+                    let reader = CompressionReaderMt::new(
+                        reader,
+                        self.compression,
+                        self.server.app_state.config.api.file_decompression_threads,
+                    )?;
+                    let mut reader = AbortReader::new(reader, listener);
 
                     let mut writer = super::writer::FileSystemWriter::new(
                         self.server.clone(),
@@ -436,13 +442,17 @@ impl Archive {
                 let (guard, listener) = AbortGuard::new();
 
                 tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
-                    let reader: Box<dyn Read> = match progress {
+                    let reader: Box<dyn ReadSeek> = match progress {
                         Some(progress) => {
                             Box::new(CountingReader::new_with_bytes_read(file, progress))
                         }
                         None => Box::new(file),
                     };
-                    let reader = CompressionReader::new(reader, self.compression);
+                    let reader = CompressionReaderMt::new(
+                        reader,
+                        self.compression,
+                        self.server.app_state.config.api.file_decompression_threads,
+                    )?;
                     let reader = AbortReader::new(reader, listener);
 
                     if let Some(total) = total

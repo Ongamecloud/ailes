@@ -6,7 +6,7 @@ use std::{
     },
     task::{Context, Poll},
 };
-use tokio::io::AsyncRead;
+use tokio::io::{AsyncRead, AsyncSeek};
 
 pub struct CountingReader<R: std::io::Read> {
     inner: R,
@@ -32,6 +32,13 @@ impl<R: std::io::Read> std::io::Read for CountingReader<R> {
             .fetch_add(bytes_read as u64, Ordering::Relaxed);
 
         Ok(bytes_read)
+    }
+}
+
+impl<R: std::io::Read + std::io::Seek> std::io::Seek for CountingReader<R> {
+    #[inline]
+    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.inner.seek(pos)
     }
 }
 
@@ -65,5 +72,15 @@ impl<R: AsyncRead + Unpin> AsyncRead for AsyncCountingReader<R> {
         }
 
         poll_result
+    }
+}
+
+impl<R: AsyncRead + AsyncSeek + Unpin> AsyncSeek for AsyncCountingReader<R> {
+    fn start_seek(self: Pin<&mut Self>, position: std::io::SeekFrom) -> std::io::Result<()> {
+        Pin::new(&mut self.get_mut().inner).start_seek(position)
+    }
+
+    fn poll_complete(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<u64>> {
+        Pin::new(&mut self.get_mut().inner).poll_complete(cx)
     }
 }
