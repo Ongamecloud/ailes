@@ -193,6 +193,7 @@ remote_query:
 - `POST /api/system/upgrade` api endpoint for remotely upgrading the wings binary
 - `POST /api/servers/{server}/script` api endpoint for running custom scripts async on the server
 - `POST /api/servers/{server}/ws/permissions` api endpoint for live updating user permissions on a server
+- `POST /api/servers/{server}/ws/broadcast` api endpoint for broadcasting a websocket message to multiple users
 - `POST /api/servers/{server}/install/abort` api endpoint for aborting a server installation process
 - `GET /api/servers/{server}/logs/install` api endpoint for getting server installation logs
 - `GET /api/servers/{server}/version` api endpoint for getting a version hash for a server

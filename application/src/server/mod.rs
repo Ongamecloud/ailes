@@ -38,6 +38,10 @@ pub struct InnerServer {
     // Dummy receiver to avoid channel being closed
     _websocket_receiver: tokio::sync::broadcast::Receiver<websocket::WebsocketMessage>,
     websocket_sender: RwLock<Option<tokio::task::JoinHandle<()>>>,
+    pub targeted_websocket: tokio::sync::broadcast::Sender<websocket::TargetedWebsocketMessage>,
+    // Dummy receiver to avoid channel being closed
+    _targeted_websocket_receiver:
+        tokio::sync::broadcast::Receiver<websocket::TargetedWebsocketMessage>,
 
     pub container: RwLock<Option<Arc<container::Container>>>,
     pub schedules: Arc<schedule::manager::ScheduleManager>,
@@ -76,13 +80,14 @@ impl Server {
             "creating server instance"
         );
 
-        let (tx, rx) = tokio::sync::broadcast::channel(128);
+        let (websocket_tx, websocket_rx) = tokio::sync::broadcast::channel(128);
+        let (targeted_websocket_tx, targeted_websocket_rx) = tokio::sync::broadcast::channel(128);
 
         let filesystem = filesystem::Filesystem::new(
             configuration.uuid,
             app_state.clone(),
             configuration.build.disk_space * 1024 * 1024,
-            tx.clone(),
+            websocket_tx.clone(),
             Arc::clone(&app_state.config),
             &configuration.egg.file_denylist,
         );
@@ -99,15 +104,17 @@ impl Server {
             configuration: RwLock::new(configuration),
             process_configuration: RwLock::new(process_configuration),
 
-            websocket: tx.clone(),
-            _websocket_receiver: rx,
+            websocket: websocket_tx.clone(),
+            _websocket_receiver: websocket_rx,
             websocket_sender: RwLock::new(None),
+            targeted_websocket: targeted_websocket_tx,
+            _targeted_websocket_receiver: targeted_websocket_rx,
 
             container: RwLock::new(None),
             schedules: Arc::clone(&schedules),
             activity,
 
-            state: state::ServerStateLock::new(tx, schedules),
+            state: state::ServerStateLock::new(websocket_tx, schedules),
             outgoing_transfer: RwLock::new(None),
             incoming_transfer: RwLock::new(None),
             installer: RwLock::new(None),

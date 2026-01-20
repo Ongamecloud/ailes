@@ -151,89 +151,130 @@ pub async fn handle_ws(
             {
                 let socket_jwt = Arc::clone(&socket_jwt);
                 let websocket_handler = Arc::clone(&websocket_handler);
-                let mut reciever = server.websocket.subscribe();
+                let mut receiver = server.websocket.subscribe();
+                let mut targeted_receiver = server.targeted_websocket.subscribe();
                 let server = server.clone();
 
                 Box::pin(async move {
                     loop {
-                        match reciever.recv().await {
-                            Ok(message) => {
-                                let socket_jwt = socket_jwt.read().await;
-                                let socket_jwt = match socket_jwt.as_ref() {
-                                    Some(jwt) => jwt,
-                                    None => {
+                        tokio::select! {
+                            data = receiver.recv() => {
+                                match data {
+                                    Ok(message) => {
+                                        let socket_jwt = socket_jwt.read().await;
+                                        let socket_jwt = match socket_jwt.as_ref() {
+                                            Some(jwt) => jwt,
+                                            None => {
+                                                tracing::debug!(
+                                                    server = %server.uuid,
+                                                    "no socket jwt found, ignoring websocket message",
+                                                );
+                                                continue;
+                                            }
+                                        };
+
+                                        match message.event {
+                                            websocket::WebsocketEvent::ServerInstallOutput => {
+                                                if !socket_jwt
+                                                    .permissions
+                                                    .has_permission(Permission::AdminWebsocketInstall)
+                                                {
+                                                    continue;
+                                                }
+                                            }
+                                            websocket::WebsocketEvent::ServerOperationProgress
+                                            | websocket::WebsocketEvent::ServerOperationCompleted => {
+                                                if !socket_jwt
+                                                    .permissions
+                                                    .has_permission(Permission::FileRead)
+                                                {
+                                                    continue;
+                                                }
+                                            }
+                                            websocket::WebsocketEvent::ServerBackupStarted
+                                            | websocket::WebsocketEvent::ServerBackupProgress
+                                            | websocket::WebsocketEvent::ServerBackupCompleted => {
+                                                if !socket_jwt
+                                                    .permissions
+                                                    .has_permission(Permission::BackupRead)
+                                                {
+                                                    continue;
+                                                }
+                                            }
+                                            websocket::WebsocketEvent::ServerScheduleStarted
+                                            | websocket::WebsocketEvent::ServerScheduleStepStatus
+                                            | websocket::WebsocketEvent::ServerScheduleStepError
+                                            | websocket::WebsocketEvent::ServerScheduleCompleted => {
+                                                if !socket_jwt
+                                                    .permissions
+                                                    .has_permission(Permission::ScheduleRead)
+                                                {
+                                                    continue;
+                                                }
+                                            }
+                                            websocket::WebsocketEvent::ServerTransferLogs => {
+                                                if !socket_jwt
+                                                    .permissions
+                                                    .has_permission(Permission::AdminWebsocketTransfer)
+                                                {
+                                                    continue;
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+
+                                        websocket_handler.send_message(message).await
+                                    }
+                                    Err(RecvError::Closed) => {
                                         tracing::debug!(
                                             server = %server.uuid,
-                                            "no socket jwt found, ignoring websocket message",
+                                            "websocket channel closed, stopping listener"
                                         );
-                                        continue;
+                                        break;
                                     }
-                                };
-
-                                match message.event {
-                                    websocket::WebsocketEvent::ServerInstallOutput => {
-                                        if !socket_jwt
-                                            .permissions
-                                            .has_permission(Permission::AdminWebsocketInstall)
-                                        {
-                                            continue;
-                                        }
+                                    Err(RecvError::Lagged(_)) => {
+                                        tracing::debug!(
+                                            server = %server.uuid,
+                                            "websocket lagged behind, messages dropped"
+                                        );
                                     }
-                                    websocket::WebsocketEvent::ServerOperationProgress
-                                    | websocket::WebsocketEvent::ServerOperationCompleted => {
-                                        if !socket_jwt
-                                            .permissions
-                                            .has_permission(Permission::FileRead)
-                                        {
-                                            continue;
-                                        }
-                                    }
-                                    websocket::WebsocketEvent::ServerBackupStarted
-                                    | websocket::WebsocketEvent::ServerBackupProgress
-                                    | websocket::WebsocketEvent::ServerBackupCompleted => {
-                                        if !socket_jwt
-                                            .permissions
-                                            .has_permission(Permission::BackupRead)
-                                        {
-                                            continue;
-                                        }
-                                    }
-                                    websocket::WebsocketEvent::ServerScheduleStarted
-                                    | websocket::WebsocketEvent::ServerScheduleStepStatus
-                                    | websocket::WebsocketEvent::ServerScheduleStepError
-                                    | websocket::WebsocketEvent::ServerScheduleCompleted => {
-                                        if !socket_jwt
-                                            .permissions
-                                            .has_permission(Permission::ScheduleRead)
-                                        {
-                                            continue;
-                                        }
-                                    }
-                                    websocket::WebsocketEvent::ServerTransferLogs => {
-                                        if !socket_jwt
-                                            .permissions
-                                            .has_permission(Permission::AdminWebsocketTransfer)
-                                        {
-                                            continue;
-                                        }
-                                    }
-                                    _ => {}
                                 }
+                            }
+                            data = targeted_receiver.recv() => {
+                                match data {
+                                    Ok(message) => {
+                                        let socket_jwt = socket_jwt.read().await;
+                                        let socket_jwt = match socket_jwt.as_ref() {
+                                            Some(jwt) => jwt,
+                                            None => {
+                                                tracing::debug!(
+                                                    server = %server.uuid,
+                                                    "no socket jwt found, ignoring targeted websocket message",
+                                                );
+                                                continue;
+                                            }
+                                        };
 
-                                websocket_handler.send_message(message).await
-                            }
-                            Err(RecvError::Closed) => {
-                                tracing::debug!(
-                                    server = %server.uuid,
-                                    "websocket channel closed, stopping listener"
-                                );
-                                break;
-                            }
-                            Err(RecvError::Lagged(_)) => {
-                                tracing::debug!(
-                                    server = %server.uuid,
-                                    "websocket lagged behind, messages dropped"
-                                );
+                                        if message.matches(&socket_jwt.user_uuid, &socket_jwt.permissions) {
+                                            websocket_handler.send_message(
+                                                message.into_message()
+                                            ).await;
+                                        }
+                                    }
+                                    Err(RecvError::Closed) => {
+                                        tracing::debug!(
+                                            server = %server.uuid,
+                                            "targeted websocket channel closed, stopping listener"
+                                        );
+                                        break;
+                                    }
+                                    Err(RecvError::Lagged(_)) => {
+                                        tracing::debug!(
+                                            server = %server.uuid,
+                                            "targeted websocket lagged behind, messages dropped"
+                                        );
+                                    }
+                                }
                             }
                         }
                     }

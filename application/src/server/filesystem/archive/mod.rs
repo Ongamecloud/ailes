@@ -408,7 +408,7 @@ impl Archive {
                 let (guard, listener) = AbortGuard::new();
 
                 tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
-                    let reader: Box<dyn ReadSeek> = match progress {
+                    let reader: Box<dyn ReadSeek + Send> = match progress {
                         Some(progress) => {
                             Box::new(CountingReader::new_with_bytes_read(file, progress))
                         }
@@ -442,7 +442,7 @@ impl Archive {
                 let (guard, listener) = AbortGuard::new();
 
                 tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
-                    let reader: Box<dyn ReadSeek> = match progress {
+                    let reader: Box<dyn ReadSeek + Send> = match progress {
                         Some(progress) => {
                             Box::new(CountingReader::new_with_bytes_read(file, progress))
                         }

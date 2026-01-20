@@ -8,6 +8,7 @@ use serde::{
 };
 use std::{
     borrow::Cow,
+    collections::HashSet,
     marker::PhantomData,
     sync::{
         Arc,
@@ -15,6 +16,7 @@ use std::{
     },
 };
 use tokio::sync::{Mutex, RwLock};
+use utoipa::ToSchema;
 
 pub mod handler;
 mod jwt;
@@ -33,7 +35,7 @@ pub struct WebsocketJwtPayload {
     pub use_console_read_permission: bool,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, ToSchema, Deserialize, Serialize)]
 pub enum WebsocketEvent {
     #[serde(rename = "auth success")]
     AuthenticationSuccess,
@@ -65,6 +67,8 @@ pub enum WebsocketEvent {
     ServerStats,
     #[serde(rename = "status")]
     ServerStatus,
+    #[serde(rename = "custom event")]
+    ServerCustomEvent,
     #[serde(rename = "console output")]
     ServerConsoleOutput,
     #[serde(rename = "install output")]
@@ -111,12 +115,47 @@ pub enum WebsocketEvent {
     ServerOperationCompleted,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone)]
+pub struct TargetedWebsocketMessage {
+    user_uuids: Arc<HashSet<uuid::Uuid>>,
+    permissions: Arc<Permissions>,
+    message: WebsocketMessage,
+}
+
+impl TargetedWebsocketMessage {
+    pub fn new(
+        user_uuids: HashSet<uuid::Uuid>,
+        permissions: Permissions,
+        message: WebsocketMessage,
+    ) -> Self {
+        Self {
+            user_uuids: Arc::new(user_uuids),
+            permissions: Arc::new(permissions),
+            message,
+        }
+    }
+
+    pub fn matches(&self, user_uuid: &uuid::Uuid, permissions: &Permissions) -> bool {
+        (self.user_uuids.is_empty() || self.user_uuids.contains(user_uuid))
+            && self
+                .permissions
+                .iter()
+                .all(|perm| permissions.has_permission(*perm))
+    }
+
+    #[inline]
+    pub fn into_message(self) -> WebsocketMessage {
+        self.message
+    }
+}
+
+#[derive(Debug, Clone, ToSchema, Deserialize, Serialize)]
 pub struct WebsocketMessage {
     pub event: WebsocketEvent,
 
     #[serde(deserialize_with = "string_vec_or_empty")]
     #[serde(serialize_with = "arc_vec")]
+    #[schema(value_type = Vec<String>)]
     pub args: Arc<[String]>,
 }
 
