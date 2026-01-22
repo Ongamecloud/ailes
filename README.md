@@ -116,7 +116,7 @@ system:
       # how many threads to use when restoring a zip wings backup
       restore_threads: 4
       # what archive format to use for local (wings) backups
-      # tar, tar_gz, tar_xz, tar_bz2, tar_lz4, tar_zstd, zip, seven_zip
+      # tar, tar_gz, tar_xz, tar_lzip, tar_bz2, tar_lz4, tar_zstd, zip, seven_zip
       archive_format: tar_gz
 
     # settings for the s3 backup driver

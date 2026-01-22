@@ -90,6 +90,7 @@ impl ServerManager {
                                 "failed to attach installation container: {:#?}",
                                 err
                             );
+                            return;
                         }
 
                         server.installer.write().await.replace(installer);
