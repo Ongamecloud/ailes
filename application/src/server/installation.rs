@@ -603,13 +603,19 @@ impl ServerInstaller {
                             },
                             {
                                 let installer = Arc::clone(&installer);
-                                let docker_id = installer
+                                let docker_id = match installer
                                     .container_id
                                     .lock()
                                     .await
-                                    .as_ref()
-                                    .ok_or_else(|| anyhow::anyhow!("unable to retrieve container id"))?
-                                    .clone();
+                                    .as_ref() {
+                                        Some(id) => id.clone(),
+                                        None => {
+                                            installer.unset_installing(false).await?;
+                                            return Err(anyhow::anyhow!(
+                                                "no installation container to attach to"
+                                            ));
+                                        }
+                                    };
 
                                 async move {
                                     let mut stream = installer
