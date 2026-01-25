@@ -139,6 +139,7 @@ impl ServerManager {
                         );
 
                         if let Err(err) = installer.attach().await {
+                            installer.unset_installing(false).await.ok();
                             tracing::error!(
                                 server = %server.uuid,
                                 "failed to attach installation container: {:#?}",
