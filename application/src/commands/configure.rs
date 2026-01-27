@@ -42,7 +42,7 @@ pub async fn configure(
             }
         };
 
-        let response = match serde_yml::from_slice(&decoded) {
+        let response = match serde_norway::from_slice(&decoded) {
             Ok(response) => response,
             Err(_) => {
                 eprintln!("failed to decode join data!");

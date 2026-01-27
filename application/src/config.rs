@@ -946,7 +946,7 @@ impl Config {
     ) -> Result<(Arc<Self>, ConfigGuard), anyhow::Error> {
         let file = File::open(path).context(format!("failed to open config file {path}"))?;
         let reader = std::io::BufReader::new(file);
-        let config: InnerConfig = serde_yml::from_reader(reader)
+        let config: InnerConfig = serde_norway::from_reader(reader)
             .context(format!("failed to parse config file {path}"))?;
 
         let client = crate::remote::client::Client::new(&config, ignore_certificate_errors);
@@ -1022,7 +1022,7 @@ impl Config {
         }
         let file = File::create(path).context(format!("failed to create config file {path}"))?;
         let writer = std::io::BufWriter::new(file);
-        serde_yml::to_writer(writer, &config)
+        serde_norway::to_writer(writer, &config)
             .context(format!("failed to write config file {path}"))?;
 
         Ok(())
@@ -1034,7 +1034,7 @@ impl Config {
         let file = File::create(&self.path)
             .context(format!("failed to create config file {}", self.path))?;
         let writer = std::io::BufWriter::new(file);
-        serde_yml::to_writer(writer, unsafe { &*self.inner.get() })
+        serde_norway::to_writer(writer, unsafe { &*self.inner.get() })
             .context(format!("failed to write config file {}", self.path))?;
 
         Ok(())

@@ -17,7 +17,7 @@ impl super::ProcessConfigurationFileParser for YamlFileParser {
         let mut json: serde_json::Value = if content.trim().is_empty() {
             serde_json::Value::Object(serde_json::Map::new())
         } else {
-            serde_yml::from_str(content)
+            serde_norway::from_str(content)
                 .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()))
         };
 
@@ -46,6 +46,6 @@ impl super::ProcessConfigurationFileParser for YamlFileParser {
             );
         }
 
-        Ok(serde_yml::to_string(&json)?.into_bytes())
+        Ok(serde_norway::to_string(&json)?.into_bytes())
     }
 }

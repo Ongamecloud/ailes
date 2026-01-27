@@ -24,7 +24,7 @@ colored = "3.0.0"
 chrono = { workspace = true }
 nestify = "0.3.3"
 rayon = "1.10.0"
-serde_yml = "0.0.12"
+serde_norway = "0.9.42"
 serde_default = "0.2.0"
 futures-util = { workspace = true }
 tokio-util = { workspace = true }
