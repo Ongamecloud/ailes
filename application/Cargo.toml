@@ -70,9 +70,8 @@ chunked_vec = "=0.3.4"
 async-channel = "2.5.0"
 lzzzz = "2.0.0"
 xmltree = { version = "0.12.0", features = ["attribute-order"] }
-java-properties = "2.0.0"
 rust-ini = "0.21.3"
-regex = "1.12.2"
+regex = { workspace = true }
 serde_regex = "1.1.0"
 compact_str = { git = "https://github.com/0x7d8/compact_str.git", version = "0.9.0", features = ["serde", "utoipa"] }
 memchr = "2.7.6"

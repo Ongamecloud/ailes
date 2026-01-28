@@ -22,7 +22,7 @@ impl super::ProcessConfigurationFileParser for PlainFileParser {
             let mut replaced = false;
 
             for replacement in &config.replace {
-                if !line.starts_with(&replacement.r#match) {
+                if !line.starts_with(&*replacement.r#match) {
                     continue;
                 }
 

@@ -31,8 +31,8 @@ pub enum ServerConfigurationFileParser {
 
 #[derive(ToSchema, Deserialize, Clone, Debug)]
 pub struct ServerConfigurationFileReplacement {
-    pub r#match: String,
-    pub if_value: Option<String>,
+    pub r#match: compact_str::CompactString,
+    pub if_value: Option<compact_str::CompactString>,
     #[schema(value_type = bool)]
     pub insert_new: Option<bool>,
     #[serde(default = "true_fn")]
@@ -43,7 +43,7 @@ pub struct ServerConfigurationFileReplacement {
 
 #[derive(ToSchema, Deserialize, Clone, Debug)]
 pub struct ServerConfigurationFile {
-    pub file: String,
+    pub file: compact_str::CompactString,
     #[serde(default = "true_fn")]
     pub create_new: bool,
     pub parser: ServerConfigurationFileParser,

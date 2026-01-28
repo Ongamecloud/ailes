@@ -2396,17 +2396,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92ecc6618181def0457392ccd0ee51198e065e016d1d527a7ac1b6dc7c1f09d2"
 
 [[package]]
-name = "java-properties"
-version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "37bf6f484471c451f2b51eabd9e66b3fa7274550c5ec4b6c3d6070840945117f"
-dependencies = [
- "encoding_rs",
- "lazy_static",
- "regex",
-]
-
-[[package]]
 name = "jni"
 version = "0.21.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5778,7 +5767,6 @@ dependencies = [
  "human_bytes",
  "ignore",
  "infer",
- "java-properties",
  "jwt",
  "lzma-rust2",
  "lzzzz",
