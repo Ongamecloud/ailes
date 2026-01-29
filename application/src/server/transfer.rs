@@ -494,14 +494,14 @@ impl OutgoingServerTransfer {
                                 total_elapsed_secs % 60.0
                             )
                         } else {
-                            format!("{:.1}h {:.0}m",
+                            format!("{:.0}h {:.0}m",
                                 total_elapsed_secs / 3600.0,
                                 (total_elapsed_secs % 3600.0) / 60.0
                             )
                         };
 
                         let progress_log = format!(
-                            "{} - ETA: {}\nArchive: {} of {} ({}/s) - Elapsed: {}\nNetwork: {} sent ({}/s)",
+                            "{} - ETA: {}\r\nArchive: {} of {} ({}/s) - Elapsed: {}\r\nNetwork: {} sent ({}/s)",
                             crate::utils::draw_progress_bar(30, current_bytes_archived as f64, total_bytes as f64),
                             time_estimate,
                             formatted_bytes_archived,
