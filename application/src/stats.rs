@@ -22,6 +22,7 @@ struct SystemNetworkStats {
 #[derive(ToSchema, Serialize, Default)]
 struct SystemMemoryStats {
     used: u64,
+    used_process: u64,
     total: u64,
 }
 
@@ -81,6 +82,19 @@ impl Default for StatsManager {
                         }
                     }
 
+                    let mut used_memory_process = 0;
+                    if let Ok(current_pid) = sysinfo::get_current_pid() {
+                        sys.refresh_processes_specifics(
+                            sysinfo::ProcessesToUpdate::Some(&[current_pid]),
+                            false,
+                            sysinfo::ProcessRefreshKind::nothing().with_memory(),
+                        );
+
+                        if let Some(process) = sys.process(current_pid) {
+                            used_memory_process = process.memory();
+                        }
+                    }
+
                     let total_memory = sys.total_memory() / 1024 / 1024;
                     let used_memory = sys.used_memory() / 1024 / 1024;
 
@@ -128,6 +142,7 @@ impl Default for StatsManager {
                         },
                         memory: SystemMemoryStats {
                             used: used_memory,
+                            used_process: used_memory_process,
                             total: total_memory,
                         },
                         disk: SystemDiskStats {

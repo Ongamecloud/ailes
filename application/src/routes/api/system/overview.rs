@@ -24,6 +24,7 @@ mod get {
         total_bytes: u64,
         free_bytes: u64,
         used_bytes: u64,
+        used_bytes_process: u64,
     }
 
     #[derive(ToSchema, Serialize)]
@@ -56,6 +57,19 @@ mod get {
         let mut sys = System::new_all();
         sys.refresh_cpu_all();
 
+        let mut used_bytes_process = 0;
+        if let Ok(current_pid) = sysinfo::get_current_pid() {
+            sys.refresh_processes_specifics(
+                sysinfo::ProcessesToUpdate::Some(&[current_pid]),
+                false,
+                sysinfo::ProcessRefreshKind::nothing().with_memory(),
+            );
+
+            if let Some(process) = sys.process(current_pid) {
+                used_bytes_process = process.memory();
+            }
+        }
+
         let cpu = &sys.cpus()[0];
         let mut servers = ResponseServers {
             total: 0,
@@ -86,10 +100,11 @@ mod get {
                 total_bytes: sys.total_memory(),
                 free_bytes: sys.free_memory(),
                 used_bytes: sys.used_memory(),
+                used_bytes_process,
             },
             servers,
             architecture: std::env::consts::ARCH,
-            kernel_version: sysinfo::System::kernel_long_version(),
+            kernel_version: System::kernel_long_version(),
         })
         .ok()
     }

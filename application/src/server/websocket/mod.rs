@@ -221,18 +221,17 @@ impl WebsocketMessage {
     }
 }
 
+pub type SocketJwt = Arc<RwLock<Option<Arc<WebsocketJwtPayload>>>>;
+
 pub struct ServerWebsocketHandler {
     sender: Arc<Mutex<SplitSink<WebSocket, Message>>>,
-    socket_jwt: Arc<RwLock<Option<Arc<WebsocketJwtPayload>>>>,
+    socket_jwt: SocketJwt,
     closed: AtomicBool,
     binary_mode: AtomicBool,
 }
 
 impl ServerWebsocketHandler {
-    fn new(
-        sender: Arc<Mutex<SplitSink<WebSocket, Message>>>,
-        socket_jwt: Arc<RwLock<Option<Arc<WebsocketJwtPayload>>>>,
-    ) -> Self {
+    fn new(sender: Arc<Mutex<SplitSink<WebSocket, Message>>>, socket_jwt: SocketJwt) -> Self {
         Self {
             sender,
             socket_jwt,
