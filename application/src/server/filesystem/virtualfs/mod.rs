@@ -311,6 +311,11 @@ pub trait DirectoryWalk {
 
 #[async_trait::async_trait]
 pub trait DirectoryStreamWalk {
+    #[inline]
+    fn supports_multithreading(&self) -> bool {
+        true
+    }
+
     async fn next_entry(
         &mut self,
     ) -> Option<Result<(FileType, PathBuf, AsyncReadableFileStream), anyhow::Error>>;
@@ -334,19 +339,26 @@ pub trait DirectoryStreamWalk {
                         break;
                     }
 
-                    let permit = match semaphore.acquire_owned().await {
-                        Ok(permit) => permit,
-                        Err(_) => break,
-                    };
-                    tokio::spawn(async move {
-                        let _permit = permit;
+                    if self.supports_multithreading() {
+                        let permit = match semaphore.acquire_owned().await {
+                            Ok(permit) => permit,
+                            Err(_) => break,
+                        };
+                        tokio::spawn(async move {
+                            let _permit = permit;
+                            match func(file_type, path, stream).await {
+                                Ok(_) => {}
+                                Err(err) => {
+                                    *error.write().await = Some(err);
+                                }
+                            }
+                        });
+                    } else {
                         match func(file_type, path, stream).await {
                             Ok(_) => {}
-                            Err(err) => {
-                                *error.write().await = Some(err);
-                            }
+                            Err(err) => return Err(err),
                         }
-                    });
+                    }
                 }
                 Err(err) => return Err(err),
             }

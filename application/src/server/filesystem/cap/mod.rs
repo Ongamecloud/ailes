@@ -1,3 +1,7 @@
+use crate::{
+    io::abort::{AbortGuard, AbortListener},
+    utils::PortableModeExt,
+};
 use cap_std::fs::{Metadata, OpenOptions};
 use std::{
     collections::VecDeque,
@@ -13,14 +17,9 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     sync::RwLock,
 };
-pub use utils::{AsyncReadDir, AsyncWalkDir, FileType, ReadDir, WalkDir};
-
-use crate::{
-    io::abort::{AbortGuard, AbortListener},
-    utils::PortableModeExt,
-};
 
 mod utils;
+pub use utils::{AsyncReadDir, AsyncWalkDir, FileType, ReadDir, WalkDir};
 
 #[derive(Debug, Clone)]
 pub struct CapFilesystem {

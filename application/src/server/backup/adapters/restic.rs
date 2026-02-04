@@ -13,8 +13,9 @@ use crate::{
             cap::FileType,
             encode_mode,
             virtualfs::{
-                AsyncFileRead, ByteRange, DirectoryListing, DirectoryStreamWalk, DirectoryWalk,
-                FileMetadata, FileRead, IsIgnoredFn, VirtualReadableFilesystem,
+                AsyncFileRead, AsyncReadableFileStream, ByteRange, DirectoryListing,
+                DirectoryStreamWalk, DirectoryWalk, FileMetadata, FileRead, IsIgnoredFn,
+                VirtualReadableFilesystem,
             },
         },
     },
@@ -1108,12 +1109,174 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
 
     async fn async_walk_dir_stream<'a>(
         &'a self,
-        _path: &(dyn AsRef<Path> + Send + Sync),
-        _is_ignored: IsIgnoredFn,
+        path: &(dyn AsRef<Path> + Send + Sync),
+        is_ignored: IsIgnoredFn,
     ) -> Result<Box<dyn DirectoryStreamWalk + Send + Sync + 'a>, anyhow::Error> {
-        Err(anyhow::anyhow!(
-            "Streamed directory walking is not supported for Restic backups"
-        ))
+        struct ResticDirStreamWalk {
+            entry_wanted_notifier: Arc<tokio::sync::Notify>,
+            entry_channel_rx: tokio::sync::mpsc::Receiver<
+                Result<(FileType, PathBuf, AsyncReadableFileStream), anyhow::Error>,
+            >,
+        }
+
+        #[async_trait::async_trait]
+        impl DirectoryStreamWalk for ResticDirStreamWalk {
+            fn supports_multithreading(&self) -> bool {
+                false
+            }
+
+            async fn next_entry(
+                &mut self,
+            ) -> Option<Result<(FileType, PathBuf, AsyncReadableFileStream), anyhow::Error>>
+            {
+                self.entry_wanted_notifier.notify_one();
+                self.entry_channel_rx.recv().await
+            }
+        }
+
+        let entry_wanted_notifier = Arc::new(tokio::sync::Notify::new());
+        let (entry_channel_tx, entry_channel_rx) = tokio::sync::mpsc::channel(1);
+
+        crate::spawn_handled({
+            let entry_wanted_notifier = Arc::clone(&entry_wanted_notifier);
+            let entries = self.entries.clone();
+            let configuration = Arc::clone(&self.configuration);
+            let short_id = self.short_id.clone();
+            let server_path = self.server_path.clone();
+            let is_ignored = is_ignored.clone();
+            let root_path = path.as_ref().to_path_buf();
+
+            async move {
+                let mut top_entries = Vec::new();
+
+                let path_len = root_path.components().count();
+
+                for entry in entries.iter() {
+                    let name = &entry.path;
+
+                    let name_len = name.components().count();
+                    if name_len < path_len
+                        || !name.starts_with(&root_path)
+                        || name == &root_path
+                        || name_len > path_len + 1
+                    {
+                        continue;
+                    }
+
+                    top_entries.push(entry);
+                }
+
+                let mut skip_notifier = false;
+                for entry in top_entries {
+                    if !skip_notifier {
+                        entry_wanted_notifier.notified().await;
+                    } else {
+                        skip_notifier = false;
+                    }
+
+                    let file_type = VirtualResticBackup::restic_entry_to_file_type(entry);
+                    if let Some(path) = (is_ignored)(file_type, entry.path.clone()) {
+                        let full_path = server_path.join(&entry.path);
+
+                        if file_type.is_dir() {
+                            let child = std::process::Command::new("restic")
+                                .envs(&configuration.environment)
+                                .arg("--json")
+                                .arg("--no-lock")
+                                .arg("--repo")
+                                .arg(&configuration.repository)
+                                .args(configuration.password())
+                                .arg("dump")
+                                .arg(format!("{}:{}", short_id, full_path.display()))
+                                .arg("/")
+                                .stdout(std::process::Stdio::piped())
+                                .stderr(std::process::Stdio::null())
+                                .spawn()?;
+
+                            let stdout = child.stdout.unwrap();
+
+                            let entry_channel_tx = entry_channel_tx.clone();
+                            let entry_wanted_notifier = Arc::clone(&entry_wanted_notifier);
+                            let is_ignored = is_ignored.clone();
+                            tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
+                                let runtime = tokio::runtime::Handle::current();
+                                let mut restic_tar = tar::Archive::new(stdout);
+                                let mut entries = restic_tar.entries()?;
+
+                                while let Some(Ok(mut entry)) = entries.next() {
+                                    let header = entry.header().clone();
+                                    let relative = path.join(entry.path()?);
+
+                                    let file_type = match header.entry_type() {
+                                        tar::EntryType::Directory => FileType::Dir,
+                                        tar::EntryType::Regular => FileType::File,
+                                        tar::EntryType::Symlink => FileType::Symlink,
+                                        _ => continue,
+                                    };
+
+                                    let Some(relative) = (is_ignored)(file_type, relative) else {
+                                        continue;
+                                    };
+
+                                    let (reader, writer) = tokio::io::simplex(crate::BUFFER_SIZE);
+
+                                    entry_channel_tx.blocking_send(Ok((
+                                        file_type,
+                                        relative,
+                                        Box::new(reader) as AsyncReadableFileStream,
+                                    )))?;
+
+                                    let mut writer = tokio_util::io::SyncIoBridge::new(writer);
+                                    crate::io::copy(&mut entry, &mut writer)?;
+                                    writer.shutdown()?;
+
+                                    runtime.block_on(entry_wanted_notifier.notified());
+                                }
+
+                                entry_wanted_notifier.notify_one();
+
+                                Ok(())
+                            })
+                            .await??;
+                        } else {
+                            let child = Command::new("restic")
+                                .envs(&configuration.environment)
+                                .arg("--json")
+                                .arg("--no-lock")
+                                .arg("--repo")
+                                .arg(&configuration.repository)
+                                .args(configuration.password())
+                                .arg("dump")
+                                .arg(format!("{}:{}", short_id, full_path.display()))
+                                .stdout(std::process::Stdio::piped())
+                                .stderr(std::process::Stdio::null())
+                                .spawn()?;
+
+                            let stdout = child.stdout.unwrap();
+                            entry_channel_tx
+                                .send(Ok((
+                                    file_type,
+                                    path,
+                                    Box::new(stdout) as AsyncReadableFileStream,
+                                )))
+                                .await?;
+                        }
+                    } else {
+                        skip_notifier = true;
+                        continue;
+                    }
+                }
+
+                Ok::<_, anyhow::Error>(())
+            }
+        });
+
+        entry_wanted_notifier.notify_one();
+
+        Ok(Box::new(ResticDirStreamWalk {
+            entry_wanted_notifier,
+            entry_channel_rx,
+        }))
     }
 
     fn read_file(
@@ -1121,20 +1284,15 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
         path: &(dyn AsRef<Path> + Send + Sync),
         _range: Option<ByteRange>,
     ) -> Result<FileRead, anyhow::Error> {
-        let path = path.as_ref();
-        let entry = self
-            .entries
-            .iter()
-            .find(|e| e.path == path)
-            .ok_or_else(|| anyhow::anyhow!(std::io::Error::from(rustix::io::Errno::NOENT)))?;
+        let entry = self.metadata(path)?;
 
-        if !matches!(entry.r#type, ResticEntryType::File) {
+        if !entry.file_type.is_file() {
             return Err(anyhow::anyhow!(std::io::Error::from(
                 rustix::io::Errno::NOENT
             )));
         }
 
-        let full_path = PathBuf::from(&self.server_path).join(&entry.path);
+        let full_path = self.server_path.join(path);
 
         let child = std::process::Command::new("restic")
             .envs(&self.configuration.environment)
@@ -1151,8 +1309,8 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
             .spawn()?;
 
         Ok(FileRead {
-            size: entry.size.unwrap_or(0),
-            total_size: entry.size.unwrap_or(0),
+            size: entry.size,
+            total_size: entry.size,
             reader_range: None,
             reader: Box::new(child.stdout.unwrap()),
         })
@@ -1162,20 +1320,15 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
         path: &(dyn AsRef<Path> + Send + Sync),
         _range: Option<ByteRange>,
     ) -> Result<AsyncFileRead, anyhow::Error> {
-        let path = path.as_ref();
-        let entry = self
-            .entries
-            .iter()
-            .find(|e| e.path == path)
-            .ok_or_else(|| anyhow::anyhow!(std::io::Error::from(rustix::io::Errno::NOENT)))?;
+        let entry = self.async_metadata(path).await?;
 
-        if !matches!(entry.r#type, ResticEntryType::File) {
+        if !entry.file_type.is_file() {
             return Err(anyhow::anyhow!(std::io::Error::from(
                 rustix::io::Errno::NOENT
             )));
         }
 
-        let full_path = PathBuf::from(&self.server_path).join(&entry.path);
+        let full_path = self.server_path.join(path);
 
         let child = Command::new("restic")
             .envs(&self.configuration.environment)
@@ -1192,8 +1345,8 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
             .spawn()?;
 
         Ok(AsyncFileRead {
-            size: entry.size.unwrap_or(0),
-            total_size: entry.size.unwrap_or(0),
+            size: entry.size,
+            total_size: entry.size,
             reader_range: None,
             reader: Box::new(child.stdout.unwrap()),
         })
@@ -1222,20 +1375,16 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
         bytes_archived: Option<Arc<AtomicU64>>,
         is_ignored: IsIgnoredFn,
     ) -> Result<tokio::io::ReadHalf<tokio::io::SimplexStream>, anyhow::Error> {
-        let path = path.as_ref().to_path_buf();
-        let entry = self
-            .entries
-            .iter()
-            .find(|e| e.path == path)
-            .ok_or_else(|| anyhow::anyhow!(std::io::Error::from(rustix::io::Errno::NOENT)))?;
+        let entry = self.async_metadata(&path).await?;
 
-        if !matches!(entry.r#type, ResticEntryType::Dir) {
+        if !entry.file_type.is_dir() {
             return Err(anyhow::anyhow!(std::io::Error::from(
                 rustix::io::Errno::NOENT
             )));
         }
 
-        let full_path = PathBuf::from(&self.server_path).join(&entry.path);
+        let full_path = self.server_path.join(path);
+        let path = path.as_ref().to_path_buf();
 
         let (reader, writer) = tokio::io::simplex(crate::BUFFER_SIZE);
 
@@ -1348,11 +1497,10 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
                         compression_level,
                         file_compression_threads,
                     )?;
+                    let mut tar = tar::Builder::new(writer);
 
                     let mut restic_tar = tar::Archive::new(child.stdout.take().unwrap());
                     let mut entries = restic_tar.entries()?;
-
-                    let mut tar = tar::Builder::new(writer);
 
                     while let Some(Ok(entry)) = entries.next() {
                         let mut header = entry.header().clone();
@@ -1380,6 +1528,271 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
                             }
                         } else {
                             tar.append_data(&mut header, relative, std::io::empty())?;
+                        }
+                    }
+
+                    tar.finish()?;
+                    let mut inner = tar.into_inner()?.finish()?;
+                    inner.flush()?;
+                    inner.shutdown()?;
+
+                    Ok(())
+                });
+            }
+        }
+
+        Ok(reader)
+    }
+
+    async fn async_read_dir_files_archive(
+        &self,
+        path: &(dyn AsRef<Path> + Send + Sync),
+        file_paths: Vec<PathBuf>,
+        archive_format: StreamableArchiveFormat,
+        compression_level: CompressionLevel,
+        bytes_archived: Option<Arc<AtomicU64>>,
+        is_ignored: IsIgnoredFn,
+    ) -> Result<tokio::io::ReadHalf<tokio::io::SimplexStream>, anyhow::Error> {
+        let entry = self.async_metadata(&path).await?;
+
+        if !entry.file_type.is_dir() {
+            return Err(anyhow::anyhow!(std::io::Error::from(
+                rustix::io::Errno::NOENT
+            )));
+        }
+
+        let full_path = self.server_path.join(path);
+        let path = path.as_ref().to_path_buf();
+
+        let (reader, writer) = tokio::io::simplex(crate::BUFFER_SIZE);
+
+        let configuration = self.configuration.clone();
+        let short_id = self.short_id.clone();
+        let file_compression_threads = self.server.app_state.config.api.file_compression_threads;
+
+        let spawn_restic = move |path: &Path| {
+            std::process::Command::new("restic")
+                .envs(&configuration.environment)
+                .arg("--json")
+                .arg("--no-lock")
+                .arg("--repo")
+                .arg(&configuration.repository)
+                .args(configuration.password())
+                .arg("dump")
+                .arg(format!("{}:{}", short_id, full_path.join(path).display()))
+                .arg("/")
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+        };
+
+        let entries = self.entries.clone();
+
+        match archive_format {
+            StreamableArchiveFormat::Zip => {
+                crate::spawn_blocking_handled(move || -> Result<(), anyhow::Error> {
+                    let writer = tokio_util::io::SyncIoBridge::new(writer);
+                    let mut zip = zip::ZipWriter::new_stream(writer);
+
+                    let mut read_buffer = vec![0; crate::BUFFER_SIZE];
+
+                    for entry_path in file_paths {
+                        let entry = match entries.iter().find(|e| e.path == entry_path) {
+                            Some(entry) => entry,
+                            None => continue,
+                        };
+
+                        if !matches!(entry.r#type, ResticEntryType::Dir | ResticEntryType::File) {
+                            continue;
+                        }
+
+                        let mut child = spawn_restic(&entry_path)?;
+
+                        if matches!(entry.r#type, ResticEntryType::Dir) {
+                            let mut restic_tar = tar::Archive::new(child.stdout.take().unwrap());
+                            let mut entries = restic_tar.entries()?;
+
+                            while let Some(Ok(mut entry)) = entries.next() {
+                                let header = entry.header().clone();
+                                let relative = entry_path.join(entry.path()?);
+
+                                let file_type = match header.entry_type() {
+                                    tar::EntryType::Directory => FileType::Dir,
+                                    tar::EntryType::Regular => FileType::File,
+                                    tar::EntryType::Symlink => FileType::Symlink,
+                                    _ => continue,
+                                };
+
+                                let absolute_path = path.join(&relative);
+                                if (is_ignored)(file_type, absolute_path).is_none() {
+                                    continue;
+                                }
+
+                                let mut options: zip::write::FileOptions<'_, ()> =
+                                    zip::write::FileOptions::default()
+                                        .compression_level(Some(
+                                            compression_level.to_deflate_level() as i64,
+                                        ))
+                                        .unix_permissions(header.mode()?)
+                                        .large_file(header.size()? >= u32::MAX as u64);
+
+                                if let Ok(mtime) = header.mtime()
+                                    && let Some(mtime) =
+                                        chrono::DateTime::from_timestamp(mtime as i64, 0)
+                                {
+                                    options = options.last_modified_time(
+                                        zip::DateTime::from_date_and_time(
+                                            mtime.year() as u16,
+                                            mtime.month() as u8,
+                                            mtime.day() as u8,
+                                            mtime.hour() as u8,
+                                            mtime.minute() as u8,
+                                            mtime.second() as u8,
+                                        )?,
+                                    );
+                                }
+
+                                match header.entry_type() {
+                                    tar::EntryType::Directory => {
+                                        zip.add_directory(relative.to_string_lossy(), options)?;
+                                    }
+                                    tar::EntryType::Regular => {
+                                        zip.start_file(relative.to_string_lossy(), options)?;
+
+                                        loop {
+                                            let n = entry.read(&mut read_buffer)?;
+                                            if n == 0 {
+                                                break;
+                                            }
+                                            zip.write_all(&read_buffer[..n])?;
+                                            if let Some(counter) = &bytes_archived {
+                                                counter.fetch_add(n as u64, Ordering::SeqCst);
+                                            }
+                                        }
+                                    }
+                                    _ => continue,
+                                }
+                            }
+                        } else {
+                            let options: zip::write::FileOptions<'_, ()> =
+                                zip::write::FileOptions::default()
+                                    .compression_level(Some(
+                                        compression_level.to_deflate_level() as i64
+                                    ))
+                                    .unix_permissions(entry.mode)
+                                    .large_file(entry.size.unwrap_or(0) >= u32::MAX as u64)
+                                    .last_modified_time(zip::DateTime::from_date_and_time(
+                                        entry.mtime.year() as u16,
+                                        entry.mtime.month() as u8,
+                                        entry.mtime.day() as u8,
+                                        entry.mtime.hour() as u8,
+                                        entry.mtime.minute() as u8,
+                                        entry.mtime.second() as u8,
+                                    )?);
+
+                            zip.start_file(entry_path.to_string_lossy(), options)?;
+
+                            let mut restic_file = child.stdout.take().unwrap();
+
+                            loop {
+                                let n = restic_file.read(&mut read_buffer)?;
+                                if n == 0 {
+                                    break;
+                                }
+                                zip.write_all(&read_buffer[..n])?;
+                                if let Some(counter) = &bytes_archived {
+                                    counter.fetch_add(n as u64, Ordering::SeqCst);
+                                }
+                            }
+                        }
+                    }
+
+                    let mut inner = zip.finish()?.into_inner();
+                    inner.flush()?;
+                    inner.shutdown()?;
+
+                    Ok(())
+                });
+            }
+            _ => {
+                crate::spawn_blocking_handled(move || -> Result<(), anyhow::Error> {
+                    let writer = CompressionWriter::new(
+                        tokio_util::io::SyncIoBridge::new(writer),
+                        archive_format.compression_format(),
+                        compression_level,
+                        file_compression_threads,
+                    )?;
+                    let mut tar = tar::Builder::new(writer);
+
+                    for entry_path in file_paths {
+                        let entry = match entries.iter().find(|e| e.path == entry_path) {
+                            Some(entry) => entry,
+                            None => continue,
+                        };
+
+                        if !matches!(entry.r#type, ResticEntryType::Dir | ResticEntryType::File) {
+                            continue;
+                        }
+
+                        if matches!(entry.r#type, ResticEntryType::Dir) {
+                            let mut child = spawn_restic(&entry_path)?;
+                            let mut restic_tar = tar::Archive::new(child.stdout.take().unwrap());
+                            let mut entries = restic_tar.entries()?;
+
+                            while let Some(Ok(entry)) = entries.next() {
+                                let mut header = entry.header().clone();
+                                let relative = entry.path()?.to_path_buf();
+
+                                let file_type = match header.entry_type() {
+                                    tar::EntryType::Directory => FileType::Dir,
+                                    tar::EntryType::Regular => FileType::File,
+                                    tar::EntryType::Symlink => FileType::Symlink,
+                                    _ => continue,
+                                };
+
+                                let absolute_path = path.join(&relative);
+                                if (is_ignored)(file_type, absolute_path).is_none() {
+                                    continue;
+                                }
+
+                                if file_type.is_file() {
+                                    if let Some(counter) = &bytes_archived {
+                                        let counting_reader = CountingReader::new_with_bytes_read(
+                                            entry,
+                                            counter.clone(),
+                                        );
+                                        tar.append_data(&mut header, relative, counting_reader)?;
+                                    } else {
+                                        tar.append_data(&mut header, relative, entry)?;
+                                    }
+                                } else {
+                                    tar.append_data(&mut header, relative, std::io::empty())?;
+                                }
+                            }
+                        } else {
+                            let mut child = spawn_restic(&entry_path)?;
+
+                            let mut header = tar::Header::new_gnu();
+                            header.set_path(&entry_path)?;
+                            header.set_size(entry.size.unwrap_or(0));
+                            header.set_mode(entry.mode);
+                            header.set_mtime(entry.mtime.timestamp() as u64);
+                            header.set_entry_type(tar::EntryType::Regular);
+                            header.set_cksum();
+
+                            if let Some(counter) = &bytes_archived {
+                                let counting_reader = CountingReader::new_with_bytes_read(
+                                    child.stdout.take().unwrap(),
+                                    counter.clone(),
+                                );
+                                tar.append_data(&mut header, &entry_path, counting_reader)?;
+                            } else {
+                                tar.append_data(
+                                    &mut header,
+                                    &entry_path,
+                                    child.stdout.take().unwrap(),
+                                )?;
+                            }
                         }
                     }
 
