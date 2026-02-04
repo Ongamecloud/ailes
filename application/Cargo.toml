@@ -73,7 +73,7 @@ xmltree = { version = "0.12.0", features = ["attribute-order"] }
 rust-ini = "0.21.3"
 regex = { workspace = true }
 serde_regex = "1.1.0"
-compact_str = { git = "https://github.com/0x7d8/compact_str.git", version = "0.9.0", features = ["serde", "utoipa"] }
+compact_str = { git = "https://github.com/ParkMyCar/compact_str.git", version = "0.9.0", features = ["serde", "utoipa"] }
 memchr = "2.7.6"
 thin-vec = "0.2.14"
 moka = { version = "0.12.12", features = ["future"] }

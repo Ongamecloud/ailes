@@ -517,7 +517,7 @@ impl VirtualReadableFilesystem for VirtualZipArchive {
 
                     let file_type = VirtualZipArchive::zip_entry_to_file_type(&entry);
 
-                    if let Some(name) = (self.is_ignored)(file_type, name.to_path_buf()) {
+                    if let Some(name) = (self.is_ignored)(file_type, name) {
                         if entry.is_file() {
                             let (reader, mut writer) = tokio::io::simplex(crate::BUFFER_SIZE);
 
@@ -551,6 +551,8 @@ impl VirtualReadableFilesystem for VirtualZipArchive {
                                             }
                                         }
                                     }
+
+                                    runtime.block_on(writer.shutdown()).ok();
                                 }
                             });
 

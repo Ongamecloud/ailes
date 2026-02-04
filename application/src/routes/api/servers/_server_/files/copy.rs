@@ -10,7 +10,10 @@ mod post {
     use axum::http::StatusCode;
     use compact_str::ToCompactString;
     use serde::{Deserialize, Serialize};
-    use std::path::Path;
+    use std::{
+        path::Path,
+        sync::{Arc, atomic::AtomicU64},
+    };
     use utoipa::ToSchema;
 
     fn foreground() -> bool {
@@ -153,36 +156,94 @@ mod post {
         };
         let file_name = parent.join(&new_name);
 
-        let (destination_path, destination_filesystem) = server
+        let (destination_path, destination_filesystem) =
+            server.filesystem.resolve_writable_fs(&server, parent).await;
+        let destination_path = server
             .filesystem
-            .resolve_writable_fs(&server, &file_name)
+            .relative_path(&destination_path.join(&new_name));
+
+        let progress = Arc::new(AtomicU64::new(0));
+        let total = Arc::new(AtomicU64::new(metadata.size));
+
+        let (identifier, task) = server
+            .filesystem
+            .operations
+            .add_operation(
+                crate::server::filesystem::operations::FilesystemOperation::Copy {
+                    path: path.clone(),
+                    destination_path: file_name,
+                    progress: progress.clone(),
+                    total: total.clone(),
+                },
+                {
+                    let server = server.clone();
+                    let destination_path = destination_path.clone();
+                    let destination_filesystem = destination_filesystem.clone();
+
+                    async move {
+                        server
+                            .filesystem
+                            .copy_path(
+                                progress,
+                                &server,
+                                metadata,
+                                path,
+                                filesystem.clone(),
+                                destination_path,
+                                destination_filesystem,
+                            )
+                            .await?;
+
+                        Ok(())
+                    }
+                },
+            )
             .await;
 
-        if let Some(identifier) = server
-            .filesystem
-            .copy_path(
-                &server,
-                metadata,
-                path.clone(),
-                &path,
-                filesystem,
-                destination_path.clone(),
-                &file_name,
-                destination_filesystem.clone(),
-                data.foreground,
-            )
-            .await?
-        {
-            ApiResponse::new_serialized(Response { identifier })
-                .with_status(StatusCode::ACCEPTED)
-                .ok()
-        } else {
+        if data.foreground {
+            match task.await {
+                Ok(Some(Ok(()))) => {}
+                Ok(None) => {
+                    return ApiResponse::error("file copy aborted by another source")
+                        .with_status(StatusCode::EXPECTATION_FAILED)
+                        .ok();
+                }
+                Ok(Some(Err(err))) => {
+                    tracing::error!(
+                        server = %server.uuid,
+                        root = %root.display(),
+                        "failed to copy file: {:#?}",
+                        err,
+                    );
+
+                    return ApiResponse::error(&format!("failed to copy file: {err}"))
+                        .with_status(StatusCode::EXPECTATION_FAILED)
+                        .ok();
+                }
+                Err(err) => {
+                    tracing::error!(
+                        server = %server.uuid,
+                        root = %root.display(),
+                        "failed to copy file: {:#?}",
+                        err,
+                    );
+
+                    return ApiResponse::error("failed to copy file")
+                        .with_status(StatusCode::EXPECTATION_FAILED)
+                        .ok();
+                }
+            }
+
             ApiResponse::new_serialized(
                 destination_filesystem
-                    .async_directory_entry(&file_name)
+                    .async_directory_entry(&destination_path)
                     .await?,
             )
             .ok()
+        } else {
+            ApiResponse::new_serialized(Response { identifier })
+                .with_status(StatusCode::ACCEPTED)
+                .ok()
         }
     }
 }

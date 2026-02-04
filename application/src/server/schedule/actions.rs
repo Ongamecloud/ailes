@@ -28,12 +28,6 @@ pub enum ScheduleDynamicParameter {
 }
 
 #[derive(Clone, Deserialize, Serialize)]
-pub struct RenameFile {
-    pub from: compact_str::CompactString,
-    pub to: compact_str::CompactString,
-}
-
-#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum ScheduleAction {
     Sleep {
@@ -105,7 +99,7 @@ pub enum ScheduleAction {
     },
     RenameFiles {
         root: ScheduleDynamicParameter,
-        files: Vec<RenameFile>,
+        files: Vec<crate::models::RenameFile>,
     },
     CompressFiles {
         ignore_failure: bool,
@@ -838,28 +832,92 @@ impl ScheduleAction {
                 }
 
                 let file_name = parent.join(destination);
+                let destination_parent = match file_name.parent() {
+                    Some(parent) => parent,
+                    None => {
+                        return Err("destination has no parent".into());
+                    }
+                };
+                let destination_file_name = match file_name.file_name() {
+                    Some(name) => name,
+                    None => {
+                        return Err("invalid destination file name".into());
+                    }
+                };
 
                 let (destination_path, destination_filesystem) = server
                     .filesystem
-                    .resolve_writable_fs(server, &file_name)
+                    .resolve_writable_fs(server, destination_parent)
+                    .await;
+                let destination_path = server
+                    .filesystem
+                    .relative_path(&destination_path.join(destination_file_name));
+
+                let progress = Arc::new(AtomicU64::new(0));
+                let total = Arc::new(AtomicU64::new(metadata.size));
+
+                let (_, task) = server
+                    .filesystem
+                    .operations
+                    .add_operation(
+                        crate::server::filesystem::operations::FilesystemOperation::Copy {
+                            path: path.clone(),
+                            destination_path: file_name,
+                            progress: progress.clone(),
+                            total: total.clone(),
+                        },
+                        {
+                            let server = server.clone();
+                            let destination_path = destination_path.clone();
+                            let destination_filesystem = destination_filesystem.clone();
+
+                            async move {
+                                server
+                                    .filesystem
+                                    .copy_path(
+                                        progress,
+                                        &server,
+                                        metadata,
+                                        path,
+                                        filesystem.clone(),
+                                        destination_path,
+                                        destination_filesystem,
+                                    )
+                                    .await?;
+
+                                Ok(())
+                            }
+                        },
+                    )
                     .await;
 
-                if let Err(err) = server
-                    .filesystem
-                    .copy_path(
-                        server,
-                        metadata,
-                        path.clone(),
-                        &path,
-                        filesystem,
-                        destination_path.clone(),
-                        &file_name,
-                        destination_filesystem.clone(),
-                        *foreground,
-                    )
-                    .await
-                {
-                    return Err(err.into_string_error().await.into());
+                if *foreground {
+                    match task.await {
+                        Ok(Some(Ok(()))) => {}
+                        Ok(None) => {
+                            return Err("file copy aborted by another source".into());
+                        }
+                        Ok(Some(Err(err))) => {
+                            tracing::error!(
+                                server = %server.uuid,
+                                root = %root.display(),
+                                "failed to copy file: {:#?}",
+                                err,
+                            );
+
+                            return Err(format!("failed to copy file: {err}").into());
+                        }
+                        Err(err) => {
+                            tracing::error!(
+                                server = %server.uuid,
+                                root = %root.display(),
+                                "failed to copy file: {:#?}",
+                                err,
+                            );
+
+                            return Err("failed to copy file".into());
+                        }
+                    }
                 }
 
                 server

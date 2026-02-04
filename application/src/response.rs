@@ -130,19 +130,6 @@ impl ApiResponse {
         self
     }
 
-    pub async fn into_string_error(self) -> String {
-        let bytes = match axum::body::to_bytes(self.body, 8192).await {
-            Ok(bytes) => bytes,
-            Err(_) => return "unknown error".into(),
-        };
-
-        if let Ok(api_error) = serde_json::from_slice::<ApiError>(&bytes) {
-            api_error.error.into()
-        } else {
-            String::from_utf8(bytes.into()).unwrap_or_else(|_| "unknown error".into())
-        }
-    }
-
     #[inline]
     pub fn ok(self) -> ApiResponseResult {
         Ok(self)

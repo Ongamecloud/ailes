@@ -634,6 +634,8 @@ impl VirtualReadableFilesystem for VirtualSevenZipArchive {
                                 Err(err) => return Err(err.into()),
                             }
                         }
+
+                        runtime.block_on(simplex_writer.shutdown()).ok();
                     } else {
                         std::io::copy(entry_reader, &mut std::io::sink())?;
                     }

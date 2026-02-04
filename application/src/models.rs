@@ -99,3 +99,15 @@ pub struct Progress {
     pub progress: u64,
     pub total: u64,
 }
+
+#[derive(ToSchema, Serialize, Deserialize, Clone)]
+pub struct RenameFile {
+    pub from: compact_str::CompactString,
+    pub to: compact_str::CompactString,
+}
+
+#[derive(ToSchema, Serialize, Deserialize, Clone)]
+pub struct CopyFile {
+    pub from: compact_str::CompactString,
+    pub to: compact_str::CompactString,
+}

@@ -759,8 +759,6 @@ impl VirtualReadableFilesystem for VirtualDdupBakArchive {
         Ok(simplex_reader)
     }
 
-    // New required implementation for `walk_dir`
-    // Since the original didn't have this, we implement a standard BFS here using queue
     async fn async_walk_dir<'a>(
         &'a self,
         path: &(dyn AsRef<Path> + Send + Sync),
@@ -798,7 +796,6 @@ impl VirtualReadableFilesystem for VirtualDdupBakArchive {
         let path = path.as_ref().to_path_buf();
         let mut queue = VecDeque::new();
 
-        // Seed the queue based on path
         if let Some(entry) = archive.find_archive_entry(&path) {
             if let ddup_bak::archive::entries::Entry::Directory(dir) = entry {
                 for child in &dir.entries {
@@ -880,6 +877,8 @@ impl VirtualReadableFilesystem for VirtualDdupBakArchive {
                                             }
                                         }
                                     }
+
+                                    runtime.block_on(writer.shutdown()).ok();
                                 });
                                 Box::new(reader)
                             }

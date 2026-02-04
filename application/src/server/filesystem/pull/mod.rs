@@ -1,3 +1,4 @@
+use crate::server::filesystem::virtualfs::VirtualWritableFilesystem;
 use anyhow::Context;
 use compact_str::ToCompactString;
 use rand::Rng;
@@ -13,8 +14,6 @@ use std::{
 };
 use tokio::{io::AsyncWriteExt, sync::RwLock};
 use utoipa::ToSchema;
-
-use crate::server::filesystem::virtualfs::VirtualWritableFilesystem;
 
 mod resolver;
 

@@ -10,18 +10,12 @@ mod put {
     use utoipa::ToSchema;
 
     #[derive(ToSchema, Deserialize)]
-    pub struct RenameFile {
-        from: compact_str::CompactString,
-        to: compact_str::CompactString,
-    }
-
-    #[derive(ToSchema, Deserialize)]
     pub struct Payload {
         #[serde(default)]
         root: compact_str::CompactString,
 
         #[schema(inline)]
-        files: Vec<RenameFile>,
+        files: Vec<crate::models::RenameFile>,
     }
 
     #[derive(ToSchema, Serialize)]

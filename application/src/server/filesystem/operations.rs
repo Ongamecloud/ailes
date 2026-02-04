@@ -53,6 +53,15 @@ pub enum FilesystemOperation {
         #[serde(serialize_with = "serialize_arc")]
         total: Arc<AtomicU64>,
     },
+    CopyMany {
+        path: PathBuf,
+        files: Vec<crate::models::CopyFile>,
+
+        #[serde(serialize_with = "serialize_arc")]
+        progress: Arc<AtomicU64>,
+        #[serde(serialize_with = "serialize_arc")]
+        total: Arc<AtomicU64>,
+    },
     CopyRemote {
         server: uuid::Uuid,
         path: PathBuf,
@@ -67,7 +76,12 @@ pub enum FilesystemOperation {
     },
 }
 
-type Operation = (FilesystemOperation, tokio::sync::oneshot::Sender<()>);
+pub struct Operation {
+    pub filesystem_operation: FilesystemOperation,
+    abort_sender: tokio::sync::oneshot::Sender<()>,
+    finish_notifier: Arc<tokio::sync::Notify>,
+}
+
 pub struct OperationManager {
     operations: Arc<RwLock<HashMap<uuid::Uuid, Operation>>>,
     sender: tokio::sync::broadcast::Sender<crate::server::websocket::WebsocketMessage>,
@@ -101,11 +115,13 @@ impl OperationManager {
     ) {
         let operation_uuid = uuid::Uuid::new_v4();
         let (abort_sender, abort_receiver) = tokio::sync::oneshot::channel();
+        let finish_notifier = Arc::new(tokio::sync::Notify::new());
 
         let handle = tokio::spawn({
             let operation = operation.clone();
             let operations = self.operations.clone();
             let sender = self.sender.clone();
+            let finish_notifier = Arc::clone(&finish_notifier);
 
             async move {
                 let progress_task = async {
@@ -174,24 +190,42 @@ impl OperationManager {
                         .ok();
                 }
 
+                finish_notifier.notify_waiters();
+
                 result
             }
         });
 
-        self.operations
-            .write()
-            .await
-            .insert(operation_uuid, (operation, abort_sender));
+        self.operations.write().await.insert(
+            operation_uuid,
+            Operation {
+                filesystem_operation: operation,
+                abort_sender,
+                finish_notifier,
+            },
+        );
 
         (operation_uuid, handle)
     }
 
     pub async fn abort_operation(&self, operation_uuid: uuid::Uuid) -> bool {
-        if let Some((_, abort_sender)) = self.operations.write().await.remove(&operation_uuid) {
-            abort_sender.send(()).ok();
+        if let Some(operation) = self.operations.write().await.remove(&operation_uuid) {
+            operation.abort_sender.send(()).ok();
             return true;
         }
 
         false
+    }
+
+    pub async fn wait_for_operation_completion(&self, operation_uuid: uuid::Uuid) -> Option<()> {
+        let finish_notifier = {
+            let operations = self.operations.read().await;
+            let operation = operations.get(&operation_uuid)?;
+
+            Arc::clone(&operation.finish_notifier)
+        };
+
+        finish_notifier.notified().await;
+        Some(())
     }
 }
