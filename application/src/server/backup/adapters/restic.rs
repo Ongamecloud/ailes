@@ -1612,7 +1612,7 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
         let short_id = self.short_id.clone();
         let file_compression_threads = self.server.app_state.config.api.file_compression_threads;
 
-        let spawn_restic = move |path: &Path| {
+        let spawn_restic = move |is_dir: bool, path: &Path| {
             std::process::Command::new("restic")
                 .envs(&configuration.environment)
                 .arg("--json")
@@ -1623,8 +1623,14 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
                 .arg("--cache-dir")
                 .arg(get_restic_cache_dir(&config))
                 .arg("dump")
-                .arg(format!("{}:{}", short_id, full_path.join(path).display()))
-                .arg("/")
+                .args(if is_dir {
+                    vec![
+                        format!("{}:{}", short_id, full_path.join(path).display()),
+                        "/".to_string(),
+                    ]
+                } else {
+                    vec![short_id.clone(), full_path.join(path).display().to_string()]
+                })
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::null())
                 .spawn()
@@ -1650,7 +1656,10 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
                             continue;
                         }
 
-                        let mut child = spawn_restic(&entry_path)?;
+                        let mut child = spawn_restic(
+                            matches!(entry.r#type, ResticEntryType::Dir),
+                            &entry_path,
+                        )?;
 
                         if matches!(entry.r#type, ResticEntryType::Dir) {
                             let mut restic_tar = tar::Archive::new(child.stdout.take().unwrap());
@@ -1778,8 +1787,12 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
                             continue;
                         }
 
+                        let mut child = spawn_restic(
+                            matches!(entry.r#type, ResticEntryType::Dir),
+                            &entry_path,
+                        )?;
+
                         if matches!(entry.r#type, ResticEntryType::Dir) {
-                            let mut child = spawn_restic(&entry_path)?;
                             let mut restic_tar = tar::Archive::new(child.stdout.take().unwrap());
                             let mut entries = restic_tar.entries()?;
 
@@ -1814,8 +1827,6 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
                                 }
                             }
                         } else {
-                            let mut child = spawn_restic(&entry_path)?;
-
                             let mut header = tar::Header::new_gnu();
                             header.set_path(&entry_path)?;
                             header.set_size(entry.size.unwrap_or(0));
