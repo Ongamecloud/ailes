@@ -50,11 +50,6 @@ jobs:
       - name: Install cross
         run: cargo install cross --git https://github.com/cross-rs/cross
 
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: ${{ runner.os }}-${{ matrix.target }}
-
       - name: Run cargo test
         run: cross test --release --target ${{ matrix.target }}
 
