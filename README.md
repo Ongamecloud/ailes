@@ -244,3 +244,7 @@ remote_query:
 ### cli
 
 - add `service-install` command to automatically setup a service for wings
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=calagopus/wings&type=date&legend=top-left)](https://www.star-history.com/#calagopus/wings&type=date&legend=top-left)

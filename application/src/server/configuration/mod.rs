@@ -85,6 +85,8 @@ nestify::nest! {
         #[schema(inline)]
         pub build: #[derive(ToSchema, Deserialize, Serialize)] pub struct ServerConfigurationBuild {
             pub memory_limit: i64,
+            #[serde(default, deserialize_with = "crate::deserialize::deserialize_defaultable")]
+            pub overhead_memory: i64,
             pub swap: i64,
             pub io_weight: Option<u16>,
             pub cpu_limit: i64,
@@ -374,19 +376,25 @@ impl ServerConfiguration {
         &self,
         config: &crate::config::Config,
     ) -> bollard::models::Resources {
+        let real_memory = if self.build.memory_limit > 0 {
+            self.build.memory_limit + self.build.overhead_memory
+        } else {
+            0
+        };
+
         let mut resources = bollard::models::Resources {
-            memory: match self.build.memory_limit {
+            memory: match real_memory {
                 0 => None,
                 limit => Some(config.docker.overhead.get_memory(limit.into()).as_bytes() as i64),
             },
-            memory_reservation: match self.build.memory_limit {
+            memory_reservation: match real_memory {
                 0 => None,
                 limit => Some(limit * 1024 * 1024),
             },
             memory_swap: match self.build.swap {
                 0 => None,
                 -1 => Some(-1),
-                limit => match self.build.memory_limit {
+                limit => match real_memory {
                     0 => Some(limit * 1024 * 1024),
                     memory_limit => Some(
                         config
