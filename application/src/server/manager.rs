@@ -327,13 +327,20 @@ impl ServerManager {
                 .await
                 .start_on_completion
                 .is_some_and(|s| s)
-            && let Err(err) = server.start(None, false).await
         {
-            tracing::error!(
-                server = %server.uuid,
-                "failed to start server on boot: {}",
-                err
-            );
+            tokio::spawn({
+                let server = server.clone();
+
+                async move {
+                    if let Err(err) = server.start(None, false).await {
+                        tracing::error!(
+                            server = %server.uuid,
+                            "failed to start server on boot: {}",
+                            err
+                        );
+                    }
+                }
+            });
         }
 
         self.servers.write().await.push(server.clone());
