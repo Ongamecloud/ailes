@@ -315,30 +315,14 @@ impl ServerManager {
                 }
             });
         } else {
-            let installer = super::installation::ServerInstaller::new(&server, false, None).await;
-
-            installer.unset_installing(true).await.ok();
-        }
-
-        if !install_server
-            && server
-                .configuration
-                .read()
-                .await
-                .start_on_completion
-                .is_some_and(|s| s)
-        {
             tokio::spawn({
                 let server = server.clone();
 
                 async move {
-                    if let Err(err) = server.start(None, false).await {
-                        tracing::error!(
-                            server = %server.uuid,
-                            "failed to start server on boot: {}",
-                            err
-                        );
-                    }
+                    let installer =
+                        super::installation::ServerInstaller::new(&server, false, None).await;
+
+                    installer.unset_installing(true).await.ok();
                 }
             });
         }
