@@ -122,8 +122,8 @@ pub struct InotifyServerNotifier {
 impl InotifyServerNotifier {
     pub fn new(path: PathBuf) -> Self {
         Self {
-            path,
-            modified_paths: Arc::new(Mutex::new(Vec::new())),
+            path: path.clone(),
+            modified_paths: Arc::new(Mutex::new(vec![path])),
         }
     }
 

@@ -143,88 +143,133 @@ impl Filesystem {
                                 "checking disk usage"
                             );
 
-                            if let Some(modified_paths) = paths_to_scan {
-                                if modified_paths.is_empty() {
-                                    tracing::debug!(
-                                        path = %cap_filesystem.base_path.display(),
-                                        "skipping disk usage check, no modified paths"
-                                    );
-                                    return Ok(());
-                                }
+                            'selective_scan: {
+                                if let Some(modified_paths) = paths_to_scan {
+                                    if modified_paths.is_empty() {
+                                        tracing::debug!(
+                                            path = %cap_filesystem.base_path.display(),
+                                            "skipping disk usage check, no modified paths"
+                                        );
+                                        return Ok(());
+                                    }
 
-                                let mut dirs_to_scan = Vec::new();
-                                for modified_path in &modified_paths {
-                                    let relative = match modified_path.strip_prefix(&*cap_filesystem.base_path) {
-                                        Ok(relative) => relative,
-                                        Err(_) => continue,
-                                    };
-
-                                    let dir = match cap_filesystem.async_symlink_metadata(relative).await {
-                                        Ok(m) if m.is_dir() => relative.to_path_buf(),
-                                        Ok(_) => match relative.parent() {
-                                            Some(p) => p.to_path_buf(),
-                                            None => continue,
-                                        },
-                                        Err(_) => {
-                                            disk_usage.write().await.remove_path(relative);
-                                            continue;
-                                        }
-                                    };
-
-                                    dirs_to_scan.push(dir);
-                                }
-
-                                let dirs_to_scan = crate::utils::deduplicate_paths(dirs_to_scan);
-
-                                tracing::debug!(
-                                    path = %cap_filesystem.base_path.display(),
-                                    "checking disk usage for {} modified directories: {:?}",
-                                    dirs_to_scan.len(),
-                                    dirs_to_scan
-                                );
-
-                                for dir in &dirs_to_scan {
-                                    let mut seen_inodes = HashSet::new();
-                                    let mut dir_total = 0;
-                                    let mut dir_apparent = 0;
-
-                                    let mut walker = cap_filesystem.async_walk_dir(dir).await?;
-                                    while let Some(entry) = walker.next_entry().await {
-                                        let (_, path) = entry?;
-                                        let metadata = match cap_filesystem.async_symlink_metadata(&path).await {
-                                            Ok(m) => m,
+                                    let mut dirs_to_scan = Vec::new();
+                                    for modified_path in &modified_paths {
+                                        let relative = match modified_path.strip_prefix(&*cap_filesystem.base_path) {
+                                            Ok(relative) => relative,
                                             Err(_) => continue,
                                         };
-                                        let size = metadata.len();
 
-                                        #[cfg(unix)]
-                                        {
-                                            use cap_std::fs::MetadataExt;
-                                            if !metadata.is_dir() && metadata.nlink() > 1 {
-                                                if seen_inodes.contains(&metadata.ino()) {
-                                                    dir_apparent += size;
-                                                    continue;
-                                                } else {
-                                                    seen_inodes.insert(metadata.ino());
+                                        let dir = match cap_filesystem.async_symlink_metadata(relative).await {
+                                            Ok(metadata) if metadata.is_dir() => relative.to_path_buf(),
+                                            Ok(_) => match relative.parent() {
+                                                Some(relative) => relative.to_path_buf(),
+                                                None => continue,
+                                            },
+                                            Err(_) => {
+                                                let mut parent = relative;
+                                                loop {
+                                                    parent = match parent.parent() {
+                                                        Some(p) => p,
+                                                        None => break,
+                                                    };
+
+                                                    match cap_filesystem.async_symlink_metadata(parent).await {
+                                                        Ok(metadata) if metadata.is_dir() => {
+                                                            dirs_to_scan.push(parent.to_path_buf());
+                                                            break;
+                                                        }
+                                                        _ => continue,
+                                                    }
                                                 }
+
+                                                parent.to_path_buf()
+                                            }
+                                        };
+
+                                        dirs_to_scan.push(dir);
+                                    }
+
+                                    let dirs_to_scan = crate::utils::deduplicate_paths(dirs_to_scan);
+
+                                    if dirs_to_scan.first().is_some_and(|p| p == Path::new("")) {
+                                        break 'selective_scan;
+                                    }
+
+                                    tracing::debug!(
+                                        path = %cap_filesystem.base_path.display(),
+                                        "checking disk usage for {} modified directories: {:?}",
+                                        dirs_to_scan.len(),
+                                        dirs_to_scan
+                                    );
+
+                                    for dir in &dirs_to_scan {
+                                        let mut tmp_disk_usage = usage::DiskUsage::default();
+                                        let mut seen_inodes = HashSet::new();
+
+                                        let mut walker = cap_filesystem.async_walk_dir(dir).await?;
+                                        while let Some(entry) = walker.next_entry().await {
+                                            let (_, path) = entry?;
+                                            let metadata = match cap_filesystem.async_symlink_metadata(&path).await {
+                                                Ok(metadata) => metadata,
+                                                Err(_) => continue,
+                                            };
+                                            let size = metadata.len();
+
+                                            println!("scanning path: {}, size: {}", path.display(), size);
+
+                                            let relative = match path.strip_prefix(dir) {
+                                                Ok(relative) => relative,
+                                                Err(_) => continue,
+                                            };
+
+                                            println!("relative path: {:?}", relative);
+                                            println!("dir path: {}", dir.display());
+
+                                            #[cfg(unix)]
+                                            {
+                                                use cap_std::fs::MetadataExt;
+
+                                                if !metadata.is_dir() && metadata.nlink() > 1 {
+                                                    if seen_inodes.contains(&metadata.ino()) {
+                                                        if let Some(parent) = relative.parent() {
+                                                            tmp_disk_usage
+                                                                .update_size(parent, (0, size as i64).into());
+                                                        }
+                                                        continue;
+                                                    } else {
+                                                        seen_inodes.insert(metadata.ino());
+                                                    }
+                                                }
+                                            }
+
+                                            if metadata.is_dir() {
+                                                tmp_disk_usage.update_size(relative, (size as i64).into());
+                                            } else if let Some(parent) = relative.parent() {
+                                                println!("{}: adding size {} to parent {:?} (relative path: {:?})", path.display(), size, parent, relative);
+                                                tmp_disk_usage.update_size(parent, (size as i64).into());
                                             }
                                         }
 
-                                        dir_total += size;
-                                        dir_apparent += size;
+                                        println!("{:?}", tmp_disk_usage);
+
+                                        let mut disk_usage_write = disk_usage.write().await;
+                                        disk_usage_write.remove_path(dir);
+                                        disk_usage_write.add_directory(
+                                            &dir.components()
+                                                .map(|c| c.as_os_str().to_string_lossy().to_string())
+                                                .collect::<Vec<_>>(),
+                                            tmp_disk_usage
+                                        );
+                                        let root_space = disk_usage_write.space;
+                                        drop(disk_usage_write);
+
+                                        disk_usage_cached.store(root_space.get_real(), Ordering::Relaxed);
+                                        apparent_disk_usage_cached.store(root_space.get_apparent(), Ordering::Relaxed);
                                     }
 
-                                    let mut disk_usage_write = disk_usage.write().await;
-                                    disk_usage_write.remove_path(dir);
-                                    disk_usage_write.update_size(dir, (dir_total as i64, dir_apparent as i64).into());
-                                    let root = disk_usage_write.space;
-                                    drop(disk_usage_write);
-
-                                    disk_usage_cached.store(root.get_real(), Ordering::Relaxed);
-                                    apparent_disk_usage_cached.store(root.get_apparent(), Ordering::Relaxed);
+                                    return Ok(());
                                 }
-
-                                return Ok(());
                             }
 
                             let mut tmp_disk_usage = usage::DiskUsage::default();

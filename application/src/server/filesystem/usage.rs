@@ -79,7 +79,7 @@ impl From<(i64, i64)> for SpaceDelta {
     }
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct DiskUsage {
     pub space: UsedSpace,
     entries: thin_vec::ThinVec<(compact_str::CompactString, DiskUsage)>,
@@ -137,6 +137,9 @@ impl DiskUsage {
     }
 
     pub fn update_size(&mut self, path: &Path, delta: SpaceDelta) {
+        self.space.add_real(delta.real as u64);
+        self.space.add_apparent(delta.apparent as u64);
+
         if crate::unlikely(path == Path::new("") || path == Path::new("/")) {
             return;
         }
