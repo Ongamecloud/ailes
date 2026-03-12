@@ -8,6 +8,43 @@ use utoipa_axum::{
 mod _server_;
 mod files;
 
+mod get {
+    use crate::{
+        response::{ApiResponse, ApiResponseResult},
+        routes::{ApiError, GetState},
+    };
+    use std::collections::HashMap;
+
+    #[utoipa::path(get, path = "/", responses(
+        (status = OK, body = HashMap<uuid::Uuid, crate::models::TransferProgress>),
+        (status = NOT_FOUND, body = ApiError),
+    ))]
+    pub async fn route(state: GetState) -> ApiResponseResult {
+        let mut transfers = HashMap::new();
+
+        for server in state.server_manager.get_servers().await.iter() {
+            if let Some(outgoing_transfer) = server.outgoing_transfer.read().await.as_ref() {
+                transfers.insert(
+                    server.uuid,
+                    crate::models::TransferProgress {
+                        archive_progress: outgoing_transfer
+                            .bytes_archived
+                            .load(std::sync::atomic::Ordering::Relaxed),
+                        network_progress: outgoing_transfer
+                            .bytes_sent
+                            .load(std::sync::atomic::Ordering::Relaxed),
+                        total: outgoing_transfer
+                            .bytes_total
+                            .load(std::sync::atomic::Ordering::Relaxed),
+                    },
+                );
+            }
+        }
+
+        ApiResponse::new_serialized(transfers).ok()
+    }
+}
+
 mod post {
     use crate::{
         io::{
@@ -697,8 +734,20 @@ mod post {
 
 pub fn router(state: &State) -> OpenApiRouter<State> {
     OpenApiRouter::new()
+        .routes(
+            routes!(get::route).layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                crate::routes::api::auth,
+            )),
+        )
         .routes(routes!(post::route).layer(DefaultBodyLimit::disable()))
         .nest("/files", files::router(state))
-        .nest("/{server}", _server_::router(state))
+        .nest(
+            "/{server}",
+            _server_::router(state).route_layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                crate::routes::api::auth,
+            )),
+        )
         .with_state(state.clone())
 }

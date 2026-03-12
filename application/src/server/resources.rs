@@ -4,7 +4,6 @@ use utoipa::ToSchema;
 
 nestify::nest! {
     #[derive(ToSchema, Default, Deserialize, Serialize, Clone, Copy, PartialEq)]
-    #[repr(align(64))]
     pub struct ResourceUsage {
         pub memory_bytes: u64,
         pub memory_limit_bytes: u64,

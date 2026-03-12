@@ -108,6 +108,7 @@ impl std::str::FromStr for TransferArchiveFormat {
 pub struct OutgoingServerTransfer {
     pub bytes_archived: Arc<AtomicU64>,
     pub bytes_sent: Arc<AtomicU64>,
+    pub bytes_total: Arc<AtomicU64>,
 
     server: super::Server,
     archive_format: TransferArchiveFormat,
@@ -124,6 +125,7 @@ impl OutgoingServerTransfer {
         Self {
             bytes_archived: Arc::new(AtomicU64::new(0)),
             bytes_sent: Arc::new(AtomicU64::new(0)),
+            bytes_total: Arc::new(AtomicU64::new(0)),
             server: server.clone(),
             archive_format,
             compression_level,
@@ -178,6 +180,7 @@ impl OutgoingServerTransfer {
         let backup_manager = Arc::clone(backup_manager);
         let bytes_archived = Arc::clone(&self.bytes_archived);
         let bytes_sent = Arc::clone(&self.bytes_sent);
+        let bytes_total = Arc::clone(&self.bytes_total);
         let archive_format = self.archive_format;
         let compression_level = self.compression_level;
         let server = self.server.clone();
@@ -314,10 +317,10 @@ impl OutgoingServerTransfer {
                     .unwrap(),
                 );
 
-            let mut total_bytes = server.filesystem.get_logical_cached_size();
+            bytes_total.store(server.filesystem.get_logical_cached_size(), Ordering::Relaxed);
 
             if let Ok(install_logs) = crate::server::installation::ServerInstaller::get_install_logs(&server).await {
-                total_bytes += install_logs.metadata().await.map(|m| m.len()).unwrap_or(0);
+                bytes_total.fetch_add(install_logs.metadata().await.map(|m| m.len()).unwrap_or(0), Ordering::Relaxed);
 
                 form = form.part(
                     "install-logs",
@@ -380,10 +383,13 @@ impl OutgoingServerTransfer {
                                 checksum_sender.send(format!("{:x}", hasher.lock().await.finalize_reset())).ok();
                             });
 
-                            total_bytes += tokio::fs::metadata(&file_name)
-                                .await
-                                .map(|m| m.len())
-                                .unwrap_or(0);
+                            bytes_total.fetch_add(
+                                tokio::fs::metadata(&file_name)
+                                    .await
+                                    .map(|m| m.len())
+                                    .unwrap_or(0),
+                                Ordering::Relaxed
+                            );
 
                             form = form
                                 .part(
@@ -425,6 +431,7 @@ impl OutgoingServerTransfer {
             let progress_task = Box::pin({
                 let bytes_archived = Arc::clone(&bytes_archived);
                 let bytes_sent = Arc::clone(&bytes_sent);
+                let bytes_total = bytes_total.load(Ordering::Relaxed);
                 let server = server.clone();
 
                 async move {
@@ -457,19 +464,19 @@ impl OutgoingServerTransfer {
                         last_bytes_archived = current_bytes_archived;
                         last_bytes_sent = current_bytes_sent;
 
-                        let total_bytes = total_bytes.max(current_bytes_archived);
+                        let bytes_total = bytes_total.max(current_bytes_archived);
 
                         let formatted_bytes_archived = human_bytes(current_bytes_archived as f64);
-                        let formatted_total_bytes = human_bytes(total_bytes as f64);
+                        let formatted_bytes_total = human_bytes(bytes_total as f64);
                         let formatted_archive_rate = human_bytes(archive_rate);
                         let formatted_bytes_sent = human_bytes(current_bytes_sent as f64);
                         let formatted_network_rate = human_bytes(network_rate);
 
-                        let archive_percentage = (current_bytes_archived as f64 / total_bytes as f64) * 100.0;
+                        let archive_percentage = (current_bytes_archived as f64 / bytes_total as f64) * 100.0;
                         let formatted_archive_percentage = format!("{:.2}%", archive_percentage);
 
                         let time_estimate = if archive_rate > 0.0 {
-                            let remaining_bytes = total_bytes as f64 - current_bytes_archived as f64;
+                            let remaining_bytes = bytes_total as f64 - current_bytes_archived as f64;
                             let remaining_seconds = remaining_bytes / archive_rate;
 
                             &if remaining_seconds < 60.0 {
@@ -502,10 +509,10 @@ impl OutgoingServerTransfer {
 
                         let progress_log = format!(
                             "{} - ETA: {}\r\nArchive: {} of {} ({}/s) - Elapsed: {}\r\nNetwork: {} sent ({}/s)",
-                            crate::utils::draw_progress_bar(30, current_bytes_archived as f64, total_bytes as f64),
+                            crate::utils::draw_progress_bar(30, current_bytes_archived as f64, bytes_total as f64),
                             time_estimate,
                             formatted_bytes_archived,
-                            formatted_total_bytes,
+                            formatted_bytes_total,
                             formatted_archive_rate,
                             elapsed_time,
                             formatted_bytes_sent,
@@ -518,9 +525,10 @@ impl OutgoingServerTransfer {
                             .websocket
                             .send(super::websocket::WebsocketMessage::new(
                                 super::websocket::WebsocketEvent::ServerTransferProgress,
-                                [serde_json::to_string(&crate::models::Progress {
-                                    progress: current_bytes_archived,
-                                    total: total_bytes
+                                [serde_json::to_string(&crate::models::TransferProgress {
+                                    archive_progress: current_bytes_archived,
+                                    network_progress: current_bytes_sent,
+                                    total: bytes_total
                                 })
                                 .unwrap()
                                 .into()]
@@ -533,7 +541,7 @@ impl OutgoingServerTransfer {
                             "Progress: {}, Archive: {} of {} ({}/s), Network: {} ({}/s), ETA: {}",
                             formatted_archive_percentage,
                             formatted_bytes_archived,
-                            formatted_total_bytes,
+                            formatted_bytes_total,
                             formatted_archive_rate,
                             formatted_bytes_sent,
                             formatted_network_rate,

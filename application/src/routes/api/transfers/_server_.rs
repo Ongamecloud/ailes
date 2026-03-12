@@ -37,6 +37,7 @@ mod delete {
             .transferring
             .store(false, std::sync::atomic::Ordering::SeqCst);
         server.incoming_transfer.write().await.take();
+        server.outgoing_transfer.write().await.take();
 
         ApiResponse::new_serialized(Response {}).ok()
     }
@@ -45,9 +46,5 @@ mod delete {
 pub fn router(state: &State) -> OpenApiRouter<State> {
     OpenApiRouter::new()
         .routes(routes!(delete::route))
-        .route_layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            crate::routes::api::auth,
-        ))
         .with_state(state.clone())
 }

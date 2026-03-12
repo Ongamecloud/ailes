@@ -96,6 +96,13 @@ pub struct PullProgress {
 }
 
 #[derive(ToSchema, Serialize)]
+pub struct TransferProgress {
+    pub archive_progress: u64,
+    pub network_progress: u64,
+    pub total: u64,
+}
+
+#[derive(ToSchema, Serialize)]
 pub struct Progress {
     pub progress: u64,
     pub total: u64,
