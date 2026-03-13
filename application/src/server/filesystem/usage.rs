@@ -25,14 +25,14 @@ impl UsedSpace {
 
     #[inline]
     pub fn sub_logical(&mut self, val: u64) {
-        let real = self.get_logical();
-        self.set_logical(real.saturating_sub(val));
+        let logical = self.get_logical();
+        self.set_logical(logical.saturating_sub(val));
     }
 
     #[inline]
     pub fn add_logical(&mut self, val: u64) {
-        let real = self.get_logical();
-        self.set_logical(real.saturating_add(val));
+        let logical = self.get_logical();
+        self.set_logical(logical.saturating_add(val));
     }
 
     #[inline]
@@ -47,14 +47,14 @@ impl UsedSpace {
 
     #[inline]
     pub fn sub_physical(&mut self, val: u64) {
-        let apparent = self.get_physical();
-        self.set_physical(apparent.saturating_sub(val));
+        let physical = self.get_physical();
+        self.set_physical(physical.saturating_sub(val));
     }
 
     #[inline]
     pub fn add_physical(&mut self, val: u64) {
-        let apparent = self.get_physical();
-        self.set_physical(apparent.saturating_add(val));
+        let physical = self.get_physical();
+        self.set_physical(physical.saturating_add(val));
     }
 }
 
@@ -181,8 +181,16 @@ impl DiskUsage {
     }
 
     pub fn update_size(&mut self, path: &Path, delta: SpaceDelta) {
-        self.space.add_logical(delta.logical as u64);
-        self.space.add_physical(delta.physical as u64);
+        if delta.logical >= 0 {
+            self.space.add_logical(delta.logical as u64);
+        } else {
+            self.space.sub_logical(delta.logical.unsigned_abs());
+        }
+        if delta.physical >= 0 {
+            self.space.add_physical(delta.physical as u64);
+        } else {
+            self.space.sub_physical(delta.physical.unsigned_abs());
+        }
 
         if crate::unlikely(path == Path::new("") || path == Path::new("/")) {
             return;
@@ -214,6 +222,17 @@ impl DiskUsage {
         path: impl IntoIterator<Item = impl AsRef<str> + Debug> + Debug,
         delta: SpaceDelta,
     ) {
+        if delta.logical >= 0 {
+            self.space.add_logical(delta.logical as u64);
+        } else {
+            self.space.sub_logical(delta.logical.unsigned_abs());
+        }
+        if delta.physical >= 0 {
+            self.space.add_physical(delta.physical as u64);
+        } else {
+            self.space.sub_physical(delta.physical.unsigned_abs());
+        }
+
         let mut current = self;
         for component in path {
             let entry = current.upsert_entry(component.as_ref());
