@@ -13,7 +13,7 @@ mod get {
         response::{ApiResponse, ApiResponseResult},
         routes::{ApiError, GetState},
     };
-    use std::collections::HashMap;
+    use std::{collections::HashMap, sync::atomic::Ordering};
 
     #[utoipa::path(get, path = "/", responses(
         (status = OK, body = HashMap<uuid::Uuid, crate::models::TransferProgress>),
@@ -27,15 +27,9 @@ mod get {
                 transfers.insert(
                     server.uuid,
                     crate::models::TransferProgress {
-                        archive_progress: outgoing_transfer
-                            .bytes_archived
-                            .load(std::sync::atomic::Ordering::Relaxed),
-                        network_progress: outgoing_transfer
-                            .bytes_sent
-                            .load(std::sync::atomic::Ordering::Relaxed),
-                        total: outgoing_transfer
-                            .bytes_total
-                            .load(std::sync::atomic::Ordering::Relaxed),
+                        archive_progress: outgoing_transfer.bytes_archived.load(Ordering::Relaxed),
+                        network_progress: outgoing_transfer.bytes_sent.load(Ordering::Relaxed),
+                        total: outgoing_transfer.bytes_total.load(Ordering::Relaxed),
                     },
                 );
             }
@@ -66,7 +60,7 @@ mod post {
     use futures::TryStreamExt;
     use serde::Serialize;
     use sha1::Digest;
-    use std::{io::Write, path::Path, str::FromStr};
+    use std::{io::Write, path::Path, str::FromStr, sync::atomic::Ordering};
     use utoipa::ToSchema;
 
     #[derive(ToSchema, Serialize)]
@@ -152,9 +146,7 @@ mod post {
                 .create_server(&state, server_data, false)
                 .await;
 
-            server
-                .transferring
-                .store(true, std::sync::atomic::Ordering::SeqCst);
+            server.transferring.store(true, Ordering::SeqCst);
             server
         } else {
             let mut tries = 0;
@@ -631,9 +623,7 @@ mod post {
                                 .client
                                 .set_server_transfer(subject, true, backups)
                                 .await?;
-                            server
-                                .transferring
-                                .store(false, std::sync::atomic::Ordering::SeqCst);
+                            server.transferring.store(false, Ordering::SeqCst);
                             server
                                 .websocket
                                 .send(crate::server::websocket::WebsocketMessage::new(
@@ -677,9 +667,7 @@ mod post {
                             .client
                             .set_server_transfer(subject, true, backups)
                             .await?;
-                        server
-                            .transferring
-                            .store(false, std::sync::atomic::Ordering::SeqCst);
+                        server.transferring.store(false, Ordering::SeqCst);
                         server
                             .websocket
                             .send(crate::server::websocket::WebsocketMessage::new(

@@ -1044,7 +1044,7 @@ impl russh_sftp::server::Handler for SftpSession {
             let file = Arc::clone(&handle.file);
 
             move || -> Result<Vec<u8>, std::io::Error> {
-                let mut data = vec![0; len.min(256 * 1024) as usize];
+                let mut data = vec![0; len.min(256 * 1024).saturating_sub(64) as usize];
                 let bytes_read = file.read().unwrap().read_at(offset, &mut data)?;
 
                 data.truncate(bytes_read);

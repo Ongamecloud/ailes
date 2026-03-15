@@ -152,14 +152,11 @@ jobs:
           RAW_TAG="${{ github.ref_name }}"
           VERSION="${RAW_TAG#release-}"
 
-          # 1. Always apply the exact version tag
           DOCKER_TAGS="ghcr.io/${{ env.REPO_NAME }}:${VERSION}"
 
           if [[ "$VERSION" == *-* ]]; then
-            # 2. It's a pre-release: Add 'latest-pre'
             DOCKER_TAGS="$DOCKER_TAGS,ghcr.io/${{ env.REPO_NAME }}:latest-pre"
             
-            # 3. Exception: If it's specifically a 1.0.0 pre-release, also add 'latest'
             if [[ "$VERSION" == 1.0.0-* ]]; then
               DOCKER_TAGS="$DOCKER_TAGS,ghcr.io/${{ env.REPO_NAME }}:latest"
             fi

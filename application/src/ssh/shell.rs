@@ -626,6 +626,19 @@ impl ShellSession {
             let (mut reader, writer) = channel.split();
             let mut reader = reader.make_reader();
 
+            writer
+                .make_writer()
+                .write_all(
+                    format!(
+                        "\x1b]0;{} - {}\x07",
+                        self.state.config.app_name,
+                        self.server.configuration.read().await.meta.name
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap_or_default();
+
             let mut log_stream = self
                 .server
                 .read_log(Some(self.state.config.system.websocket_log_count))
