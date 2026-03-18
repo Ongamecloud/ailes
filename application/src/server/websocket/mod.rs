@@ -58,6 +58,8 @@ pub enum WebsocketEvent {
     SendCommand,
     #[serde(rename = "send stats")]
     SendStats,
+    #[serde(rename = "send status")]
+    SendStatus,
     #[serde(rename = "daemon error")]
     Error,
     #[serde(rename = "jwt error")]

@@ -62,6 +62,14 @@ pub async fn handle_message(
                 ))
                 .await;
         }
+        WebsocketEvent::SendStatus => {
+            websocket_handler
+                .send_message(WebsocketMessage::new(
+                    WebsocketEvent::ServerStatus,
+                    [server.state.get_state().to_str().into()].into(),
+                ))
+                .await;
+        }
         WebsocketEvent::SendServerLogs => {
             if server.state.get_state() != crate::server::state::ServerState::Offline
                 || state.config.api.send_offline_server_logs

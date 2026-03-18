@@ -87,7 +87,6 @@ pub struct UserPermissionsMap {
 impl Default for UserPermissionsMap {
     fn default() -> Self {
         let map = Arc::new(Mutex::new(HashMap::new()));
-
         let (tx, rx) = tokio::sync::broadcast::channel(32);
 
         Self {
@@ -174,6 +173,13 @@ impl UserPermissionsMap {
                 std::time::Instant::now(),
             ),
         );
+    }
+
+    pub async fn clear_permissions(&self) {
+        for user_uuid in self.map.lock().await.keys().copied().collect::<Vec<_>>() {
+            self.map.lock().await.remove(&user_uuid);
+            self.removal_sender.send(user_uuid).ok();
+        }
     }
 }
 

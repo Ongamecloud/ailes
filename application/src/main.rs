@@ -458,7 +458,7 @@ async fn main() {
 
                 tracing::info!(
                     "ssh server listening on {} (app@{}, {}ms)",
-                    address.to_string().cyan(),
+                    address.to_string(),
                     wings_rs::VERSION,
                     state.start_time.elapsed().as_millis()
                 );
@@ -503,7 +503,7 @@ async fn main() {
             .context("failed to load SSL certificate and key")
             .unwrap();
 
-            tracing::info!("https listening on {}", address.to_string().cyan(),);
+            tracing::info!("https listening on {}", address.to_string());
 
             match axum_server::bind_rustls(address, config)
                 .serve(router.into_make_service_with_connect_info::<SocketAddr>())
@@ -521,7 +521,7 @@ async fn main() {
                 }
             }
         } else {
-            tracing::info!("http listening on {}", address.to_string().cyan(),);
+            tracing::info!("http listening on {}", address.to_string());
 
             match axum::serve(
                 match tokio::net::TcpListener::bind(address).await {
@@ -557,7 +557,7 @@ async fn main() {
         {
             let socket_path = &state.config.api.host;
 
-            tracing::info!("http server listening on {}", socket_path.cyan(),);
+            tracing::info!("http server listening on {}", socket_path);
 
             let router = router.layer(axum::middleware::from_fn(
                 |mut req: Request, next: Next| async move {

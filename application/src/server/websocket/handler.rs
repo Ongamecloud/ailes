@@ -33,7 +33,7 @@ pub async fn handle_ws(
     let user_ip = state.config.find_ip(&headers, connect_info);
 
     ws.on_upgrade(move |socket| async move {
-        let (sender, mut reciever) = socket.split();
+        let (sender, mut receiver) = socket.split();
         let sender = Arc::new(Mutex::new(sender));
         let socket_jwt = Arc::new(RwLock::new(None));
 
@@ -69,7 +69,7 @@ pub async fn handle_ws(
                             websocket_handler.close("permission revoked").await;
                             break;
                         }
-                        data = reciever.next() => match data {
+                        data = receiver.next() => match data {
                             Some(Ok(data)) => data,
                             Some(Err(err)) => {
                                 tracing::debug!(

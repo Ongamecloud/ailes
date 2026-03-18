@@ -725,6 +725,7 @@ impl OutgoingServerTransfer {
                         ["completed".into()].into(),
                     ))
                     .ok();
+                server.user_permissions.clear_permissions().await;
             });
         }));
 
