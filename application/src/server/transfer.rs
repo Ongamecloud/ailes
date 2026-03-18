@@ -649,9 +649,9 @@ impl OutgoingServerTransfer {
                         archive_task,
                         checksum_task,
                         file_collector_task,
-                        futures_util::future::try_join_all(multiplex_tasks),
+                        futures::future::try_join_all(multiplex_tasks),
                         async { Ok(response.await?) },
-                        async { Ok(futures_util::future::try_join_all(multiplex_responses).await?) }
+                        async { Ok(futures::future::try_join_all(multiplex_responses).await?) }
                     )
                 } => {
                     if let Err(err) = result {
@@ -759,7 +759,7 @@ impl IncomingServerTransfer {
         main: JoinHandle<Result<Vec<uuid::Uuid>, anyhow::Error>>,
     ) -> Result<Vec<uuid::Uuid>, anyhow::Error> {
         let (backups, _) = tokio::try_join!(async { main.await? }, async {
-            Ok(futures_util::future::try_join_all(
+            Ok(futures::future::try_join_all(
                 self.multiplex_handles.drain(..).map(|h| h.1),
             ))
         })?;

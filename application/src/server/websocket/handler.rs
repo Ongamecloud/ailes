@@ -10,7 +10,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use compact_str::ToCompactString;
-use futures_util::{SinkExt, StreamExt};
+use futures::{SinkExt, StreamExt};
 use std::{net::SocketAddr, pin::Pin, sync::Arc};
 use tokio::sync::{Mutex, RwLock, broadcast::error::RecvError};
 
@@ -50,12 +50,12 @@ pub async fn handle_ws(
 
             async move {
                 loop {
-                    let user_removal_fut: Pin<Box<dyn futures_util::Future<Output = ()> + Send>> = if let Some(jwt) = socket_jwt.read().await.as_ref() {
+                    let user_removal_fut: Pin<Box<dyn Future<Output = ()> + Send>> = if let Some(jwt) = socket_jwt.read().await.as_ref() {
                         Box::pin(server
                             .user_permissions
                             .wait_for_removal(jwt.user_uuid))
                     } else {
-                        Box::pin(futures_util::future::pending())
+                        Box::pin(futures::future::pending())
                     };
                     let ws_data = tokio::select! {
                         _ = user_removal_fut => {
@@ -157,7 +157,7 @@ pub async fn handle_ws(
             }
         };
 
-        let futures: [Pin<Box<dyn futures_util::Future<Output = ()> + Send>>; 4] = [
+        let futures: [Pin<Box<dyn Future<Output = ()> + Send>>; 4] = [
             // Server Listener
             {
                 let socket_jwt = Arc::clone(&socket_jwt);
@@ -385,7 +385,7 @@ pub async fn handle_ws(
                     "websocket writer finished",
                 );
             }
-            _ = futures_util::future::join_all(futures) => {
+            _ = futures::future::join_all(futures) => {
                 tracing::debug!(
                     server = %server.uuid,
                     "websocket handles finished",

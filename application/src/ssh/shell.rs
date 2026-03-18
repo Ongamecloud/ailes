@@ -250,7 +250,7 @@ impl ShellSession {
                                 .await;
                         }
                     } else {
-                        writeln("You are missing the `control.kill` permission to do this.").await;
+                        writeln("You are missing the `control.stop` permission to do this.").await;
                     }
                 }
                 _ => {
@@ -674,11 +674,10 @@ impl ShellSession {
                 }
             }
 
-            let mut futures: Vec<Pin<Box<dyn futures_util::Future<Output = ()> + Send>>> =
-                Vec::with_capacity(2);
+            let mut futures: Vec<Pin<Box<dyn Future<Output = ()> + Send>>> = Vec::with_capacity(2);
 
             futures.push({
-                let mut reciever = self.server.websocket.subscribe();
+                let mut receiver = self.server.websocket.subscribe();
                 let state = Arc::clone(&self.state);
                 let server = self.server.clone();
                 let user_uuid = self.user_uuid;
@@ -686,7 +685,7 @@ impl ShellSession {
 
                 Box::pin(async move {
                     loop {
-                        match reciever.recv().await {
+                        match receiver.recv().await {
                             Ok(message) => match message.event {
                                 WebsocketEvent::ServerInstallOutput => {
                                     if server
@@ -896,7 +895,7 @@ impl ShellSession {
                 _ = stdin_task => {
                     tracing::debug!("shell stdin task finished");
                 }
-                _ = futures_util::future::join_all(futures) => {
+                _ = futures::future::join_all(futures) => {
                     tracing::debug!("shell handles finished");
                 }
             }

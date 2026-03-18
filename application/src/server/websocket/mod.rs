@@ -1,7 +1,7 @@
 use super::permissions::Permissions;
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use compact_str::ToCompactString;
-use futures_util::{SinkExt, stream::SplitSink};
+use futures::{SinkExt, stream::SplitSink};
 use serde::{
     Deserialize, Deserializer, Serialize,
     de::{SeqAccess, Visitor},

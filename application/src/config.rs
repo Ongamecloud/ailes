@@ -1204,25 +1204,43 @@ impl Config {
             return Ok(());
         }
 
-        if self.system.user.rootless.enabled {
-            let user = users::get_current_uid();
-            let group = users::get_current_gid();
+        if let Ok(current_pid) = sysinfo::get_current_pid() {
+            let mut sys = sysinfo::System::new_all();
+            sys.refresh_processes_specifics(
+                sysinfo::ProcessesToUpdate::Some(&[current_pid]),
+                false,
+                sysinfo::ProcessRefreshKind::nothing().with_memory(),
+            );
+            if let Some(process) = sys.process(current_pid) {
+                if self.system.user.rootless.enabled {
+                    if let Some(user) = process.user_id() {
+                        let users = sysinfo::Users::new_with_refreshed_list();
+                        if let Some(user) = users.get_user_by_id(user) {
+                            self.system.username = user.name().to_compact_string();
+                        }
 
-            if let Some(username) = users::get_current_username() {
-                self.system.username = username.to_string_lossy().to_compact_string();
+                        self.system.user.uid = **user;
+                    }
+                    if let Some(group) = process.group_id() {
+                        self.system.user.gid = *group;
+                    }
+
+                    return Ok(());
+                }
+
+                let mut found_user = false;
+                if let Some(user) = process.user_id() {
+                    self.system.user.uid = **user;
+                    found_user = true;
+                }
+                if let Some(group) = process.group_id() {
+                    self.system.user.gid = *group;
+                }
+
+                if found_user {
+                    return Ok(());
+                }
             }
-
-            self.system.user.uid = user;
-            self.system.user.gid = group;
-
-            return Ok(());
-        }
-
-        if let Some(user) = users::get_user_by_name(&self.system.username) {
-            self.system.user.uid = user.uid();
-            self.system.user.gid = user.primary_group_id();
-
-            return Ok(());
         }
 
         let command = if release.contains("alpine") {
@@ -1258,11 +1276,21 @@ impl Config {
             );
         }
 
-        let user = users::get_user_by_name(&self.system.username)
-            .context(format!("failed to get user {}", self.system.username))?;
+        let users = sysinfo::Users::new_with_refreshed_list();
 
-        self.system.user.uid = user.uid();
-        self.system.user.gid = user.primary_group_id();
+        let Some(user) = users
+            .list()
+            .iter()
+            .find(|u| u.name() == self.system.username)
+        else {
+            return Err(anyhow::anyhow!(
+                "failed to find user {} after creating it",
+                self.system.username
+            ));
+        };
+
+        self.system.user.uid = **user.id();
+        self.system.user.gid = *user.group_id();
 
         Ok(())
     }

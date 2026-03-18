@@ -1,6 +1,6 @@
 use bollard::secret::ContainerStateStatusEnum;
 use compact_str::ToCompactString;
-use futures_util::StreamExt;
+use futures::StreamExt;
 use serde_json::json;
 use std::{
     collections::HashMap,
