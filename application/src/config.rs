@@ -1360,6 +1360,13 @@ impl Config {
         Path::new(&self.system.data_directory).join(server_uuid.to_compact_string())
     }
 
+    pub fn daemon_prelude(&self) -> compact_str::CompactString {
+        ansi_term::Color::Yellow
+            .bold()
+            .paint(format!("[{} Daemon]:", self.app_name))
+            .to_compact_string()
+    }
+
     pub async fn ensure_network(&self, client: &bollard::Docker) -> Result<(), anyhow::Error> {
         let network = client
             .inspect_network::<String>(&self.docker.network.name, None)

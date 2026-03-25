@@ -47,9 +47,7 @@ impl ShellSession {
         let prefix = &self.state.config.system.sftp.shell.cli.name;
         writer.write_all(b"\r\n").await.unwrap_or_default();
 
-        let prelude = ansi_term::Color::Yellow
-            .bold()
-            .paint(format!("[{} Daemon]:", self.state.config.app_name));
+        let prelude = self.state.config.daemon_prelude();
 
         let mut writeln = async |line: &str| {
             writer
@@ -504,9 +502,7 @@ impl ShellSession {
                                             .await;
                                     }
                                 } else {
-                                    let prelude = ansi_term::Color::Yellow
-                                        .bold()
-                                        .paint(format!("[{} Daemon]:", self.state.config.app_name));
+                                    let prelude = self.state.config.daemon_prelude();
 
                                     data_writer.write_all(b"\r\n").await.unwrap_or_default();
                                     data_writer
@@ -520,9 +516,7 @@ impl ShellSession {
                                         .unwrap_or_default();
                                 }
                             } else {
-                                let prelude = ansi_term::Color::Yellow
-                                    .bold()
-                                    .paint(format!("[{} Daemon]:", self.state.config.app_name));
+                                let prelude = self.state.config.daemon_prelude();
 
                                 data_writer.write_all(b"\r\n").await.unwrap_or_default();
                                 data_writer
@@ -651,9 +645,7 @@ impl ShellSession {
                     .await;
 
                 {
-                    let prelude = ansi_term::Color::Yellow
-                        .bold()
-                        .paint(format!("[{} Daemon]:", self.state.config.app_name));
+                    let prelude = self.state.config.daemon_prelude();
 
                     writer
                         .make_writer()
@@ -679,6 +671,19 @@ impl ShellSession {
                             .unwrap_or_default();
                     }
                 }
+            } else {
+                let prelude = self.state.config.daemon_prelude();
+
+                writer
+                    .make_writer()
+                    .write_all(
+                        format!(
+                            "{prelude} You are missing the `control.read-console` permission to view server logs and console output.\r\n\x1b[2K"
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap_or_default();
             }
 
             let mut futures: Vec<Pin<Box<dyn Future<Output = ()> + Send>>> = Vec::with_capacity(2);
@@ -749,9 +754,7 @@ impl ShellSession {
                                         .unwrap_or_default();
                                 }
                                 WebsocketEvent::ServerStatus => {
-                                    let prelude = ansi_term::Color::Yellow
-                                        .bold()
-                                        .paint(format!("[{} Daemon]:", state.config.app_name));
+                                    let prelude = state.config.daemon_prelude();
 
                                     writer
                                         .write_all(
@@ -784,47 +787,76 @@ impl ShellSession {
                 })
             });
 
-            if self
-                .server
-                .user_permissions
-                .has_calagopus_permission_or(self.user_uuid, Permission::ControlReadConsole, true)
-                .await
-            {
-                futures.push({
-                    let server = self.server.clone();
-                    let mut writer = writer.make_writer();
+            futures.push({
+                let config = self.state.config.clone();
+                let server = self.server.clone();
+                let user_uuid = self.user_uuid;
+                let mut writer = writer.make_writer();
 
-                    Box::pin(async move {
-                        loop {
-                            if let Some(mut stdout) = server.container_stdout().await {
-                                loop {
-                                    match stdout.recv().await {
-                                        Ok(stdout) => {
-                                            if let Err(err) = writer
-                                                .write_all(format!("{stdout}\r\n\x1b[2K").as_bytes())
-                                                .await
-                                            {
-                                                tracing::error!(error = %err, "failed to write stdout");
-                                            }
+                Box::pin(async move {
+                    'outer: loop {
+                        if !server
+                            .user_permissions
+                            .has_calagopus_permission_or(
+                                user_uuid,
+                                Permission::ControlReadConsole,
+                                true,
+                            )
+                            .await
+                        {
+                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                            continue;
+                        }
+
+                        if let Some(mut stdout) = server.container_stdout().await {
+                            loop {
+                                if !server.user_permissions.has_calagopus_permission_or(
+                                    user_uuid,
+                                    Permission::ControlReadConsole,
+                                    true,
+                                ).await
+                                {
+                                    let prelude = config.daemon_prelude();
+
+                                    writer
+                                        .write_all(
+                                            format!(
+                                                "{prelude} You are missing the `control.read-console` permission to view server logs and console output.\r\n\x1b[2K"
+                                            )
+                                            .as_bytes(),
+                                        )
+                                        .await
+                                        .unwrap_or_default();
+
+                                    continue 'outer;
+                                }
+
+                                match stdout.recv().await {
+                                    Ok(stdout) => {
+                                        if let Err(err) = writer
+                                            .write_all(format!("{stdout}\r\n\x1b[2K").as_bytes())
+                                            .await
+                                        {
+                                            tracing::error!(error = %err, "failed to write stdout");
                                         }
-                                        Err(RecvError::Closed) => {
-                                            break;
-                                        }
-                                        Err(RecvError::Lagged(_)) => {
-                                            tracing::debug!(
-                                                server = %server.uuid,
-                                                "stdout lagged behind, messages dropped"
-                                            );
-                                        }
+                                    }
+                                    Err(RecvError::Closed) => {
+                                        break;
+                                    }
+                                    Err(RecvError::Lagged(_)) => {
+                                        tracing::debug!(
+                                            server = %server.uuid,
+                                            "stdout lagged behind, messages dropped"
+                                        );
                                     }
                                 }
                             }
-
-                            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                         }
-                    })
-                });
-            }
+
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    }
+                })
+            });
 
             let stdin_task = {
                 let mut data_writer = writer.make_writer();

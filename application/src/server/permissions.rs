@@ -170,7 +170,7 @@ impl UserPermissionsMap {
         &self,
         user_uuid: uuid::Uuid,
         permissions: Permissions,
-        ignored_files: &[impl AsRef<str>],
+        ignored_files: Option<&[impl AsRef<str>]>,
     ) {
         if permissions.is_empty() {
             self.map.lock().await.remove(&user_uuid);
@@ -178,24 +178,39 @@ impl UserPermissionsMap {
             return;
         }
 
-        let mut overrides = ignore::overrides::OverrideBuilder::new("/");
-        for file in ignored_files {
-            overrides.add(file.as_ref()).ok();
-        }
+        let overrides = if let Some(ignored_files) = ignored_files {
+            let mut overrides = ignore::overrides::OverrideBuilder::new("/");
+            for file in ignored_files {
+                overrides.add(file.as_ref()).ok();
+            }
 
-        self.map.lock().await.insert(
-            user_uuid,
-            (
-                permissions,
-                overrides.build().ok(),
-                std::time::Instant::now(),
-            ),
-        );
+            Some(overrides)
+        } else {
+            None
+        };
+
+        let mut map = self.map.lock().await;
+        if let Some((current_permissions, current_ignored, _)) = map.get_mut(&user_uuid) {
+            *current_permissions = permissions;
+            if let Some(overrides) = overrides {
+                *current_ignored = overrides.build().ok();
+            }
+        } else {
+            map.insert(
+                user_uuid,
+                (
+                    permissions,
+                    overrides.as_ref().and_then(|o| o.build().ok()),
+                    std::time::Instant::now(),
+                ),
+            );
+        }
     }
 
     pub async fn clear_permissions(&self) {
-        for user_uuid in self.map.lock().await.keys().copied().collect::<Vec<_>>() {
-            self.map.lock().await.remove(&user_uuid);
+        let mut map = self.map.lock().await;
+        for user_uuid in map.keys().copied().collect::<Vec<_>>() {
+            map.remove(&user_uuid);
             self.removal_sender.send(user_uuid).ok();
         }
     }

@@ -39,6 +39,7 @@ pub async fn handle_ws(
 
         let websocket_handler = Arc::new(super::ServerWebsocketHandler::new(
             Arc::clone(&sender),
+            Arc::clone(&state),
             Arc::clone(&socket_jwt),
         ));
 
@@ -137,6 +138,21 @@ pub async fn handle_ws(
                                 "jwt expired on websocket, ignoring",
                             );
                         }
+                        Err(websocket::jwt::JwtError::MiscStr(err)) => {
+                            tracing::debug!(
+                                server = %server.uuid,
+                                "error handling jwt: {}",
+                                err,
+                            );
+
+                            websocket_handler.send_message(
+                                websocket::WebsocketMessage::new(
+                                    websocket::WebsocketEvent::JwtError,
+                                    [err.to_compact_string()].into(),
+                                ),
+                            )
+                            .await;
+                        }
                         Err(websocket::jwt::JwtError::Misc(err)) => {
                             tracing::error!(
                                 server = %server.uuid,
@@ -172,64 +188,73 @@ pub async fn handle_ws(
                             data = receiver.recv() => {
                                 match data {
                                     Ok(message) => {
-                                        let socket_jwt = socket_jwt.read().await;
-                                        let socket_jwt = match socket_jwt.as_ref() {
-                                            Some(jwt) => jwt,
-                                            None => continue,
+                                        let run = async || -> Result<(), anyhow::Error> {
+                                            match message.event {
+                                                websocket::WebsocketEvent::ServerInstallOutput => {
+                                                    if !websocket_handler
+                                                        .has_permission(Permission::AdminWebsocketInstall).await?
+                                                    {
+                                                        return Ok(());
+                                                    }
+                                                }
+                                                websocket::WebsocketEvent::ServerOperationProgress
+                                                | websocket::WebsocketEvent::ServerOperationCompleted => {
+                                                    if !websocket_handler
+                                                        .has_permission(Permission::FileRead).await?
+                                                    {
+                                                        return Ok(());
+                                                    }
+                                                }
+                                                websocket::WebsocketEvent::ServerBackupStarted
+                                                | websocket::WebsocketEvent::ServerBackupProgress
+                                                | websocket::WebsocketEvent::ServerBackupCompleted => {
+                                                    if !websocket_handler
+                                                        .has_permission(Permission::BackupRead).await?
+                                                    {
+                                                        return Ok(());
+                                                    }
+                                                }
+                                                websocket::WebsocketEvent::ServerScheduleStarted
+                                                | websocket::WebsocketEvent::ServerScheduleStepStatus
+                                                | websocket::WebsocketEvent::ServerScheduleStepError
+                                                | websocket::WebsocketEvent::ServerScheduleCompleted => {
+                                                    if !websocket_handler
+                                                        .has_permission(Permission::ScheduleRead).await?
+                                                    {
+                                                        return Ok(());
+                                                    }
+                                                }
+                                                websocket::WebsocketEvent::ServerTransferLogs
+                                                | websocket::WebsocketEvent::ServerTransferProgress => {
+                                                    if !websocket_handler
+                                                        .has_permission(Permission::AdminWebsocketTransfer).await?
+                                                    {
+                                                        return Ok(());
+                                                    }
+                                                }
+                                                _ => {}
+                                            }
+
+                                            websocket_handler.send_message(message).await;
+
+                                            Ok(())
                                         };
 
-                                        match message.event {
-                                            websocket::WebsocketEvent::ServerInstallOutput => {
-                                                if !socket_jwt
-                                                    .permissions
-                                                    .has_permission(Permission::AdminWebsocketInstall)
-                                                {
-                                                    continue;
-                                                }
-                                            }
-                                            websocket::WebsocketEvent::ServerOperationProgress
-                                            | websocket::WebsocketEvent::ServerOperationCompleted => {
-                                                if !socket_jwt
-                                                    .permissions
-                                                    .has_permission(Permission::FileRead)
-                                                {
-                                                    continue;
-                                                }
-                                            }
-                                            websocket::WebsocketEvent::ServerBackupStarted
-                                            | websocket::WebsocketEvent::ServerBackupProgress
-                                            | websocket::WebsocketEvent::ServerBackupCompleted => {
-                                                if !socket_jwt
-                                                    .permissions
-                                                    .has_permission(Permission::BackupRead)
-                                                {
-                                                    continue;
-                                                }
-                                            }
-                                            websocket::WebsocketEvent::ServerScheduleStarted
-                                            | websocket::WebsocketEvent::ServerScheduleStepStatus
-                                            | websocket::WebsocketEvent::ServerScheduleStepError
-                                            | websocket::WebsocketEvent::ServerScheduleCompleted => {
-                                                if !socket_jwt
-                                                    .permissions
-                                                    .has_permission(Permission::ScheduleRead)
-                                                {
-                                                    continue;
-                                                }
-                                            }
-                                            websocket::WebsocketEvent::ServerTransferLogs
-                                            | websocket::WebsocketEvent::ServerTransferProgress => {
-                                                if !socket_jwt
-                                                    .permissions
-                                                    .has_permission(Permission::AdminWebsocketTransfer)
-                                                {
-                                                    continue;
-                                                }
-                                            }
-                                            _ => {}
-                                        }
+                                        if let Err(err) = run().await {
+                                            tracing::debug!(
+                                                server = %server.uuid,
+                                                "error handling websocket message from server: {}",
+                                                err
+                                            );
 
-                                        websocket_handler.send_message(message).await
+                                            websocket_handler.send_message(
+                                                websocket::WebsocketMessage::new(
+                                                    websocket::WebsocketEvent::JwtError,
+                                                    [err.to_compact_string()].into(),
+                                                ),
+                                            )
+                                            .await;
+                                        }
                                     }
                                     Err(RecvError::Closed) => {
                                         tracing::debug!(
@@ -261,6 +286,15 @@ pub async fn handle_ws(
                                             }
                                         };
 
+                                        if let Err(err) = socket_jwt.base.validate(&state.config.jwt).await {
+                                            tracing::debug!(
+                                                server = %server.uuid,
+                                                "invalid jwt when receiving targeted websocket message: {}",
+                                                err
+                                            );
+                                            continue;
+                                        }
+
                                         if message.matches(&socket_jwt.user_uuid, &socket_jwt.permissions) {
                                             websocket_handler.send_message(
                                                 message.into_message()
@@ -288,48 +322,37 @@ pub async fn handle_ws(
             },
             // Stdout Listener
             {
-                let state = Arc::clone(&state);
-                let socket_jwt = Arc::clone(&socket_jwt);
                 let websocket_handler = Arc::clone(&websocket_handler);
                 let server = server.clone();
 
                 Box::pin(async move {
-                    loop {
+                    'outer: loop {
+                        if !websocket_handler.has_calagopus_permission_or(Permission::ControlReadConsole, true).await.is_ok_and(|h| h)
                         {
-                            let socket_jwt = socket_jwt.read().await;
-
-                            if let Some(jwt) = socket_jwt.as_ref()
-                                && jwt.base.validate(&state.config.jwt).await
-                                && !jwt.permissions.has_calagopus_permission_or(Permission::ControlReadConsole, true)
-                            {
-                                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-
-                                continue;
-                            }
+                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                            continue;
                         }
 
                         if let Some(mut stdout) = server.container_stdout().await {
                             loop {
                                 match stdout.recv().await {
                                     Ok(stdout) => {
-                                        let socket_jwt = socket_jwt.read().await;
-
-                                        if let Some(jwt) = socket_jwt.as_ref()
-                                            && jwt.base.validate(&state.config.jwt).await
+                                        if !websocket_handler.has_calagopus_permission_or(Permission::ControlReadConsole, true).await.is_ok_and(|h| h)
                                         {
-                                            if !jwt.permissions.has_calagopus_permission_or(Permission::ControlReadConsole, true)
-                                            {
-                                                break;
-                                            }
+                                            websocket_handler
+                                                .send_message(server.get_daemon_error("You are missing the `control.read-console` permission to view server logs and console output."))
+                                                .await;
 
-                                            websocket_handler.send_message(
-                                                websocket::WebsocketMessage::new(
-                                                    websocket::WebsocketEvent::ServerConsoleOutput,
-                                                    [stdout.to_compact_string()].into(),
-                                                ),
-                                            )
-                                            .await;
+                                            continue 'outer;
                                         }
+
+                                        websocket_handler.send_message(
+                                            websocket::WebsocketMessage::new(
+                                                websocket::WebsocketEvent::ServerConsoleOutput,
+                                                [stdout.to_compact_string()].into(),
+                                            ),
+                                        )
+                                        .await;
                                     }
                                     Err(RecvError::Closed) => break,
                                     Err(RecvError::Lagged(_)) => {

@@ -129,7 +129,7 @@ impl russh::server::Handler for SshSession {
 
         server
             .user_permissions
-            .set_permissions(user, permissions, &ignored_files)
+            .set_permissions(user, permissions, Some(&ignored_files))
             .await;
         if self.state.config.system.sftp.activity.log_logins {
             server
@@ -215,7 +215,7 @@ impl russh::server::Handler for SshSession {
 
         server
             .user_permissions
-            .set_permissions(user, permissions, &ignored_files)
+            .set_permissions(user, permissions, Some(&ignored_files))
             .await;
         if self.state.config.system.sftp.activity.log_logins {
             server
