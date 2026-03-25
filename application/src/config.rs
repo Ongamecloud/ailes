@@ -1245,6 +1245,12 @@ impl Config {
             }
         }
 
+        if self.system.user.uid == 0 || self.system.user.gid == 0 {
+            return Err(anyhow::anyhow!(
+                "refusing to create user with UID or GID of 0 (root), please check your wings config and change system.username to a non-root user"
+            ));
+        }
+
         let command = if release.contains("alpine") {
             std::process::Command::new("addgroup")
                 .arg("-S")
