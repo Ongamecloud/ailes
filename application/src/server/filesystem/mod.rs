@@ -1319,24 +1319,12 @@ impl Filesystem {
             (real_metadata.size_logical(), real_metadata.size_physical())
         };
 
-        let (valid_utf8, mime) = if real_metadata.is_dir() {
-            (false, "inode/directory")
+        let detected_mime = if real_metadata.is_dir() {
+            MimeCacheValue::directory()
         } else if real_metadata.is_symlink() {
-            (false, "inode/symlink")
-        } else if let Some(buffer) = buffer {
-            let valid_utf8 = crate::utils::is_valid_utf8_slice(buffer) || buffer.is_empty();
-
-            if let Some(mime) = infer::get(buffer) {
-                (valid_utf8, mime.mime_type())
-            } else if let Some(mime) = new_mime_guess::from_path(real_path).first_raw() {
-                (valid_utf8, mime)
-            } else if valid_utf8 {
-                (true, "text/plain")
-            } else {
-                (false, "application/octet-stream")
-            }
+            MimeCacheValue::symlink()
         } else {
-            (false, "application/octet-stream")
+            crate::utils::detect_mime_type(real_path, buffer)
         };
 
         crate::models::DirectoryEntry {
@@ -1349,11 +1337,12 @@ impl Filesystem {
             mode_bits: compact_str::format_compact!("{:o}", metadata.permissions().mode() & 0o777),
             size,
             size_physical,
-            editable: real_metadata.is_file() && valid_utf8,
+            editable: real_metadata.is_file() && detected_mime.valid_utf8,
+            inner_editable: real_metadata.is_file() && detected_mime.valid_inner_utf8,
             directory: real_metadata.is_dir(),
             file: real_metadata.is_file(),
             symlink: metadata.is_symlink(),
-            mime,
+            mime: detected_mime.mime,
             modified: chrono::DateTime::from_timestamp(
                 metadata
                     .modified()
@@ -1407,12 +1396,12 @@ impl Filesystem {
             (real_metadata.size_logical(), real_metadata.size_physical())
         };
 
-        let mime_type = if real_metadata.is_dir() {
-            (false, "inode/directory").into()
+        let detected_mime = if real_metadata.is_dir() {
+            MimeCacheValue::directory()
         } else if real_metadata.is_symlink() {
-            (false, "inode/symlink").into()
+            MimeCacheValue::symlink()
         } else {
-            mime_type.unwrap_or_else(|| (false, "application/octet-stream").into())
+            mime_type.unwrap_or_default()
         };
 
         crate::models::DirectoryEntry {
@@ -1425,11 +1414,12 @@ impl Filesystem {
             mode_bits: compact_str::format_compact!("{:o}", metadata.permissions().mode() & 0o777),
             size,
             size_physical,
-            editable: real_metadata.is_file() && mime_type.valid_utf8,
+            editable: real_metadata.is_file() && detected_mime.valid_utf8,
+            inner_editable: real_metadata.is_file() && detected_mime.valid_inner_utf8,
             directory: real_metadata.is_dir(),
             file: real_metadata.is_file(),
             symlink: metadata.is_symlink(),
-            mime: mime_type.mime,
+            mime: detected_mime.mime,
             modified: chrono::DateTime::from_timestamp(
                 metadata
                     .modified()
@@ -1486,63 +1476,50 @@ impl Filesystem {
             };
 
         let mime_key = (&metadata).into();
-        let mime_type = if let Some(mime_type) = self.app_state.mime_cache.get(&mime_key).await {
-            mime_type
-        } else {
-            let mut buffer = [0; 64];
-            let buffer = if metadata.is_file()
-                || (symlink_destination.is_some()
-                    && symlink_destination_metadata
-                        .as_ref()
-                        .is_some_and(|m| m.is_file()))
-            {
-                match self
-                    .async_open(symlink_destination.as_ref().unwrap_or(&path))
-                    .await
+        let detected_mime =
+            if let Some(detected_mime) = self.app_state.mime_cache.get(&mime_key).await {
+                detected_mime
+            } else {
+                let mut buffer = [0; 64];
+                let buffer = if metadata.is_file()
+                    || (symlink_destination.is_some()
+                        && symlink_destination_metadata
+                            .as_ref()
+                            .is_some_and(|m| m.is_file()))
                 {
-                    Ok(mut file) => {
-                        let bytes_read = file.read(&mut buffer).await.unwrap_or(0);
+                    match self
+                        .async_open(symlink_destination.as_ref().unwrap_or(&path))
+                        .await
+                    {
+                        Ok(mut file) => {
+                            let bytes_read = file.read(&mut buffer).await.unwrap_or(0);
 
-                        Some(&buffer[..bytes_read])
+                            Some(&buffer[..bytes_read])
+                        }
+                        Err(_) => None,
                     }
-                    Err(_) => None,
-                }
-            } else {
-                None
-            };
-
-            let mime_type = if let Some(buffer) = buffer {
-                let valid_utf8 = crate::utils::is_valid_utf8_slice(buffer) || buffer.is_empty();
-                if let Some(mime) = infer::get(buffer) {
-                    (valid_utf8, mime.mime_type())
-                } else if let Some(mime) =
-                    new_mime_guess::from_path(symlink_destination.as_ref().unwrap_or(&path))
-                        .iter_raw()
-                        .next()
-                {
-                    (valid_utf8, mime)
-                } else if valid_utf8 {
-                    (true, "text/plain")
                 } else {
-                    (false, "application/octet-stream")
-                }
-            } else {
-                (false, "application/octet-stream")
+                    None
+                };
+
+                let detected_mime = crate::utils::detect_mime_type(
+                    symlink_destination.as_ref().unwrap_or(&path),
+                    buffer,
+                );
+
+                self.app_state
+                    .mime_cache
+                    .insert(mime_key, detected_mime)
+                    .await;
+
+                detected_mime
             };
-
-            self.app_state
-                .mime_cache
-                .insert(mime_key, mime_type.into())
-                .await;
-
-            mime_type.into()
-        };
 
         self.to_api_entry_mime_type(
             path,
             &metadata,
             no_directory_size,
-            Some(mime_type),
+            Some(detected_mime),
             symlink_destination,
             symlink_destination_metadata,
         )

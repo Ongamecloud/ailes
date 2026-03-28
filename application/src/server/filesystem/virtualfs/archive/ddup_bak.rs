@@ -5,6 +5,7 @@ use crate::{
         fixed_reader::FixedReader,
     },
     models::DirectoryEntry,
+    routes::MimeCacheValue,
     server::filesystem::{
         archive::StreamableArchiveFormat,
         cap::FileType,
@@ -139,15 +140,12 @@ impl VirtualDdupBakArchive {
             }
         };
 
-        let mime = if entry.is_directory() {
-            "inode/directory"
+        let detected_mime = if entry.is_directory() {
+            MimeCacheValue::directory()
         } else if entry.is_symlink() {
-            "inode/symlink"
+            MimeCacheValue::symlink()
         } else {
-            new_mime_guess::from_path(entry.name())
-                .iter_raw()
-                .next()
-                .unwrap_or("application/octet-stream")
+            crate::utils::detect_mime_type(path, None)
         };
 
         DirectoryEntry {
@@ -160,11 +158,12 @@ impl VirtualDdupBakArchive {
             mode_bits: compact_str::format_compact!("{:o}", entry.mode().bits() & 0o777),
             size,
             size_physical,
-            editable: entry.is_file() && mime != "application/octet-stream",
+            editable: entry.is_file() && detected_mime.valid_utf8,
+            inner_editable: entry.is_file() && detected_mime.valid_inner_utf8,
             directory: entry.is_directory(),
             file: entry.is_file(),
             symlink: entry.is_symlink(),
-            mime,
+            mime: detected_mime.mime,
             modified: chrono::DateTime::from_timestamp(
                 entry
                     .mtime()

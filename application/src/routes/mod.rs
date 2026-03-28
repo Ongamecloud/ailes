@@ -27,13 +27,35 @@ pub struct MimeCacheKey {
 pub struct MimeCacheValue {
     pub mime: &'static str,
     pub valid_utf8: bool,
+    pub valid_inner_utf8: bool,
 }
 
-impl From<(bool, &'static str)> for MimeCacheValue {
-    fn from(value: (bool, &'static str)) -> Self {
-        Self {
-            valid_utf8: value.0,
-            mime: value.1,
+impl Default for MimeCacheValue {
+    fn default() -> Self {
+        MimeCacheValue {
+            mime: "application/octet-stream",
+            valid_utf8: false,
+            valid_inner_utf8: false,
+        }
+    }
+}
+
+impl MimeCacheValue {
+    #[inline]
+    pub fn directory() -> Self {
+        MimeCacheValue {
+            mime: "inode/directory",
+            valid_utf8: false,
+            valid_inner_utf8: false,
+        }
+    }
+
+    #[inline]
+    pub fn symlink() -> Self {
+        MimeCacheValue {
+            mime: "inode/symlink",
+            valid_utf8: false,
+            valid_inner_utf8: false,
         }
     }
 }

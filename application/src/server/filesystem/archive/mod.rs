@@ -310,17 +310,16 @@ impl Archive {
         };
 
         match inferred.map(|f| f.mime_type()) {
-            Some("application/gzip") => (CompressionType::Gz, get_archive_format()),
-            Some("application/x-bzip2") => (CompressionType::Bz2, get_archive_format()),
-            Some("application/x-xz") => (CompressionType::Xz, get_archive_format()),
-            Some("application/x-lzip") => (CompressionType::Lzip, get_archive_format()),
-            Some("application/x-lz4") => (CompressionType::Lz4, get_archive_format()),
-            Some("application/zstd") => (CompressionType::Zstd, get_archive_format()),
             Some("application/zip") => (CompressionType::None, ArchiveType::Zip),
             Some("application/x-tar") => (CompressionType::None, ArchiveType::Tar),
             Some("application/vnd.rar") => (CompressionType::None, ArchiveType::Rar),
             Some("application/x-7z-compressed") => (CompressionType::None, ArchiveType::SevenZip),
-            _ => (CompressionType::None, get_archive_format()),
+            mime => (
+                mime.map_or(CompressionType::None, |mime| {
+                    CompressionType::from_mime(mime)
+                }),
+                get_archive_format(),
+            ),
         }
     }
 

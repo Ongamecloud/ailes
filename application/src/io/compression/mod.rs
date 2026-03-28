@@ -15,6 +15,20 @@ pub enum CompressionType {
     Zstd,
 }
 
+impl CompressionType {
+    pub fn from_mime(mime: &str) -> Self {
+        match mime {
+            "application/gzip" => CompressionType::Gz,
+            "application/x-xz" => CompressionType::Xz,
+            "application/x-lzip" => CompressionType::Lzip,
+            "application/x-bzip2" => CompressionType::Bz2,
+            "application/x-lz4" => CompressionType::Lz4,
+            "application/zstd" => CompressionType::Zstd,
+            _ => CompressionType::None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, ToSchema, Deserialize, Serialize, Default)]
 #[serde(rename_all = "snake_case")]
 #[schema(rename_all = "snake_case")]

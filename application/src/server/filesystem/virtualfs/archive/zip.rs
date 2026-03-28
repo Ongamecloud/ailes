@@ -154,56 +154,29 @@ impl VirtualZipArchive {
             (entry.size(), entry.compressed_size())
         };
 
-        let mime_type = if entry.is_dir() {
-            (false, "inode/directory").into()
+        let detected_mime = if entry.is_dir() {
+            MimeCacheValue::directory()
         } else if entry.is_symlink() {
-            (false, "inode/symlink").into()
-        } else if let Some(mime_type) = mime_cache.get(&entry_index) {
-            mime_type
+            MimeCacheValue::symlink()
+        } else if let Some(detected_mime) = mime_cache.get(&entry_index) {
+            detected_mime
         } else if let Some(buffer) = buffer {
-            let valid_utf8 = crate::utils::is_valid_utf8_slice(buffer) || buffer.is_empty();
+            let detected_mime = crate::utils::detect_mime_type(path, Some(buffer));
 
-            let mime_type = if let Some(mime) = infer::get(buffer) {
-                (valid_utf8, mime.mime_type())
-            } else if let Some(mime) = new_mime_guess::from_path(entry.name()).iter_raw().next() {
-                (valid_utf8, mime)
-            } else if valid_utf8 {
-                (true, "text/plain")
-            } else {
-                (false, "application/octet-stream")
-            };
-
-            mime_cache.insert(entry_index, mime_type.into());
-
-            mime_type.into()
+            mime_cache.insert(entry_index, detected_mime);
+            detected_mime
         } else {
             let mut buffer = [0; 64];
             let buffer = if entry.read(&mut buffer).is_err() {
                 None
             } else {
-                Some(&buffer)
+                Some(&buffer[..])
             };
 
-            let mime_type = if let Some(buffer) = buffer {
-                let valid_utf8 = crate::utils::is_valid_utf8_slice(buffer) || buffer.is_empty();
+            let detected_mime = crate::utils::detect_mime_type(path, buffer);
 
-                if let Some(mime) = infer::get(buffer) {
-                    (valid_utf8, mime.mime_type())
-                } else if let Some(mime) = new_mime_guess::from_path(entry.name()).iter_raw().next()
-                {
-                    (valid_utf8, mime)
-                } else if valid_utf8 {
-                    (true, "text/plain")
-                } else {
-                    (false, "application/octet-stream")
-                }
-            } else {
-                (false, "application/octet-stream")
-            };
-
-            mime_cache.insert(entry_index, mime_type.into());
-
-            mime_type.into()
+            mime_cache.insert(entry_index, detected_mime);
+            detected_mime
         };
 
         let mode = entry
@@ -220,11 +193,12 @@ impl VirtualZipArchive {
             mode_bits: compact_str::format_compact!("{:o}", mode & 0o777),
             size,
             size_physical,
-            editable: entry.is_file() && mime_type.valid_utf8,
+            editable: entry.is_file() && detected_mime.valid_utf8,
+            inner_editable: entry.is_file() && detected_mime.valid_inner_utf8,
             directory: entry.is_dir(),
             file: entry.is_file(),
             symlink: entry.is_symlink(),
-            mime: mime_type.mime,
+            mime: detected_mime.mime,
             modified: crate::server::filesystem::archive::zip_entry_get_modified_time(&entry)
                 .map(|dt| dt.into_std().into())
                 .unwrap_or_default(),

@@ -1213,21 +1213,21 @@ impl Config {
             );
             let users = sysinfo::Users::new_with_refreshed_list();
 
-            if let Some(process) = sys.process(current_pid) {
-                if self.system.user.rootless.enabled {
-                    if let Some(user) = process.user_id() {
-                        if let Some(user) = users.get_user_by_id(user) {
-                            self.system.username = user.name().to_compact_string();
-                        }
-
-                        self.system.user.uid = **user;
-                    }
-                    if let Some(group) = process.group_id() {
-                        self.system.user.gid = *group;
+            if let Some(process) = sys.process(current_pid)
+                && self.system.user.rootless.enabled
+            {
+                if let Some(user) = process.user_id() {
+                    if let Some(user) = users.get_user_by_id(user) {
+                        self.system.username = user.name().to_compact_string();
                     }
 
-                    return Ok(());
+                    self.system.user.uid = **user;
                 }
+                if let Some(group) = process.group_id() {
+                    self.system.user.gid = *group;
+                }
+
+                return Ok(());
             }
 
             let mut found_user = false;

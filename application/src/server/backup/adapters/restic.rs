@@ -6,6 +6,7 @@ use crate::{
     models::DirectoryEntry,
     remote::backups::{RawServerBackup, ResticBackupConfiguration},
     response::ApiResponse,
+    routes::MimeCacheValue,
     server::{
         backup::{Backup, BackupCleanExt, BackupCreateExt, BackupExt, BackupFindExt},
         filesystem::{
@@ -909,28 +910,12 @@ impl VirtualResticBackup {
             _ => 0,
         };
 
-        let (valid_utf8, mime_type) = if matches!(entry.r#type, ResticEntryType::Dir) {
-            (false, "inode/directory")
+        let detected_mime = if matches!(entry.r#type, ResticEntryType::Dir) {
+            MimeCacheValue::directory()
         } else if matches!(entry.r#type, ResticEntryType::Symlink) {
-            (false, "inode/symlink")
-        } else if let Some(buffer) = buffer {
-            let valid_utf8 = crate::utils::is_valid_utf8_slice(buffer) || buffer.is_empty();
-
-            if let Some(mime) = infer::get(buffer) {
-                (valid_utf8, mime.mime_type())
-            } else if let Some(mime) = new_mime_guess::from_path(&entry.path).iter_raw().next() {
-                (valid_utf8, mime)
-            } else if valid_utf8 {
-                (true, "text/plain")
-            } else {
-                (false, "application/octet-stream")
-            }
+            MimeCacheValue::symlink()
         } else {
-            let mime = new_mime_guess::from_path(&entry.path)
-                .first_raw()
-                .unwrap_or("application/octet-stream");
-
-            (mime != "application/octet-stream", mime)
+            crate::utils::detect_mime_type(path, buffer)
         };
 
         DirectoryEntry {
@@ -943,11 +928,13 @@ impl VirtualResticBackup {
             mode_bits: compact_str::format_compact!("{:o}", entry.mode & 0o777),
             size,
             size_physical: size,
-            editable: matches!(entry.r#type, ResticEntryType::File) && valid_utf8,
+            editable: matches!(entry.r#type, ResticEntryType::File) && detected_mime.valid_utf8,
+            inner_editable: matches!(entry.r#type, ResticEntryType::File)
+                && detected_mime.valid_inner_utf8,
             directory: matches!(entry.r#type, ResticEntryType::Dir),
             file: matches!(entry.r#type, ResticEntryType::File),
             symlink: matches!(entry.r#type, ResticEntryType::Symlink),
-            mime: mime_type,
+            mime: detected_mime.mime,
             modified: entry.mtime,
             created: chrono::DateTime::from_timestamp(0, 0).unwrap_or_default(),
         }

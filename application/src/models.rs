@@ -65,6 +65,7 @@ pub struct DirectoryEntry {
     pub size: u64,
     pub size_physical: u64,
     pub editable: bool,
+    pub inner_editable: bool,
     pub directory: bool,
     pub file: bool,
     pub symlink: bool,

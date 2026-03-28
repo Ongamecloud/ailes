@@ -126,54 +126,27 @@ impl VirtualSevenZipArchive {
             (entry.size, entry.compressed_size)
         };
 
-        let mime_type = if entry.is_directory() {
-            (false, "inode/directory").into()
-        } else if let Some(mime_type) = mime_cache.get(&entry_index) {
-            mime_type
+        let detected_mime = if entry.is_directory() {
+            MimeCacheValue::directory()
+        } else if let Some(detected_mime) = mime_cache.get(&entry_index) {
+            detected_mime
         } else if let Some(buffer) = buffer {
-            let valid_utf8 = crate::utils::is_valid_utf8_slice(buffer) || buffer.is_empty();
+            let detected_mime = crate::utils::detect_mime_type(path, Some(buffer));
 
-            let mime_type = if let Some(mime) = infer::get(buffer) {
-                (valid_utf8, mime.mime_type())
-            } else if let Some(mime) = new_mime_guess::from_path(entry.name()).iter_raw().next() {
-                (valid_utf8, mime)
-            } else if valid_utf8 {
-                (true, "text/plain")
-            } else {
-                (false, "application/octet-stream")
-            };
-
-            mime_cache.insert(entry_index, mime_type.into());
-
-            mime_type.into()
+            mime_cache.insert(entry_index, detected_mime);
+            detected_mime
         } else {
             let mut buffer = [0; 64];
             let buffer = if reader.read(&mut buffer).is_err() {
                 None
             } else {
-                Some(&buffer)
+                Some(&buffer[..])
             };
 
-            let mime_type = if let Some(buffer) = buffer {
-                let valid_utf8 = crate::utils::is_valid_utf8_slice(buffer) || buffer.is_empty();
+            let detected_mime = crate::utils::detect_mime_type(path, buffer);
 
-                if let Some(mime) = infer::get(buffer) {
-                    (valid_utf8, mime.mime_type())
-                } else if let Some(mime) = new_mime_guess::from_path(entry.name()).iter_raw().next()
-                {
-                    (valid_utf8, mime)
-                } else if valid_utf8 {
-                    (true, "text/plain")
-                } else {
-                    (false, "application/octet-stream")
-                }
-            } else {
-                (false, "application/octet-stream")
-            };
-
-            mime_cache.insert(entry_index, mime_type.into());
-
-            mime_type.into()
+            mime_cache.insert(entry_index, detected_mime);
+            detected_mime
         };
 
         let mode = if entry.is_directory() { 0o755 } else { 0o644 };
@@ -188,11 +161,12 @@ impl VirtualSevenZipArchive {
             mode_bits: compact_str::format_compact!("{:o}", mode),
             size,
             size_physical,
-            editable: !entry.is_directory() && mime_type.valid_utf8,
+            editable: !entry.is_directory() && detected_mime.valid_utf8,
+            inner_editable: !entry.is_directory() && detected_mime.valid_inner_utf8,
             directory: entry.is_directory(),
             file: !entry.is_directory(),
             symlink: false,
-            mime: mime_type.mime,
+            mime: detected_mime.mime,
             modified: if entry.has_last_modified_date {
                 std::time::SystemTime::from(entry.last_modified_date).into()
             } else {

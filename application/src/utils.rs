@@ -1,4 +1,9 @@
-use std::{path::PathBuf, sync::LazyLock};
+use std::{
+    path::{Path, PathBuf},
+    sync::LazyLock,
+};
+
+use crate::routes::MimeCacheValue;
 
 pub fn draw_progress_bar(width: usize, current: f64, total: f64) -> String {
     let progress_percentage = (current / total) * 100.0;
@@ -48,6 +53,72 @@ pub fn parse_content_disposition_filename(header: &str) -> Option<String> {
     }
 
     None
+}
+
+pub fn detect_inner_utf8(path: &Path, mime: &str) -> bool {
+    let compression_type = crate::io::compression::CompressionType::from_mime(mime);
+
+    if matches!(
+        compression_type,
+        crate::io::compression::CompressionType::None
+    ) {
+        return false;
+    }
+
+    let Some(file_stem) = path.file_stem().and_then(|s| s.to_str()) else {
+        return false;
+    };
+
+    if let Some(stem_mime) = new_mime_guess::from_path(file_stem).first_raw() {
+        const ADDITIONAL_TEXT_MIME_TYPES: &[&str] = &[
+            "application/json",
+            "application/javascript",
+            "application/xml",
+            "application/x-yaml",
+            "application/yaml",
+            "application/toml",
+            "application/sql",
+            "application/x-sh",
+            "application/x-httpd-php",
+            "image/svg+xml",
+        ];
+
+        stem_mime.starts_with("text/") || ADDITIONAL_TEXT_MIME_TYPES.contains(&stem_mime)
+    } else {
+        false
+    }
+}
+
+pub fn detect_mime_type(path: &Path, buffer: Option<&[u8]>) -> MimeCacheValue {
+    let valid_utf8 = buffer.is_some_and(|buffer| is_valid_utf8_slice(buffer) || buffer.is_empty());
+
+    if let Some(buffer) = buffer
+        && let Some(mime) = infer::get(buffer)
+    {
+        MimeCacheValue {
+            mime: mime.mime_type(),
+            valid_utf8,
+            valid_inner_utf8: detect_inner_utf8(path, mime.mime_type()),
+        }
+    } else if let Some(mime) = new_mime_guess::from_path(path).first_raw() {
+        MimeCacheValue {
+            mime,
+            valid_utf8,
+            valid_inner_utf8: detect_inner_utf8(path, mime),
+        }
+    } else if valid_utf8 {
+        MimeCacheValue {
+            mime: "text/plain",
+            valid_utf8: true,
+            valid_inner_utf8: false,
+        }
+    } else {
+        MimeCacheValue {
+            mime: "application/octet-stream",
+            valid_utf8: false,
+            valid_inner_utf8: false,
+        }
+    }
 }
 
 pub fn deduplicate_paths(mut paths: Vec<PathBuf>) -> Vec<PathBuf> {
