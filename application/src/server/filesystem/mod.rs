@@ -708,18 +708,18 @@ impl Filesystem {
             metadata.len()
         };
 
-        self.async_allocate_in_path(&path, -(size as i64), false)
-            .await;
+        if metadata.is_dir() {
+            self.async_remove_dir_all(&path).await?;
+        } else {
+            self.async_remove_file(&path).await?;
+        }
 
         if metadata.is_dir() {
             let mut disk_usage = self.disk_usage.write().await;
             disk_usage.remove_path(&path);
-        }
-
-        if metadata.is_dir() {
-            self.async_remove_dir_all(path).await?;
-        } else {
-            self.async_remove_file(path).await?;
+        } else if let Some(parent) = path.parent() {
+            self.async_allocate_in_path(parent, -(size as i64), false)
+                .await;
         }
 
         Ok(())
