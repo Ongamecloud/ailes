@@ -8,7 +8,6 @@ on:
 env:
   BIN_NAME: wings-rs
   PROJECT_NAME: wings-rs
-  REPO_NAME: calagopus/wings
 
 jobs:
   dist:
@@ -152,17 +151,17 @@ jobs:
           RAW_TAG="${{ github.ref_name }}"
           VERSION="${RAW_TAG#release-}"
 
-          DOCKER_TAGS="ghcr.io/${{ env.REPO_NAME }}:${VERSION}"
+          DOCKER_TAGS="ghcr.io/${{ github.repository }}:${VERSION}"
 
           if [[ "$VERSION" == *-* ]]; then
-            DOCKER_TAGS="$DOCKER_TAGS,ghcr.io/${{ env.REPO_NAME }}:latest-pre"
+            DOCKER_TAGS="$DOCKER_TAGS,ghcr.io/${{ github.repository }}:latest-pre"
             
             if [[ "$VERSION" == 1.0.0-* ]]; then
-              DOCKER_TAGS="$DOCKER_TAGS,ghcr.io/${{ env.REPO_NAME }}:latest"
+              DOCKER_TAGS="$DOCKER_TAGS,ghcr.io/${{ github.repository }}:latest"
             fi
           else
             # 4. It's a stable release (no hyphen): Add 'latest'
-            DOCKER_TAGS="$DOCKER_TAGS,ghcr.io/${{ env.REPO_NAME }}:latest"
+            DOCKER_TAGS="$DOCKER_TAGS,ghcr.io/${{ github.repository }}:latest"
           fi
 
           echo "DOCKER_TAGS=$DOCKER_TAGS" >> $GITHUB_ENV
