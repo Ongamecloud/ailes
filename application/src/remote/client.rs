@@ -65,7 +65,7 @@ impl Client {
     async fn retry<T, E: Debug, Fut: Future<Output = Result<T, E>>>(
         &self,
         func: impl Fn() -> Fut,
-        should_retry: impl Fn(&E) -> bool,
+        should_retry: impl Fn(&E, usize) -> bool,
     ) -> Result<T, E> {
         let mut tries = 0;
         let mut last_err = None;
@@ -74,7 +74,7 @@ impl Client {
             match func().await {
                 Ok(value) => return Ok(value),
                 Err(err) => {
-                    if !should_retry(&err) {
+                    if !should_retry(&err, (tries + 1) as usize) {
                         return Err(err);
                     }
 
@@ -99,9 +99,10 @@ impl Client {
         Err(last_err.expect("No attempts were made"))
     }
 
-    fn skip_client_errors(err: &anyhow::Error) -> bool {
+    fn skip_client_errors(err: &anyhow::Error, attempt: usize) -> bool {
         if let Some(reqwest_err) = err.downcast_ref::<reqwest::Error>()
             && reqwest_err.status().is_some_and(|s| s.is_client_error())
+            && attempt > 1
         {
             return false;
         }
