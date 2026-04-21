@@ -520,7 +520,7 @@ impl VirtualReadableFilesystem for VirtualDdupBakArchive {
 
                             for entry in directory_entries
                                 .into_iter()
-                                .chain(other_entries.into_iter())
+                                .chain(other_entries)
                                 .skip(start)
                                 .take(per_page)
                             {
@@ -532,10 +532,7 @@ impl VirtualReadableFilesystem for VirtualDdupBakArchive {
                                 ));
                             }
                         } else {
-                            for entry in directory_entries
-                                .into_iter()
-                                .chain(other_entries.into_iter())
-                            {
+                            for entry in directory_entries.into_iter().chain(other_entries) {
                                 let path = path.join(entry.name());
                                 entries.push(Self::ddup_bak_entry_to_directory_entry(
                                     &archive_created,
@@ -590,7 +587,7 @@ impl VirtualReadableFilesystem for VirtualDdupBakArchive {
 
                             for entry in directory_entries
                                 .into_iter()
-                                .chain(other_entries.into_iter())
+                                .chain(other_entries)
                                 .skip(start)
                                 .take(per_page)
                             {
@@ -602,10 +599,7 @@ impl VirtualReadableFilesystem for VirtualDdupBakArchive {
                                 ));
                             }
                         } else {
-                            for entry in directory_entries
-                                .into_iter()
-                                .chain(other_entries.into_iter())
-                            {
+                            for entry in directory_entries.into_iter().chain(other_entries) {
                                 let path = path.join(&dir.name).join(entry.name());
                                 entries.push(Self::ddup_bak_entry_to_directory_entry(
                                     &archive_created,

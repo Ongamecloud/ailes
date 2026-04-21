@@ -208,16 +208,15 @@ impl Server {
                     }
 
                     match container_state.status {
-                        Some(ContainerStateStatusEnum::RUNNING) => {
+                        Some(ContainerStateStatusEnum::RUNNING)
                             if !matches!(
                                 server.state.get_state(),
                                 state::ServerState::Running
                                     | state::ServerState::Starting
                                     | state::ServerState::Stopping,
-                            ) {
+                            ) => {
                                 server.state.set_state(state::ServerState::Running).await;
                             }
-                        }
                         Some(ContainerStateStatusEnum::EMPTY)
                         | Some(ContainerStateStatusEnum::DEAD)
                         | Some(ContainerStateStatusEnum::EXITED)

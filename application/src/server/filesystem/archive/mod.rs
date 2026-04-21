@@ -376,13 +376,7 @@ impl Archive {
                 }
 
                 let size_bytes = match fcs_flag {
-                    0 => {
-                        if single_segment {
-                            1
-                        } else {
-                            return None;
-                        }
-                    }
+                    0 if single_segment => 1,
                     1 => 2,
                     2 => 4,
                     3 => 8,

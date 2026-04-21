@@ -453,9 +453,7 @@ impl VirtualReadableFilesystem for VirtualSevenZipArchive {
                 let total_entries = directory_entries.len() + other_entries.len();
                 let mut entries = Vec::new();
 
-                let iterator = directory_entries
-                    .into_iter()
-                    .chain(other_entries.into_iter());
+                let iterator = directory_entries.into_iter().chain(other_entries);
 
                 let target_entries: Vec<_> = if let Some(per_page) = per_page {
                     let start = (page - 1) * per_page;

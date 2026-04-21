@@ -56,7 +56,7 @@ mod get {
             });
         }
 
-        log_files.sort_by(|l1, l2| l1.last_modified.cmp(&l2.last_modified));
+        log_files.sort_by_key(|l1| l1.last_modified);
 
         ApiResponse::new_serialized(Response { log_files }).ok()
     }

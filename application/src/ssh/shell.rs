@@ -698,47 +698,39 @@ impl ShellSession {
                         loop {
                             match receiver.recv().await {
                                 Ok(message) => match message.event {
-                                    WebsocketEvent::ServerInstallOutput => {
+                                    WebsocketEvent::ServerInstallOutput
                                         if server
                                             .user_permissions
                                             .has_permission(
                                                 user_uuid,
                                                 Permission::AdminWebsocketInstall,
                                             )
-                                            .await
-                                        {
-                                            writer
-                                                .write_all(
-                                                    format!(
-                                                        "{}\r\n\x1b[2K",
-                                                        message.args.join(" ")
-                                                    )
+                                            .await =>
+                                    {
+                                        writer
+                                            .write_all(
+                                                format!("{}\r\n\x1b[2K", message.args.join(" "))
                                                     .as_bytes(),
-                                                )
-                                                .await
-                                                .unwrap_or_default();
-                                        }
+                                            )
+                                            .await
+                                            .unwrap_or_default();
                                     }
-                                    WebsocketEvent::ServerTransferLogs => {
+                                    WebsocketEvent::ServerTransferLogs
                                         if server
                                             .user_permissions
                                             .has_permission(
                                                 user_uuid,
                                                 Permission::AdminWebsocketTransfer,
                                             )
-                                            .await
-                                        {
-                                            writer
-                                                .write_all(
-                                                    format!(
-                                                        "{}\r\n\x1b[2K",
-                                                        message.args.join(" ")
-                                                    )
+                                            .await =>
+                                    {
+                                        writer
+                                            .write_all(
+                                                format!("{}\r\n\x1b[2K", message.args.join(" "))
                                                     .as_bytes(),
-                                                )
-                                                .await
-                                                .unwrap_or_default();
-                                        }
+                                            )
+                                            .await
+                                            .unwrap_or_default();
                                     }
                                     WebsocketEvent::ServerConsoleOutput => {
                                         writer

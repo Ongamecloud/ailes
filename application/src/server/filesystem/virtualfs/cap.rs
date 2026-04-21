@@ -203,7 +203,7 @@ impl super::VirtualReadableFilesystem for VirtualCapFilesystem {
             if let Some(per_page) = per_page {
                 for entry in directory_entries
                     .into_iter()
-                    .chain(other_entries.into_iter())
+                    .chain(other_entries)
                     .skip((page - 1) * per_page)
                     .take(per_page)
                 {
@@ -215,10 +215,7 @@ impl super::VirtualReadableFilesystem for VirtualCapFilesystem {
                     entries.push(entry);
                 }
             } else {
-                for entry in directory_entries
-                    .into_iter()
-                    .chain(other_entries.into_iter())
-                {
+                for entry in directory_entries.into_iter().chain(other_entries) {
                     let path = path.join(&entry);
                     let entry = match self.async_directory_entry(&path).await {
                         Ok(entry) => entry,
@@ -236,10 +233,7 @@ impl super::VirtualReadableFilesystem for VirtualCapFilesystem {
             let total_entries = directory_entries.len() + other_entries.len();
             let mut entries = Vec::new();
 
-            for entry in directory_entries
-                .into_iter()
-                .chain(other_entries.into_iter())
-            {
+            for entry in directory_entries.into_iter().chain(other_entries) {
                 let path = path.join(&entry);
                 let entry = match self.async_directory_entry(&path).await {
                     Ok(entry) => entry,

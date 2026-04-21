@@ -448,7 +448,7 @@ impl VirtualReadableFilesystem for VirtualZipArchive {
 
                     for (entry_index, _) in directory_entries
                         .into_iter()
-                        .chain(other_entries.into_iter())
+                        .chain(other_entries)
                         .skip(start)
                         .take(per_page)
                     {
@@ -469,10 +469,7 @@ impl VirtualReadableFilesystem for VirtualZipArchive {
                         ));
                     }
                 } else {
-                    for (entry_index, _) in directory_entries
-                        .into_iter()
-                        .chain(other_entries.into_iter())
-                    {
+                    for (entry_index, _) in directory_entries.into_iter().chain(other_entries) {
                         let entry = archive.by_index(entry_index)?;
                         let entry_path = match entry.enclosed_name() {
                             Some(name) => name,

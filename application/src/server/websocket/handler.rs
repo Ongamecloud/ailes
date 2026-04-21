@@ -190,48 +190,43 @@ pub async fn handle_ws(
                                     Ok(message) => {
                                         let run = async || -> Result<(), anyhow::Error> {
                                             match message.event {
-                                                websocket::WebsocketEvent::ServerInstallOutput => {
+                                                websocket::WebsocketEvent::ServerInstallOutput
                                                     if !websocket_handler
                                                         .has_permission(Permission::AdminWebsocketInstall).await?
-                                                    {
+                                                    => {
                                                         return Ok(());
                                                     }
-                                                }
                                                 websocket::WebsocketEvent::ServerOperationProgress
-                                                | websocket::WebsocketEvent::ServerOperationCompleted => {
+                                                | websocket::WebsocketEvent::ServerOperationCompleted
                                                     if !websocket_handler
                                                         .has_permission(Permission::FileRead).await?
-                                                    {
+                                                    => {
                                                         return Ok(());
                                                     }
-                                                }
                                                 websocket::WebsocketEvent::ServerBackupStarted
                                                 | websocket::WebsocketEvent::ServerBackupProgress
-                                                | websocket::WebsocketEvent::ServerBackupCompleted => {
+                                                | websocket::WebsocketEvent::ServerBackupCompleted
                                                     if !websocket_handler
                                                         .has_permission(Permission::BackupRead).await?
-                                                    {
+                                                    => {
                                                         return Ok(());
                                                     }
-                                                }
                                                 websocket::WebsocketEvent::ServerScheduleStarted
                                                 | websocket::WebsocketEvent::ServerScheduleStepStatus
                                                 | websocket::WebsocketEvent::ServerScheduleStepError
-                                                | websocket::WebsocketEvent::ServerScheduleCompleted => {
+                                                | websocket::WebsocketEvent::ServerScheduleCompleted
                                                     if !websocket_handler
                                                         .has_permission(Permission::ScheduleRead).await?
-                                                    {
+                                                    => {
                                                         return Ok(());
                                                     }
-                                                }
                                                 websocket::WebsocketEvent::ServerTransferLogs
-                                                | websocket::WebsocketEvent::ServerTransferProgress => {
+                                                | websocket::WebsocketEvent::ServerTransferProgress
                                                     if !websocket_handler
                                                         .has_permission(Permission::AdminWebsocketTransfer).await?
-                                                    {
+                                                    => {
                                                         return Ok(());
                                                     }
-                                                }
                                                 _ => {}
                                             }
 
