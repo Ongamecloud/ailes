@@ -26,6 +26,7 @@ impl CliCommandGroupBuilder {
     pub fn new(name: &'static str, about: &'static str) -> Self {
         Self {
             command: Command::new(name)
+                .version(crate::full_version())
                 .arg(
                     Arg::new("config")
                         .help("set the location for the configuration file")

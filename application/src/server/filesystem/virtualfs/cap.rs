@@ -470,6 +470,11 @@ impl super::VirtualReadableFilesystem for VirtualCapFilesystem {
 
         Ok(reader)
     }
+
+    async fn close(&self) -> Result<(), anyhow::Error> {
+        self.inner.close().await;
+        Ok(())
+    }
 }
 
 #[async_trait::async_trait]

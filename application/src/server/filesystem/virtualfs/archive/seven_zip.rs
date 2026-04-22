@@ -1066,4 +1066,8 @@ impl VirtualReadableFilesystem for VirtualSevenZipArchive {
 
         Ok(simplex_reader)
     }
+
+    async fn close(&self) -> Result<(), anyhow::Error> {
+        Ok(())
+    }
 }

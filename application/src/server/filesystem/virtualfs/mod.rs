@@ -524,6 +524,8 @@ pub trait VirtualReadableFilesystem: Send + Sync {
         )
         .await
     }
+
+    async fn close(&self) -> Result<(), anyhow::Error>;
 }
 
 #[async_trait::async_trait]

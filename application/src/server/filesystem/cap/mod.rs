@@ -69,6 +69,12 @@ impl CapFilesystem {
         self.inner.read().await.is_none()
     }
 
+    /// Closes the inner fd, preventing any further operations from succeeding.
+    #[inline]
+    pub async fn close(&self) {
+        *self.inner.write().await = None;
+    }
+
     #[inline]
     pub async fn async_get_inner(&self) -> Result<Arc<cap_std::fs::Dir>, anyhow::Error> {
         let inner = self.inner.read().await;

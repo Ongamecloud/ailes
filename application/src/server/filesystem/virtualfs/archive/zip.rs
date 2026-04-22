@@ -915,4 +915,8 @@ impl VirtualReadableFilesystem for VirtualZipArchive {
 
         Ok(simplex_reader)
     }
+
+    async fn close(&self) -> Result<(), anyhow::Error> {
+        Ok(())
+    }
 }

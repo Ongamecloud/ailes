@@ -496,7 +496,12 @@ impl BackupManager {
     }
 
     pub async fn invalidate_cached_browse(&self, uuid: uuid::Uuid) {
-        self.cached_browse_backups.invalidate(&uuid).await;
         self.cached_browse_backup_locks.invalidate(&uuid).await;
+
+        if let Some(browse) = self.cached_browse_backups.remove(&uuid).await
+            && let Err(err) = browse.close().await
+        {
+            tracing::error!(backup = %uuid, "failed to close cached browse backup: {:#?}", err);
+        }
     }
 }

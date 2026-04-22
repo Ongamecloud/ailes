@@ -1013,4 +1013,8 @@ impl VirtualReadableFilesystem for VirtualDdupBakArchive {
             is_ignored,
         }))
     }
+
+    async fn close(&self) -> Result<(), anyhow::Error> {
+        Ok(())
+    }
 }

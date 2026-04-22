@@ -1887,4 +1887,8 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
 
         Ok(reader)
     }
+
+    async fn close(&self) -> Result<(), anyhow::Error> {
+        Ok(())
+    }
 }

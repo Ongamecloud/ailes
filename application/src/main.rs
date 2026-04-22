@@ -101,8 +101,8 @@ async fn handle_cors(
 #[tokio::main]
 async fn main() {
     let cli = wings_rs::commands::CliCommandGroupBuilder::new(
-        "panel-rs",
-        "The panel server allowing control of game servers.",
+        "wings-rs",
+        "The wings server implementing server management for the panel.",
     );
 
     let mut cli = wings_rs::commands::commands(cli);
