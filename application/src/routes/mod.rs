@@ -1,4 +1,3 @@
-use bollard::Docker;
 use serde::{Deserialize, Serialize};
 use std::{sync::Arc, time::Instant};
 use utoipa::ToSchema;
@@ -130,7 +129,7 @@ pub struct AppState {
     pub version: String,
 
     pub config: Arc<crate::config::Config>,
-    pub docker: Arc<Docker>,
+    pub executor: Arc<dyn crate::server::executor::ServerExecutor>,
     pub stats_manager: Arc<crate::stats::StatsManager>,
     pub server_manager: Arc<crate::server::manager::ServerManager>,
     pub backup_manager: Arc<crate::server::backup::manager::BackupManager>,

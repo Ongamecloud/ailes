@@ -8,17 +8,9 @@ mod post {
         server::installation::InstallationScript,
     };
     use axum::http::StatusCode;
-    use serde::Serialize;
-    use utoipa::ToSchema;
-
-    #[derive(ToSchema, Serialize)]
-    struct Response {
-        stdout: String,
-        stderr: String,
-    }
 
     #[utoipa::path(post, path = "/", responses(
-        (status = OK, body = inline(Response)),
+        (status = OK, body = String),
     ), params(
         (
             "server" = uuid::Uuid,
@@ -31,8 +23,10 @@ mod post {
         server: GetServer,
         crate::Payload(data): crate::Payload<InstallationScript>,
     ) -> ApiResponseResult {
-        match crate::server::script::script_server(&server, &state.docker, data).await {
-            Ok((stdout, stderr)) => ApiResponse::new_serialized(Response { stdout, stderr }).ok(),
+        match crate::server::script::script_server(&server, &state.executor, data).await {
+            Ok(stdout_stream) => ApiResponse::new_stream(stdout_stream)
+                .with_header("Content-Type", "text/plain")
+                .ok(),
             Err(err) => {
                 tracing::error!(
                     server = %server.uuid,

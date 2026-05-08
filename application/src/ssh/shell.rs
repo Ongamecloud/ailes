@@ -6,7 +6,6 @@ use crate::{
         websocket::WebsocketEvent,
     },
 };
-use futures::StreamExt;
 use russh::{Channel, ChannelWriteHalf, server::Msg};
 use serde_json::json;
 use std::{pin::Pin, sync::Arc};
@@ -474,9 +473,10 @@ impl ShellSession {
                             } else if self.has_permission(Permission::ControlConsole).await {
                                 if self.server.state.get_state()
                                     != crate::server::state::ServerState::Offline
-                                    && let Some(stdin) = self.server.container_stdin().await
                                 {
-                                    if let Err(err) = stdin.send(format!("{line}\n").into()).await {
+                                    if let Err(err) =
+                                        self.server.send_stdin(format!("{line}\n").into()).await
+                                    {
                                         data_writer.write_all(b"\r\n").await.unwrap_or_default();
 
                                         tracing::error!(
@@ -641,7 +641,7 @@ impl ShellSession {
             {
                 let mut log_stream = self
                     .server
-                    .read_log(Some(self.state.config.system.websocket_log_count))
+                    .logs(Some(self.state.config.system.websocket_log_count))
                     .await;
 
                 {
@@ -663,13 +663,9 @@ impl ShellSession {
                 if self.server.state.get_state() != crate::server::state::ServerState::Offline
                     || self.state.config.api.send_offline_server_logs
                 {
-                    while let Some(Ok(line)) = log_stream.next().await {
-                        writer
-                            .make_writer()
-                            .write_all(line.as_bytes())
-                            .await
-                            .unwrap_or_default();
-                    }
+                    tokio::io::copy(&mut log_stream, &mut writer.make_writer())
+                        .await
+                        .unwrap_or_default();
                 }
             } else {
                 let prelude = self.state.config.daemon_prelude();
@@ -804,7 +800,7 @@ impl ShellSession {
                                 continue;
                             }
 
-                            if let Some(mut stdout) = server.container_stdout().await {
+                            if let Some(mut stdout) = server.get_stdout_lines().await {
                                 loop {
                                     if !server
                                         .user_permissions

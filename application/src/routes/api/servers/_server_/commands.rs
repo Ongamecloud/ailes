@@ -38,16 +38,10 @@ mod post {
                 .ok();
         }
 
-        if let Some(stdin) = server.container_stdin().await {
-            for mut command in data.commands {
-                command.push('\n');
+        for mut command in data.commands {
+            command.push('\n');
 
-                stdin.send(command).await.ok();
-            }
-        } else {
-            return ApiResponse::error("failed to get stdin (is server offline?)")
-                .with_status(StatusCode::EXPECTATION_FAILED)
-                .ok();
+            server.send_stdin(command.into()).await?;
         }
 
         ApiResponse::new_serialized(Response {}).ok()

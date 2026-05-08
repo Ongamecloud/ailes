@@ -1,7 +1,5 @@
-use super::configuration::string_to_option;
 use anyhow::Context;
 use compact_str::ToCompactString;
-use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -28,7 +26,7 @@ pub struct ServerInstaller {
     server: super::Server,
     installation_script: Option<Arc<InstallationScript>>,
 
-    container_id: Arc<Mutex<Option<String>>>,
+    process_handle: Arc<Mutex<Option<Arc<dyn super::executor::ProcessHandle>>>>,
 
     abort_notify: Arc<tokio::sync::Notify>,
 }
@@ -48,7 +46,7 @@ impl ServerInstaller {
                 .environment(&server.app_state.config),
             server: server.clone(),
             installation_script: installation_script.map(Arc::new),
-            container_id: Arc::new(Mutex::new(None)),
+            process_handle: Arc::new(Mutex::new(None)),
             abort_notify: Arc::new(tokio::sync::Notify::new()),
         }
     }
@@ -108,7 +106,13 @@ impl ServerInstaller {
         self.server.installing.store(false, Ordering::SeqCst);
         self.server.installer.write().await.take();
 
-        self.cleanup_container().await?;
+        if let Err(err) = self.cleanup_container().await {
+            tracing::error!(
+                server = %self.server.uuid,
+                "failed to cleanup installation container: {}",
+                err
+            );
+        }
 
         tokio::fs::remove_dir_all(
             Path::new(&self.server.app_state.config.system.tmp_directory)
@@ -246,44 +250,34 @@ impl ServerInstaller {
 
             async move {
                 let run = async || {
-                    if let Err(err) = installer
-                        .server
-                        .pull_image(&container_script.container_image, false)
-                        .await
-                        .context("Failed to pull installation container image")
-                    {
-                        installer.unset_installing(false).await?;
-                        return Err(err);
-                    }
-
-                    let container = match installer
+                    let (handle, mut status_rx) = match installer
                         .server
                         .app_state
-                        .docker
-                        .create_container(
-                            Some(bollard::container::CreateContainerOptions {
-                                name: format!("{}_installer", installer.server.uuid),
-                                ..Default::default()
-                            }),
-                            match installer.container_config().await {
-                                Ok(config) => config,
-                                Err(err) => {
-                                    installer.unset_installing(false).await?;
-                                    return Err(err);
-                                }
-                            },
-                        )
+                        .executor
+                        .setup_installation_process(&installer.server, &container_script)
                         .await
-                        .context("Failed to create installation container")
+                        .context("Failed to setup installation process")
                     {
-                        Ok(container) => container,
+                        Ok(r) => r,
                         Err(err) => {
                             installer.unset_installing(false).await?;
                             return Err(err);
                         }
                     };
 
-                    *installer.container_id.lock().await = Some(container.id.clone());
+                    *installer.process_handle.lock().await = Some(Arc::clone(&handle));
+
+                    let mut stdout_rx = match handle
+                        .subscribe_stdout_lines()
+                        .await
+                        .context("Failed to subscribe to stdout")
+                    {
+                        Ok(rx) => rx,
+                        Err(err) => {
+                            installer.unset_installing(false).await?;
+                            return Err(err);
+                        }
+                    };
 
                     tokio::select! {
                         result = tokio::time::timeout(
@@ -312,156 +306,43 @@ impl ServerInstaller {
                                 let installer = Arc::clone(&installer);
 
                                 async move {
-                                    let thread = async {
-                                        let mut stream = installer
-                                            .server
-                                            .app_state
-                                            .docker
-                                            .logs::<String>(
-                                                &container.id,
-                                                Some(bollard::container::LogsOptions {
-                                                    stdout: true,
-                                                    stderr: true,
-                                                    follow: true,
-                                                    ..Default::default()
-                                                }),
-                                            );
+                                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                                    handle.start().await.context("Failed to start installation container")?;
 
-                                        let mut buffer = Vec::with_capacity(1024);
-                                        let mut line_start = 0;
-
-                                        while let Some(Ok(data)) = stream.next().await {
-                                            buffer.extend_from_slice(&data.into_bytes());
-
-                                            let mut search_start = line_start;
-
-                                            loop {
-                                                if let Some(pos) = buffer[search_start..]
-                                                    .iter()
-                                                    .position(|&b| b == b'\n')
-                                                {
-                                                    let newline_pos = search_start + pos;
-
-                                                    if newline_pos - line_start <= 512 {
-                                                        let line = compact_str::CompactString::from_utf8_lossy(
-                                                            &buffer[line_start..newline_pos],
-                                                        )
-                                                        .trim()
-                                                        .into();
+                                    loop {
+                                        tokio::select! {
+                                            result = stdout_rx.recv() => {
+                                                match result {
+                                                    Ok(line) => {
                                                         installer
                                                             .server
                                                             .websocket
                                                             .send(super::websocket::WebsocketMessage::new(
                                                                 super::websocket::WebsocketEvent::ServerInstallOutput,
-                                                                [line].into(),
+                                                                [line.to_compact_string()].into(),
                                                             ))
                                                             .ok();
-
-                                                        line_start = newline_pos + 1;
-                                                        search_start = line_start;
-                                                    } else {
-                                                        let line = compact_str::CompactString::from_utf8_lossy(
-                                                            &buffer[line_start..(line_start + 512)],
-                                                        )
-                                                        .trim()
-                                                        .into();
-                                                        installer
-                                                            .server
-                                                            .websocket
-                                                            .send(super::websocket::WebsocketMessage::new(
-                                                                super::websocket::WebsocketEvent::ServerInstallOutput,
-                                                                [line].into(),
-                                                            ))
-                                                            .ok();
-
-                                                        line_start += 512;
-                                                        search_start = line_start;
                                                     }
-                                                } else {
-                                                    let current_line_length = buffer.len() - line_start;
-                                                    if current_line_length > 512 {
-                                                        let line = compact_str::CompactString::from_utf8_lossy(
-                                                            &buffer[line_start..(line_start + 512)],
-                                                        )
-                                                        .trim()
-                                                        .into();
-                                                        installer
-                                                            .server
-                                                            .websocket
-                                                            .send(super::websocket::WebsocketMessage::new(
-                                                                super::websocket::WebsocketEvent::ServerInstallOutput,
-                                                                [line].into(),
-                                                            ))
-                                                            .ok();
-
-                                                        line_start += 512;
-                                                        search_start = line_start;
-                                                    } else {
-                                                        break;
-                                                    }
+                                                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                                                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                                                 }
                                             }
-
-                                            if line_start > 1024 && line_start > buffer.len() / 2 {
-                                                buffer.drain(0..line_start);
-                                                line_start = 0;
+                                            result = status_rx.recv() => {
+                                                if let Some((_, usage)) = result {
+                                                    installer
+                                                        .server
+                                                        .websocket
+                                                        .send(super::websocket::WebsocketMessage::new(
+                                                            super::websocket::WebsocketEvent::ServerStats,
+                                                            [serde_json::to_string(&usage).unwrap().into()].into(),
+                                                        ))
+                                                        .ok();
+                                                }
                                             }
                                         }
-
-                                        if line_start < buffer.len() {
-                                            let line = compact_str::CompactString::from_utf8_lossy(&buffer[line_start..])
-                                                .trim()
-                                                .into();
-                                            installer
-                                                .server
-                                                .websocket
-                                                .send(super::websocket::WebsocketMessage::new(
-                                                    super::websocket::WebsocketEvent::ServerInstallOutput,
-                                                    [line].into(),
-                                                ))
-                                                .ok();
-                                        }
-
-                                        tracing::info!(server = ?installer.server.uuid, "ending server installation process by attach end");
-
-                                        Ok::<_, anyhow::Error>(())
-                                    };
-
-                                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                                    installer.server.app_state.docker
-                                        .start_container::<String>(&container.id, None)
-                                        .await?;
-
-                                    let wait_thread = async {
-                                        let mut stream = installer
-                                            .server
-                                            .app_state
-                                            .docker
-                                            .wait_container(
-                                                &container.id,
-                                                Some(bollard::container::WaitContainerOptions {
-                                                    condition: "not-running"
-                                                })
-                                            );
-
-                                        if let Some(result) = stream.next().await {
-                                            tracing::info!(server = ?installer.server.uuid, "ending server installation process by container exit: {:?}", result);
-                                            let result = result?;
-
-                                            if let Some(err) = result.error && let Some(message) = err.message {
-                                                return Err(anyhow::anyhow!(message));
-                                            }
-
-                                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                                        }
-
-                                        Ok::<_, anyhow::Error>(())
-                                    };
-
-                                    tokio::select! {
-                                        result = thread => result,
-                                        result = wait_thread => result,
                                     }
+
+                                    Ok::<_, anyhow::Error>(())
                                 }
                             }
                         ) => match result {
@@ -516,68 +397,40 @@ impl ServerInstaller {
                 [].into(),
             ))?;
 
-        if let Ok(containers) = self
-            .server
-            .app_state
-            .docker
-            .list_containers(Some(bollard::container::ListContainersOptions {
-                all: true,
-                filters: HashMap::from([("name".to_string(), vec![self.server.uuid.to_string()])]),
-                ..Default::default()
-            }))
-            .await
-        {
-            for container in containers {
-                if container
-                    .names
-                    .as_ref()
-                    .is_some_and(|names| names.iter().any(|name| name.contains("installer")))
-                {
-                    let current_container_id = match container.id {
-                        Some(id) => id,
-                        None => continue,
-                    };
-
-                    if container
-                        .state
-                        .is_some_and(|s| s.to_lowercase() == "running")
-                    {
-                        tracing::info!(
-                            server = %self.server.uuid,
-                            "attaching to existing installation container {}",
-                            current_container_id
-                        );
-
-                        *self.container_id.lock().await = Some(current_container_id);
-                    } else {
-                        tracing::info!(
-                            server = %self.server.uuid,
-                            "found existing installation container {} but it is not running, deleting it",
-                            current_container_id
-                        );
-
-                        self.server
-                            .app_state
-                            .docker
-                            .remove_container(
-                                &current_container_id,
-                                Some(bollard::container::RemoveContainerOptions {
-                                    force: true,
-                                    ..Default::default()
-                                }),
-                            )
-                            .await
-                            .ok();
-                    }
-                }
-            }
-        }
-
         tokio::spawn({
             let installer = Arc::clone(self);
 
             async move {
                 let run = async || {
+                    let (handle, mut status_rx) = match installer
+                        .server
+                        .app_state
+                        .executor
+                        .attach_installation_process(&installer.server)
+                        .await
+                        .context("Failed to attach to installation process")
+                    {
+                        Ok(r) => r,
+                        Err(err) => {
+                            installer.unset_installing(false).await?;
+                            return Err(err);
+                        }
+                    };
+
+                    *installer.process_handle.lock().await = Some(Arc::clone(&handle));
+
+                    let mut stdout_rx = match handle
+                        .subscribe_stdout_lines()
+                        .await
+                        .context("Failed to subscribe to stdout")
+                    {
+                        Ok(rx) => rx,
+                        Err(err) => {
+                            installer.unset_installing(false).await?;
+                            return Err(err);
+                        }
+                    };
+
                     tokio::select! {
                         result = tokio::time::timeout(
                             if installer
@@ -603,129 +456,36 @@ impl ServerInstaller {
                             },
                             {
                                 let installer = Arc::clone(&installer);
-                                let docker_id = match installer
-                                    .container_id
-                                    .lock()
-                                    .await
-                                    .as_ref() {
-                                        Some(id) => id.clone(),
-                                        None => {
-                                            installer.unset_installing(false).await?;
-                                            return Err(anyhow::anyhow!(
-                                                "no installation container to attach to"
-                                            ));
-                                        }
-                                    };
 
                                 async move {
-                                    let mut stream = installer
-                                        .server
-                                        .app_state
-                                        .docker
-                                        .attach_container::<String>(
-                                            &docker_id,
-                                            Some(bollard::container::AttachContainerOptions {
-                                                stdout: Some(true),
-                                                stderr: Some(true),
-                                                stream: Some(true),
-                                                ..Default::default()
-                                            }),
-                                        )
-                                        .await?;
-
-                                    let mut buffer = Vec::with_capacity(1024);
-                                    let mut line_start = 0;
-
-                                    while let Some(Ok(data)) = stream.output.next().await {
-                                        buffer.extend_from_slice(&data.into_bytes());
-
-                                        let mut search_start = line_start;
-
-                                        loop {
-                                            if let Some(pos) = buffer[search_start..]
-                                                .iter()
-                                                .position(|&b| b == b'\n')
-                                            {
-                                                let newline_pos = search_start + pos;
-
-                                                if newline_pos - line_start <= 512 {
-                                                    let line = compact_str::CompactString::from_utf8_lossy(
-                                                        &buffer[line_start..newline_pos],
-                                                    )
-                                                    .trim()
-                                                    .into();
-                                                    installer
-                                                        .server
-                                                        .websocket
-                                                        .send(super::websocket::WebsocketMessage::new(
-                                                            super::websocket::WebsocketEvent::ServerInstallOutput,
-                                                            [line].into(),
-                                                        ))
-                                                        .ok();
-
-                                                    line_start = newline_pos + 1;
-                                                    search_start = line_start;
-                                                } else {
-                                                    let line = compact_str::CompactString::from_utf8_lossy(
-                                                        &buffer[line_start..(line_start + 512)],
-                                                    )
-                                                    .trim()
-                                                    .into();
-                                                    installer
-                                                        .server
-                                                        .websocket
-                                                        .send(super::websocket::WebsocketMessage::new(
-                                                            super::websocket::WebsocketEvent::ServerInstallOutput,
-                                                            [line].into(),
-                                                        ))
-                                                        .ok();
-
-                                                    line_start += 512;
-                                                    search_start = line_start;
+                                    loop {
+                                        tokio::select! {
+                                            result = stdout_rx.recv() => {
+                                                match result {
+                                                    Ok(line) => {
+                                                        installer
+                                                            .server
+                                                            .websocket
+                                                            .send(super::websocket::WebsocketMessage::new(
+                                                                super::websocket::WebsocketEvent::ServerInstallOutput,
+                                                                [line.to_compact_string()].into(),
+                                                            ))
+                                                            .ok();
+                                                    }
+                                                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                                                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                                                 }
-                                            } else {
-                                                let current_line_length = buffer.len() - line_start;
-                                                if current_line_length > 512 {
-                                                    let line = compact_str::CompactString::from_utf8_lossy(
-                                                        &buffer[line_start..(line_start + 512)],
-                                                    )
-                                                    .trim()
-                                                    .into();
-                                                    installer
-                                                        .server
-                                                        .websocket
-                                                        .send(super::websocket::WebsocketMessage::new(
-                                                            super::websocket::WebsocketEvent::ServerInstallOutput,
-                                                            [line].into(),
-                                                        ))
-                                                        .ok();
-
-                                                    line_start += 512;
-                                                    search_start = line_start;
-                                                } else {
-                                                    break;
+                                            }
+                                            result = status_rx.recv() => {
+                                                match result {
+                                                    Some((super::executor::ProcessStatus::Stopped { .. }, _)) | None => {
+                                                        tracing::info!(server = ?installer.server.uuid, "ending server installation process by container exit");
+                                                        break;
+                                                    }
+                                                    _ => {}
                                                 }
                                             }
                                         }
-
-                                        if line_start > 1024 && line_start > buffer.len() / 2 {
-                                            buffer.drain(0..line_start);
-                                            line_start = 0;
-                                        }
-                                    }
-
-                                    if line_start < buffer.len() {
-                                        let line = compact_str::CompactString::from_utf8_lossy(&buffer[line_start..])
-                                            .trim()
-                                            .into();
-                                        installer
-                                            .server
-                                            .websocket
-                                            .send(super::websocket::WebsocketMessage::new(
-                                                super::websocket::WebsocketEvent::ServerInstallOutput,
-                                                [line].into(),
-                                            ))
-                                            .ok();
                                     }
 
                                     Ok::<_, anyhow::Error>(())
@@ -736,7 +496,7 @@ impl ServerInstaller {
                             Ok(Err(err)) => {
                                 installer.unset_installing(false).await?;
                                 return Err(anyhow::anyhow!(
-                                    "failed to start installation container: {}",
+                                    "failed during installation container streaming: {}",
                                     err
                                 ));
                             }
@@ -775,21 +535,19 @@ impl ServerInstaller {
     }
 
     async fn cleanup_container(&self) -> Result<(), anyhow::Error> {
-        let Some(container_id) = &*self.container_id.lock().await else {
-            return Ok(());
+        let handle = match self.process_handle.lock().await.clone() {
+            Some(h) => h,
+            None => return Ok(()),
         };
         let container_script = self.get_installation_script()?;
 
-        let mut logs_stream = self.server.app_state.docker.logs::<String>(
-            container_id,
-            Some(bollard::container::LogsOptions {
-                follow: false,
-                stdout: true,
-                stderr: true,
-                timestamps: false,
-                ..Default::default()
-            }),
-        );
+        if let Err(err) = handle.kill().await {
+            tracing::warn!(
+                server = %self.server.uuid,
+                "failed to kill installation container, ignoring: {}",
+                err
+            );
+        }
 
         let mut env = String::new();
         for var in &self.environment {
@@ -823,182 +581,28 @@ impl ServerInstaller {
         )
         .await?;
 
-        while let Some(Ok(log)) = logs_stream.next().await {
-            file.write_all(&log.into_bytes()).await?;
+        match handle.logs(None).await {
+            Ok(mut reader) => {
+                tokio::io::copy(&mut reader, &mut file).await?;
+            }
+            Err(err) => {
+                tracing::warn!(
+                    server = %self.server.uuid,
+                    "could not collect installation logs: {}",
+                    err
+                );
+            }
         }
 
         file.shutdown().await?;
 
-        Ok(self
-            .server
+        self.server
             .app_state
-            .docker
-            .remove_container(
-                container_id,
-                Some(bollard::container::RemoveContainerOptions {
-                    force: true,
-                    ..Default::default()
-                }),
-            )
-            .await?)
-    }
+            .executor
+            .cleanup_installation_process(&self.server)
+            .await?;
 
-    async fn container_config(&self) -> Result<bollard::container::Config<String>, anyhow::Error> {
-        let container_script = self.get_installation_script()?;
-        let mut env = self.environment.clone();
-        env.reserve_exact(container_script.environment.len());
-
-        for (k, v) in &container_script.environment {
-            env.push(format!(
-                "{k}={}",
-                match v {
-                    serde_json::Value::String(s) => s.clone(),
-                    _ => v.to_string(),
-                }
-            ));
-        }
-
-        let labels = HashMap::from([
-            (
-                "Service".to_string(),
-                self.server.app_state.config.app_name.clone(),
-            ),
-            ("ContainerType".to_string(), "server_installer".to_string()),
-        ]);
-
-        let mut resources = self
-            .server
-            .configuration
-            .read()
-            .await
-            .convert_container_resources(&self.server.app_state.config);
-
-        if resources.memory_reservation.is_some_and(|m| {
-            m > 0
-                && m < self
-                    .server
-                    .app_state
-                    .config
-                    .docker
-                    .installer_limits
-                    .memory
-                    .as_bytes() as i64
-        }) {
-            resources.memory = None;
-            resources.memory_reservation = Some(
-                self.server
-                    .app_state
-                    .config
-                    .docker
-                    .installer_limits
-                    .memory
-                    .as_bytes() as i64,
-            );
-            resources.memory_swap = None;
-        }
-
-        if resources.cpu_quota.is_some_and(|c| {
-            c > 0 && c < self.server.app_state.config.docker.installer_limits.cpu as i64 * 1000
-        }) {
-            resources.cpu_quota =
-                Some(self.server.app_state.config.docker.installer_limits.cpu as i64 * 1000);
-        }
-
-        let tmp_dir = Path::new(&self.server.app_state.config.system.tmp_directory)
-            .join(self.server.uuid.to_string());
-        tokio::fs::create_dir_all(&tmp_dir).await?;
-        tokio::fs::write(
-            tmp_dir.join("install.sh"),
-            container_script.script.replace("\r\n", "\n"),
-        )
-        .await?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            tokio::fs::set_permissions(&tmp_dir, std::fs::Permissions::from_mode(0o755)).await?;
-        }
-
-        Ok(bollard::container::Config {
-            host_config: Some(bollard::secret::HostConfig {
-                memory: resources.memory,
-                memory_reservation: resources.memory_reservation,
-                memory_swap: resources.memory_swap,
-                cpu_quota: resources.cpu_quota,
-                cpu_period: resources.cpu_period,
-                cpu_shares: resources.cpu_shares,
-                cpuset_cpus: resources.cpuset_cpus,
-                pids_limit: resources.pids_limit,
-                blkio_weight: resources.blkio_weight,
-                oom_kill_disable: resources.oom_kill_disable,
-
-                mounts: Some(vec![
-                    bollard::models::Mount {
-                        typ: Some(bollard::secret::MountTypeEnum::BIND),
-                        source: Some(self.server.filesystem.base().into()),
-                        target: Some("/mnt/server".to_string()),
-                        ..Default::default()
-                    },
-                    bollard::models::Mount {
-                        typ: Some(bollard::secret::MountTypeEnum::BIND),
-                        source: Some(tmp_dir.to_string_lossy().to_string()),
-                        target: Some("/mnt/install".to_string()),
-                        ..Default::default()
-                    },
-                ]),
-                network_mode: Some(self.server.app_state.config.docker.network.mode.clone()),
-                dns: Some(self.server.app_state.config.docker.network.dns.clone()),
-                tmpfs: Some(HashMap::from([(
-                    "/tmp".to_string(),
-                    format!(
-                        "rw,exec,nosuid,size={}M",
-                        self.server.app_state.config.docker.tmpfs_size
-                    ),
-                )])),
-                log_config: Some(bollard::secret::HostConfigLogConfig {
-                    typ: Some(
-                        self.server
-                            .app_state
-                            .config
-                            .docker
-                            .log_config
-                            .r#type
-                            .clone(),
-                    ),
-                    config: Some(
-                        self.server
-                            .app_state
-                            .config
-                            .docker
-                            .log_config
-                            .config
-                            .iter()
-                            .map(|(k, v)| (k.clone(), v.clone()))
-                            .collect(),
-                    ),
-                }),
-                userns_mode: string_to_option(&self.server.app_state.config.docker.userns_mode),
-                ..Default::default()
-            }),
-            cmd: Some(vec![
-                container_script.entrypoint.to_string(),
-                "/mnt/install/install.sh".to_string(),
-            ]),
-            hostname: Some("installer".to_string()),
-            image: Some(
-                container_script
-                    .container_image
-                    .trim_end_matches('~')
-                    .to_string(),
-            ),
-            env: Some(env),
-            labels: Some(labels),
-            attach_stdin: Some(true),
-            attach_stdout: Some(true),
-            attach_stderr: Some(true),
-            open_stdin: Some(true),
-            tty: Some(true),
-            ..Default::default()
-        })
+        Ok(())
     }
 }
 

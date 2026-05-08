@@ -328,7 +328,7 @@ pub async fn handle_ws(
                             continue;
                         }
 
-                        if let Some(mut stdout) = server.container_stdout().await {
+                        if let Some(mut stdout) = server.get_stdout_lines().await {
                             loop {
                                 match stdout.recv().await {
                                     Ok(stdout) => {

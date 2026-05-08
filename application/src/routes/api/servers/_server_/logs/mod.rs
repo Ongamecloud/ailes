@@ -9,9 +9,7 @@ mod get {
         routes::api::servers::_server_::GetServer,
     };
     use axum::extract::Query;
-    use futures::StreamExt;
     use serde::Deserialize;
-    use tokio::io::AsyncWriteExt;
     use utoipa::ToSchema;
 
     #[derive(ToSchema, Deserialize)]
@@ -34,21 +32,9 @@ mod get {
         ),
     ))]
     pub async fn route(server: GetServer, Query(params): Query<Params>) -> ApiResponseResult {
-        let mut log_stream = server.read_log(params.lines).await;
+        let log_stream = server.logs(params.lines).await;
 
-        let (logs_reader, mut logs_writer) = tokio::io::simplex(crate::BUFFER_SIZE);
-
-        tokio::spawn(async move {
-            while let Some(Ok(line)) = log_stream.next().await {
-                if logs_writer.write_all(line.as_bytes()).await.is_err() {
-                    break;
-                }
-            }
-
-            let _ = logs_writer.shutdown().await;
-        });
-
-        ApiResponse::new_stream(logs_reader)
+        ApiResponse::new_stream(log_stream)
             .with_header("Content-Type", "text/plain")
             .ok()
     }

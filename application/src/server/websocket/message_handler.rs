@@ -85,7 +85,7 @@ pub async fn handle_message(
                 drop(socket_jwt);
 
                 let mut log_stream = server
-                    .read_log(Some(state.config.system.websocket_log_count))
+                    .logs_lines(Some(state.config.system.websocket_log_count))
                     .await;
 
                 while let Some(Ok(line)) = log_stream.next().await {
@@ -360,31 +360,30 @@ pub async fn handle_message(
             let Some(raw_command) = message.args.first() else {
                 return Ok(());
             };
-            if let Some(stdin) = server.container_stdin().await {
-                let mut command = raw_command.to_compact_string();
-                command.push('\n');
 
-                if let Err(err) = stdin.send(command).await {
-                    tracing::error!(
-                        server = %server.uuid,
-                        "failed to send command to server: {}",
-                        err
-                    );
-                } else {
-                    server
-                        .activity
-                        .log_activity(Activity {
-                            event: ActivityEvent::ConsoleCommand,
-                            user: Some(websocket_handler.get_jwt().await?.user_uuid),
-                            ip: user_ip,
-                            metadata: Some(json!({
-                                "command": raw_command,
-                            })),
-                            schedule: None,
-                            timestamp: chrono::Utc::now(),
-                        })
-                        .await;
-                }
+            let mut command = raw_command.to_compact_string();
+            command.push('\n');
+
+            if let Err(err) = server.send_stdin(command.into()).await {
+                tracing::error!(
+                    server = %server.uuid,
+                    "failed to send command to server: {}",
+                    err
+                );
+            } else {
+                server
+                    .activity
+                    .log_activity(Activity {
+                        event: ActivityEvent::ConsoleCommand,
+                        user: Some(websocket_handler.get_jwt().await?.user_uuid),
+                        ip: user_ip,
+                        metadata: Some(json!({
+                            "command": raw_command,
+                        })),
+                        schedule: None,
+                        timestamp: chrono::Utc::now(),
+                    })
+                    .await;
             }
         }
         WebsocketEvent::Ping => {

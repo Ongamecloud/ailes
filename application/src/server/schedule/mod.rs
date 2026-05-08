@@ -463,7 +463,7 @@ impl Schedule {
 
                         async move {
                             loop {
-                                let mut stdout = match server.container_stdout().await {
+                                let mut stdout = match server.get_stdout_lines().await {
                                     Some(stdout) => stdout,
                                     None => {
                                         tokio::time::sleep(std::time::Duration::from_secs(1)).await;

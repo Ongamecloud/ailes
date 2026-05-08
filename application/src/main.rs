@@ -11,7 +11,7 @@ use russh::server::Server;
 use std::{net::SocketAddr, path::Path, sync::Arc, time::Instant};
 use utoipa::openapi::security::{ApiKey, ApiKeyValue, SecurityScheme};
 use utoipa_axum::router::OpenApiRouter;
-use wings_rs::{response::ApiResponse, routes::GetState};
+use wings_rs::{response::ApiResponse, routes::GetState, server::executor::ServerExecutor};
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[global_allocator]
@@ -250,18 +250,25 @@ async fn main() {
             .context("failed to connect to docker")
             .unwrap(),
         );
+    let executor = Arc::new(wings_rs::server::executor::docker::DockerExecutor::new(
+        docker,
+        config.clone(),
+    ));
 
-    tracing::info!("ensuring docker network exists");
-    config
-        .ensure_network(&docker)
-        .await
-        .context("failed to ensure docker network")
-        .unwrap();
+    tracing::info!("running server executor boot tasks");
+    if let Err(err) = executor.boot().await {
+        tracing::error!("server executor boot failed: {:?}", err);
+        drop(_guard);
+
+        std::process::exit(1);
+    }
 
     match config.client.reset_state().await {
         Ok(_) => tracing::info!("remote state reset successfully"),
         Err(err) => {
             tracing::error!("failed to reset remote state: {:?}", err);
+            drop(_guard);
+
             std::process::exit(1);
         }
     }
@@ -284,7 +291,7 @@ async fn main() {
         version: wings_rs::full_version(),
 
         config: Arc::clone(&config),
-        docker: Arc::clone(&docker),
+        executor,
         stats_manager: Arc::new(wings_rs::stats::StatsManager::default()),
         server_manager: Arc::new(wings_rs::server::manager::ServerManager::new(&servers)),
         backup_manager: Arc::new(wings_rs::server::backup::manager::BackupManager::default()),

@@ -1,9 +1,6 @@
-use bollard::secret::ContainerStateStatusEnum;
 use compact_str::ToCompactString;
-use futures::StreamExt;
 use serde_json::json;
 use std::{
-    collections::HashMap,
     ops::Deref,
     pin::Pin,
     sync::{
@@ -16,7 +13,7 @@ use tokio::sync::{Mutex, RwLock};
 pub mod activity;
 pub mod backup;
 pub mod configuration;
-pub mod container;
+pub mod executor;
 pub mod filesystem;
 pub mod installation;
 pub mod manager;
@@ -44,7 +41,7 @@ pub struct InnerServer {
     _targeted_websocket_receiver:
         tokio::sync::broadcast::Receiver<websocket::TargetedWebsocketMessage>,
 
-    pub container: RwLock<Option<Arc<container::Container>>>,
+    process_handle: RwLock<Option<Arc<dyn executor::ProcessHandle>>>,
     pub schedules: Arc<schedule::manager::ScheduleManager>,
     pub activity: activity::ActivityManager,
 
@@ -111,7 +108,7 @@ impl Server {
             targeted_websocket: targeted_websocket_tx,
             _targeted_websocket_receiver: targeted_websocket_rx,
 
-            container: RwLock::new(None),
+            process_handle: RwLock::new(None),
             schedules: Arc::clone(&schedules),
             activity,
 
@@ -139,9 +136,12 @@ impl Server {
         self.schedules.update_schedules(self.clone()).await;
     }
 
-    pub fn setup_websocket_sender(
+    fn setup_websocket_sender(
         &self,
-        container: Arc<container::Container>,
+        mut status_rx: tokio::sync::mpsc::Receiver<(
+            executor::ProcessStatus,
+            resources::ResourceUsage,
+        )>,
     ) -> Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
         tracing::debug!(
             server = %self.uuid,
@@ -151,20 +151,9 @@ impl Server {
 
         Box::pin(async move {
             let old_sender = server.clone().websocket_sender.write().await.replace(tokio::spawn(async move {
-                let mut container_channel = match container.update_reciever.lock().await.take() {
-                    Some(channel) => channel,
-                    None => {
-                        tracing::error!(
-                            server = %server.uuid,
-                            "failed to get container channel"
-                        );
-                        return;
-                    }
-                };
-
                 loop {
-                    let (container_state, usage) = match container_channel.recv().await {
-                        Some((container_state, usage)) => (container_state, usage),
+                    let (process_status, usage) = match status_rx.recv().await {
+                        Some((process_status, usage)) => (process_status, usage),
                         None => break,
                     };
 
@@ -207,8 +196,8 @@ impl Server {
                         });
                     }
 
-                    match container_state.status {
-                        Some(ContainerStateStatusEnum::RUNNING)
+                    match process_status {
+                        executor::ProcessStatus::Running
                             if !matches!(
                                 server.state.get_state(),
                                 state::ServerState::Running
@@ -217,10 +206,7 @@ impl Server {
                             ) => {
                                 server.state.set_state(state::ServerState::Running).await;
                             }
-                        Some(ContainerStateStatusEnum::EMPTY)
-                        | Some(ContainerStateStatusEnum::DEAD)
-                        | Some(ContainerStateStatusEnum::EXITED)
-                        | None => {
+                        executor::ProcessStatus::Stopped { exit_code, oom_killed } => {
                             server.state.set_state(state::ServerState::Offline).await;
 
                             tracing::info!(
@@ -228,8 +214,9 @@ impl Server {
                                 restarting = %server.restarting.load(Ordering::SeqCst),
                                 stopping = %server.stopping.load(Ordering::SeqCst),
                                 crash_handled = %server.crash_handled.load(Ordering::SeqCst),
-                                "container state changed to {:?}, handling crash",
-                                container_state.status
+                                exit_code = %exit_code,
+                                oom_killed = %oom_killed,
+                                "container stopped, handling crash"
                             );
 
                             if server.restarting.load(Ordering::SeqCst) {
@@ -253,8 +240,7 @@ impl Server {
                                         );
                                     }
                                 });
-                            } else if server.stopping.load(Ordering::SeqCst)
-                            {
+                            } else if server.stopping.load(Ordering::SeqCst) {
                                 server
                                     .crash_handled
                                     .store(true, Ordering::SeqCst);
@@ -286,8 +272,8 @@ impl Server {
                                     .crash_handled
                                     .store(true, Ordering::SeqCst);
 
-                                if container_state.exit_code.is_some_and(|code| code == 0)
-                                    && !container_state.oom_killed.unwrap_or(false)
+                                if exit_code == 0
+                                    && !oom_killed
                                     && !server.app_state
                                         .config
                                         .system
@@ -324,15 +310,15 @@ impl Server {
                                 server
                                     .log_daemon_with_prelude(&format!(
                                         "Exit code: {}",
-                                        container_state.exit_code.unwrap_or_default()
+                                        exit_code
                                     ));
                                 server
                                     .log_daemon_with_prelude(&format!(
                                         "Out of memory: {}",
-                                        container_state.oom_killed.unwrap_or(false)
+                                        oom_killed
                                     ));
 
-                                if container_state.oom_killed == Some(true) {
+                                if oom_killed {
                                     tracing::info!(
                                         server = %server.uuid,
                                         "container has been oom killed"
@@ -424,29 +410,43 @@ impl Server {
         })
     }
 
-    pub async fn container_stdin(
-        &self,
-    ) -> Option<tokio::sync::mpsc::Sender<compact_str::CompactString>> {
-        self.container
-            .read()
-            .await
-            .as_ref()
-            .map(|c| c.stdin.clone())
+    pub async fn send_stdin(&self, data: Vec<u8>) -> Result<(), anyhow::Error> {
+        if let Some(container) = self.process_handle.read().await.as_ref() {
+            container.send_stdin(data).await?;
+        }
+
+        Ok(())
     }
 
-    pub async fn container_stdout(
+    pub async fn get_stdout_lines(
         &self,
     ) -> Option<tokio::sync::broadcast::Receiver<Arc<compact_str::CompactString>>> {
-        self.container
-            .read()
-            .await
-            .as_ref()
-            .map(|c| c.stdout.resubscribe())
+        if let Some(container) = self.process_handle.read().await.as_ref() {
+            match container.subscribe_stdout_lines().await {
+                Ok(rx) => return Some(rx),
+                Err(err) => {
+                    tracing::error!(
+                        server = %self.uuid,
+                        "failed to subscribe to container stdout: {}",
+                        err
+                    );
+                }
+            }
+        }
+
+        None
     }
 
     pub async fn resource_usage(&self) -> resources::ResourceUsage {
-        if let Some(container) = self.container.read().await.as_ref() {
-            *container.resource_usage.read().await
+        if let Some(container) = self.process_handle.read().await.as_ref() {
+            container
+                .resource_usage()
+                .await
+                .unwrap_or_else(|_| resources::ResourceUsage {
+                    disk_bytes: 0,
+                    state: self.state.get_state(),
+                    ..Default::default()
+                })
         } else {
             resources::ResourceUsage {
                 disk_bytes: self.filesystem.limiter_usage().await,
@@ -569,10 +569,10 @@ impl Server {
         false
     }
 
-    pub async fn setup_container(&self) -> Result<(), bollard::errors::Error> {
+    pub async fn setup_container(&self) -> Result<(), anyhow::Error> {
         self.crash_handled.store(false, Ordering::SeqCst);
 
-        if self.container.read().await.is_some() {
+        if self.process_handle.read().await.is_some() {
             return Ok(());
         }
 
@@ -581,58 +581,20 @@ impl Server {
             "setting up container"
         );
 
-        let container = self
+        let (process_handle, status_rx) = self
             .app_state
-            .docker
-            .create_container(
-                Some(bollard::container::CreateContainerOptions {
-                    name: if self.app_state.config.docker.server_name_in_container_name {
-                        let name = &self.configuration.read().await.meta.name;
-                        let mut name_filtered = String::new();
-                        for c in name.chars() {
-                            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                                name_filtered.push(c);
-                            }
-                        }
-
-                        name_filtered.truncate(63 - 1 - 36);
-
-                        format!("{}.{}", name_filtered, self.configuration.read().await.uuid)
-                    } else {
-                        self.configuration.read().await.uuid.to_string()
-                    },
-                    ..Default::default()
-                }),
-                self.configuration
-                    .read()
-                    .await
-                    .container_config(
-                        &self.app_state.config,
-                        &self.app_state.docker,
-                        &self.filesystem,
-                    )
-                    .await,
-            )
+            .executor
+            .setup_server_process(&self.clone())
             .await?;
 
-        let container = Arc::new(
-            container::Container::new(
-                container.id.clone(),
-                self.process_configuration.read().await.startup.clone(),
-                Arc::clone(&self.app_state.docker),
-                self.clone(),
-            )
-            .await?,
-        );
-
-        self.setup_websocket_sender(Arc::clone(&container)).await;
-        *self.container.write().await = Some(container);
+        self.setup_websocket_sender(status_rx).await;
+        *self.process_handle.write().await = Some(process_handle);
 
         Ok(())
     }
 
-    pub async fn attach_container(&self) -> Result<(), bollard::errors::Error> {
-        if self.container.read().await.is_some() {
+    pub async fn attach_container(&self) -> Result<(), anyhow::Error> {
+        if self.process_handle.read().await.is_some() {
             return Ok(());
         }
 
@@ -641,105 +603,61 @@ impl Server {
             "attaching to container"
         );
 
-        if let Ok(containers) = self
+        match self
             .app_state
-            .docker
-            .list_containers(Some(bollard::container::ListContainersOptions {
-                all: true,
-                filters: HashMap::from([("name".to_string(), vec![self.uuid.to_string()])]),
-                ..Default::default()
-            }))
+            .executor
+            .attach_server_process(&self.clone())
             .await
         {
-            for container in containers {
-                if container
-                    .names
-                    .as_ref()
-                    .is_some_and(|names| names.iter().any(|name| name.contains("installer")))
-                {
-                    tracing::debug!(
-                        server = %self.uuid,
-                        "installer container found, skipping attachment"
-                    );
-
-                    continue;
-                }
-
-                if container
-                    .state
-                    .is_none_or(|s| s.to_lowercase() != "running")
-                {
-                    tracing::debug!(
-                        server = %self.uuid,
-                        "container is not running, skipping attachment"
-                    );
-
-                    continue;
-                }
-
-                let container = match container.id {
-                    Some(id) => id,
-                    None => {
-                        tracing::warn!(
-                            server = %self.uuid,
-                            "container ID is missing, cannot attach"
-                        );
-                        continue;
-                    }
-                };
-                let container = Arc::new(
-                    container::Container::new(
-                        container.to_string(),
-                        self.process_configuration.read().await.startup.clone(),
-                        Arc::clone(&self.app_state.docker),
-                        self.clone(),
-                    )
-                    .await?,
-                );
-
+            Ok((process_handle, status_rx)) => {
                 self.crash_handled.store(true, Ordering::SeqCst);
-                self.setup_websocket_sender(Arc::clone(&container)).await;
-                *self.container.write().await = Some(container);
+                self.setup_websocket_sender(status_rx).await;
+                *self.process_handle.write().await = Some(process_handle);
 
                 tokio::spawn({
                     let server = self.clone();
-
                     async move {
                         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-
                         if server.state.get_state() != state::ServerState::Offline {
                             server.crash_handled.store(false, Ordering::SeqCst);
                         }
                     }
                 });
             }
+            Err(err) => {
+                tracing::debug!(server = %self.uuid, "no running container to attach to: {}", err);
+            }
         }
 
         Ok(())
     }
 
-    pub async fn sync_container(&self) -> Result<(), bollard::errors::Error> {
+    pub async fn sync_container(&self) -> Result<(), anyhow::Error> {
         self.filesystem
             .update_disk_limit(self.configuration.read().await.build.disk_space * 1024 * 1024)
             .await;
 
-        if let Some(container) = self.container.read().await.as_ref() {
-            self.app_state
-                .docker
-                .update_container(
-                    &container.docker_id,
-                    self.configuration
-                        .read()
-                        .await
-                        .container_update_config(&self.app_state.config),
-                )
-                .await?;
+        if let Some(process_handle) = self.process_handle.read().await.as_ref() {
+            process_handle.sync_configuration().await?;
         }
 
         Ok(())
     }
 
-    pub async fn read_log(
+    pub async fn logs(&self, lines: Option<usize>) -> Box<dyn tokio::io::AsyncRead + Unpin + Send> {
+        if let Some(process_handle) = self.process_handle.read().await.as_ref() {
+            match process_handle.logs(lines).await {
+                Ok(reader) => Box::new(reader),
+                Err(_) => {
+                    Box::new(tokio::io::empty()) as Box<dyn tokio::io::AsyncRead + Unpin + Send>
+                }
+            }
+        } else {
+            Box::new(tokio::io::empty()) as Box<dyn tokio::io::AsyncRead + Unpin + Send>
+        }
+    }
+
+    pub async fn logs_lines(
         &self,
         lines: Option<usize>,
     ) -> Box<
@@ -747,8 +665,8 @@ impl Server {
             + Unpin
             + Send,
     > {
-        let container = match &*self.container.read().await {
-            Some(container) => container.docker_id.clone(),
+        let process_handle = match &*self.process_handle.read().await {
+            Some(c) => Arc::clone(c),
             None => {
                 return Box::new(futures::stream::empty())
                     as Box<
@@ -760,24 +678,42 @@ impl Server {
             }
         };
 
-        let logs_stream = self.app_state.docker.logs(
-            &container,
-            Some(bollard::container::LogsOptions {
-                follow: false,
-                stdout: true,
-                stderr: true,
-                timestamps: false,
-                tail: lines.map_or_else(|| "all".to_string(), |l| l.to_string()),
-                ..Default::default()
-            }),
+        let reader = match process_handle.logs(lines).await {
+            Ok(reader) => reader,
+            Err(_) => {
+                return Box::new(futures::stream::empty())
+                    as Box<
+                        dyn futures::Stream<
+                                Item = Result<compact_str::CompactString, anyhow::Error>,
+                            > + Unpin
+                            + Send,
+                    >;
+            }
+        };
+
+        let stream = futures::stream::try_unfold(
+            tokio::io::BufReader::new(reader),
+            |mut reader| async move {
+                use tokio::io::AsyncBufReadExt;
+                let mut line = String::new();
+                match reader.read_line(&mut line).await {
+                    Ok(0) => Ok(None),
+                    Ok(_) => {
+                        let trimmed = line.trim_end_matches(['\n', '\r']);
+                        Ok(Some((compact_str::CompactString::from(trimmed), reader)))
+                    }
+                    Err(e) => Err(anyhow::Error::from(e)),
+                }
+            },
         );
 
-        Box::new(logs_stream.map(|log| match log {
-            Ok(log) => Ok(compact_str::CompactString::from_utf8_lossy(
-                &log.into_bytes(),
-            )),
-            Err(err) => Err(err.into()),
-        }))
+        let pinned: Pin<
+            Box<
+                dyn futures::Stream<Item = Result<compact_str::CompactString, anyhow::Error>>
+                    + Send,
+            >,
+        > = Box::pin(stream);
+        Box::new(pinned)
     }
 
     pub fn log_daemon(&self, message: compact_str::CompactString) {
@@ -834,174 +770,6 @@ impl Server {
                 .to_compact_string()]
             .into(),
         )
-    }
-
-    pub async fn pull_image(&self, image: &str, quiet: bool) -> Result<(), bollard::errors::Error> {
-        tracing::info!(
-            server = %self.uuid,
-            image = %image,
-            "pulling image"
-        );
-
-        if !quiet {
-            self.log_daemon_with_prelude(
-                "Pulling Docker container image, this could take a few minutes to complete...",
-            );
-        }
-
-        if !image.ends_with("~") {
-            let mut registry_auth = None;
-            for (registry, config) in self.app_state.config.docker.registries.iter() {
-                if image.starts_with(registry) {
-                    registry_auth = Some(bollard::auth::DockerCredentials {
-                        username: Some(config.username.clone()),
-                        password: Some(config.password.clone()),
-                        serveraddress: Some(registry.clone()),
-                        ..Default::default()
-                    });
-                    break;
-                }
-            }
-
-            let (image, tag) = image.split_once(':').unwrap_or((image, "latest"));
-
-            let mut stream = self.app_state.docker.create_image(
-                Some(bollard::image::CreateImageOptions {
-                    from_image: image,
-                    tag,
-                    ..Default::default()
-                }),
-                None,
-                registry_auth,
-            );
-
-            while let Some(status) = stream.next().await {
-                match status {
-                    Ok(status) => {
-                        if let Some(id) = status.id {
-                            match status.status.as_ref().map(|s| s.to_lowercase()).as_deref() {
-                                Some("downloading") => {
-                                    if let Some(progress_detail) = &status.progress_detail {
-                                        self.websocket
-                                            .send(websocket::WebsocketMessage::new(
-                                                websocket::WebsocketEvent::ServerImagePullProgress,
-                                                [
-                                                    id.into(),
-                                                    serde_json::to_string(&crate::models::PullProgress {
-                                                        status: crate::models::PullProgressStatus::Pulling,
-                                                        progress: progress_detail.current.unwrap_or_default(),
-                                                        total: progress_detail.total.unwrap_or_default()
-                                                    })
-                                                    .unwrap()
-                                                    .into()
-                                                ].into(),
-                                            ))
-                                            .ok();
-                                    }
-                                }
-                                Some("extracting") => {
-                                    if let Some(progress_detail) = &status.progress_detail {
-                                        self.websocket
-                                            .send(websocket::WebsocketMessage::new(
-                                                websocket::WebsocketEvent::ServerImagePullProgress,
-                                                [
-                                                    id.into(),
-                                                    serde_json::to_string(&crate::models::PullProgress {
-                                                        status: crate::models::PullProgressStatus::Extracting,
-                                                        progress: progress_detail.current.unwrap_or_default(),
-                                                        total: progress_detail.total.unwrap_or_default()
-                                                    })
-                                                    .unwrap()
-                                                    .into()
-                                                ].into(),
-                                            ))
-                                            .ok();
-                                    }
-                                }
-                                Some("pull complete") => {
-                                    self.websocket
-                                        .send(websocket::WebsocketMessage::new(
-                                            websocket::WebsocketEvent::ServerImagePullCompleted,
-                                            [id.into()].into(),
-                                        ))
-                                        .ok();
-                                }
-                                _ => {}
-                            }
-                        }
-
-                        if let Some(status_str) = status.status {
-                            if let Some(progress_detail) = status.progress_detail {
-                                self.log_daemon_install(
-                                    format!(
-                                        "{status_str} {} of {}",
-                                        crate::utils::draw_progress_bar(
-                                            50usize.saturating_sub(status_str.len()),
-                                            progress_detail.current.unwrap_or_default() as f64,
-                                            progress_detail.total.unwrap_or_default() as f64
-                                        ),
-                                        human_bytes::human_bytes(
-                                            progress_detail.total.unwrap_or_default() as f64
-                                        ),
-                                    )
-                                    .into(),
-                                );
-                            } else {
-                                self.log_daemon_install(status_str.into());
-                            }
-                        }
-                    }
-                    Err(err) => {
-                        tracing::error!(
-                            server = %self.uuid,
-                            image = %image,
-                            "failed to pull image: {:?}",
-                            err
-                        );
-
-                        if !quiet {
-                            self.log_daemon_error(&format!("failed to pull image: {err}"));
-                        }
-
-                        if let Ok(images) = self
-                            .app_state
-                            .docker
-                            .list_images(Some(bollard::image::ListImagesOptions {
-                                all: true,
-                                filters: HashMap::from([("reference", vec![image])]),
-                                ..Default::default()
-                            }))
-                            .await
-                        {
-                            if images.is_empty() {
-                                return Err(err);
-                            } else {
-                                tracing::error!(
-                                    server = %self.uuid,
-                                    image = %image,
-                                    "image already exists, ignoring error: {}",
-                                    err
-                                );
-                            }
-                        } else {
-                            return Err(err);
-                        }
-                    }
-                }
-            }
-        }
-
-        if !quiet {
-            self.log_daemon_with_prelude("Finished pulling Docker container image");
-        }
-
-        tracing::info!(
-            server = %self.uuid,
-            image = %image,
-            "finished pulling image"
-        );
-
-        Ok(())
     }
 
     pub async fn start(
@@ -1102,28 +870,14 @@ impl Server {
                             server.filesystem.chown_path(&server.filesystem.base_path).await?;
                         }
 
-                        server.pull_image(
-                            &server.configuration.read().await.container.image,
-                            false,
-                        )
-                        .await?;
-
                         server.setup_container().await?;
 
-                        let container = match &*server.container.read().await {
-                            Some(container) => container.docker_id.clone(),
-                            None => return Ok(())
+                        let process_handle = match server.process_handle.read().await.as_ref() {
+                            Some(c) => Arc::clone(c),
+                            None => return Ok(()),
                         };
 
-                        if let Err(err) = server.app_state.docker.start_container::<String>(&container, None).await {
-                            tracing::error!(
-                                server = %server.uuid,
-                                "failed to start container: {}",
-                                err
-                            );
-
-                            return Err(anyhow::anyhow!(err));
-                        }
+                        process_handle.start().await?;
 
                         Ok(())
                     },
@@ -1153,8 +907,8 @@ impl Server {
             return Ok(());
         }
 
-        let container = match &*self.container.read().await {
-            Some(container) => container.docker_id.clone(),
+        let process_handle = match &*self.process_handle.read().await {
+            Some(c) => Arc::clone(c),
             None => return Ok(()),
         };
 
@@ -1166,18 +920,7 @@ impl Server {
         let server = self.clone();
         tokio::spawn(async move {
             server.stopping.store(true, Ordering::SeqCst);
-            if server
-                .app_state
-                .docker
-                .kill_container(
-                    &container,
-                    Some(bollard::container::KillContainerOptions {
-                        signal: "SIGKILL".to_string(),
-                    }),
-                )
-                .await
-                .is_ok()
-            {
+            if process_handle.kill().await.is_ok() {
                 if !skip_schedules {
                     server
                         .schedules
@@ -1205,11 +948,6 @@ impl Server {
             return Err(anyhow::anyhow!("Server is already stopping."));
         }
 
-        let container = match &*self.container.read().await {
-            Some(container) => container.docker_id.clone(),
-            None => return Ok(()),
-        };
-
         tracing::info!(
             server = %self.uuid,
             "stopping server"
@@ -1224,97 +962,11 @@ impl Server {
                     |_| async {
                         server.stopping.store(true, Ordering::SeqCst);
 
-                        let stop = &server.process_configuration.read().await.stop;
-
-                        match stop.r#type.as_str() {
-                            "signal" => {
-                                crate::spawn_handled({
-                                    let container = container.clone();
-                                    let value = stop.value.clone();
-                                    let server = server.clone();
-
-                                    async move {
-                                        server.app_state.docker
-                                            .kill_container(
-                                                &container,
-                                                Some(bollard::container::KillContainerOptions {
-                                                    signal: match value {
-                                                        Some(signal) => {
-                                                            match signal.to_uppercase().as_str() {
-                                                                "SIGABRT" => "SIGABRT".to_string(),
-                                                                "SIGINT" => "SIGINT".to_string(),
-                                                                "SIGTERM" => "SIGTERM".to_string(),
-                                                                "SIGQUIT" => "SIGQUIT".to_string(),
-                                                                "SIGKILL" => "SIGKILL".to_string(),
-                                                                "C" => "SIGINT".to_string(),
-                                                                _ => {
-                                                                    tracing::error!(
-                                                                        server = %server.uuid,
-                                                                        "invalid signal: {}, defaulting to SIGKILL",
-                                                                        signal
-                                                                    );
-
-                                                                    "SIGKILL".to_string()
-                                                                }
-                                                            }
-                                                        }
-                                                        _ => "SIGKILL".to_string(),
-                                                    },
-                                                }),
-                                            )
-                                            .await
-                                    }
-                                });
-
-                                Ok(())
-                            }
-                            "command" => {
-                                if let Some(stdin) = server.container_stdin().await {
-                                    let mut command = stop.value.clone().unwrap_or_default();
-                                    command.push('\n');
-
-                                    if let Err(err) = stdin.send(command).await {
-                                        tracing::error!(
-                                            server = %server.uuid,
-                                            "failed to send command to container stdin: {}",
-                                            err
-                                        );
-                                    }
-                                } else {
-                                    tracing::error!(
-                                        server = %server.uuid,
-                                        "failed to get container stdin"
-                                    );
-                                }
-
-                                Ok(())
-                            }
-                            _ => {
-                                tracing::error!(
-                                    server = %server.uuid,
-                                    "invalid stop type: {}, defaulting to docker stop",
-                                    stop.r#type
-                                );
-
-                                crate::spawn_handled({
-                                    let client = Arc::clone(&server.app_state.docker);
-                                    let container = container.clone();
-
-                                    async move {
-                                        client
-                                            .stop_container(
-                                                &container,
-                                                Some(bollard::container::StopContainerOptions {
-                                                    t: -1,
-                                                }),
-                                            )
-                                            .await
-                                    }
-                                });
-
-                                Ok(())
-                            }
+                        if let Some(process_handle) = server.process_handle.read().await.as_ref() {
+                            process_handle.stop().await?;
                         }
+
+                        Ok(())
                     },
                     aquire_timeout,
                 )
@@ -1434,28 +1086,24 @@ impl Server {
 
         let server = self.clone();
         tokio::spawn(async move {
-            let mut stream = server.app_state.docker.wait_container::<String>(
-                match &server.container.read().await.as_ref() {
-                    Some(container) => &container.docker_id,
-                    None => return Ok(()),
-                },
-                None,
-            );
-
             if server.state.get_state() != state::ServerState::Stopping {
                 server.stop(None, skip_schedules).await?;
             }
 
-            if tokio::time::timeout(timeout, stream.next()).await.is_err() {
-                tracing::info!(
-                    server = %server.uuid,
-                    "kill timeout reached, killing server"
-                );
-
-                server.kill(skip_schedules).await?;
+            let deadline = tokio::time::Instant::now() + timeout;
+            while tokio::time::Instant::now() < deadline {
+                if server.state.get_state() == state::ServerState::Offline {
+                    return Ok(());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
             }
 
-            Ok(())
+            tracing::info!(
+                server = %server.uuid,
+                "kill timeout reached, killing server"
+            );
+
+            server.kill(skip_schedules).await
         })
         .await?
     }
@@ -1466,51 +1114,16 @@ impl Server {
             "destroying container"
         );
 
-        if let Ok(containers) = self
+        if let Err(err) = self
             .app_state
-            .docker
-            .list_containers(Some(bollard::container::ListContainersOptions {
-                all: true,
-                filters: HashMap::from([("name".to_string(), vec![self.uuid.to_string()])]),
-                ..Default::default()
-            }))
+            .executor
+            .cleanup_server_process(&self.clone())
             .await
         {
-            for container in containers {
-                let container = match container.id {
-                    Some(id) => id,
-                    None => {
-                        tracing::warn!(
-                            server = %self.uuid,
-                            "container ID is missing, cannot remove"
-                        );
-                        continue;
-                    }
-                };
-
-                if let Err(err) = self
-                    .app_state
-                    .docker
-                    .remove_container(
-                        &container,
-                        Some(bollard::container::RemoveContainerOptions {
-                            force: true,
-                            ..Default::default()
-                        }),
-                    )
-                    .await
-                {
-                    tracing::error!(
-                        server = %self.uuid,
-                        container = %container,
-                        "failed to remove container: {}",
-                        err
-                    );
-                }
-            }
+            tracing::error!(server = %self.uuid, "failed to cleanup server process: {}", err);
         }
 
-        self.container.write().await.take();
+        self.process_handle.write().await.take();
         if let Some(handle) = self.websocket_sender.write().await.take() {
             handle.abort();
         }
