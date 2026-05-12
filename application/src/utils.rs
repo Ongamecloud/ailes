@@ -1,9 +1,8 @@
+use crate::routes::MimeCacheValue;
 use std::{
     path::{Path, PathBuf},
     sync::LazyLock,
 };
-
-use crate::routes::MimeCacheValue;
 
 pub fn draw_progress_bar(width: usize, current: f64, total: f64) -> String {
     let progress_percentage = (current / total) * 100.0;
@@ -33,6 +32,11 @@ pub fn draw_progress_bar(width: usize, current: f64, total: f64) -> String {
     format!("[{bar}] {formatted_percentage}")
 }
 
+#[inline]
+pub fn slice_after_question_mark(s: &str) -> &str {
+    s.splitn(2, '?').nth(1).unwrap_or("")
+}
+
 pub fn parse_content_disposition_filename(header: &str) -> Option<String> {
     static RE_STAR: LazyLock<regex::Regex> =
         LazyLock::new(|| regex::Regex::new(r"(?i)filename\*=utf-8''([^;]+)").unwrap());
@@ -41,7 +45,7 @@ pub fn parse_content_disposition_filename(header: &str) -> Option<String> {
         let encoded_filename = &caps[1];
 
         if let Ok(decoded) = percent_encoding::percent_decode_str(encoded_filename).decode_utf8() {
-            return Some(decoded.into_owned());
+            return Some(slice_after_question_mark(&decoded).to_string());
         }
     }
 
@@ -49,7 +53,7 @@ pub fn parse_content_disposition_filename(header: &str) -> Option<String> {
         LazyLock::new(|| regex::Regex::new(r#"(?i)filename="?([^";]+)"?"#).unwrap());
 
     if let Some(caps) = RE_LEGACY.captures(header) {
-        return Some(caps[1].to_string());
+        return Some(slice_after_question_mark(&caps[1]).to_string());
     }
 
     None
