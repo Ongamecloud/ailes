@@ -3,116 +3,124 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 
 mod post {
     use crate::{
+        config::InnerConfig,
         response::{ApiResponse, ApiResponseResult},
         routes::GetState,
     };
-    use serde::{Deserialize, Serialize};
+    use serde::Serialize;
     use utoipa::ToSchema;
-
-    nestify::nest! {
-        #[derive(ToSchema, Deserialize)]
-        pub struct Payload {
-            debug: Option<bool>,
-            app_name: Option<String>,
-
-            #[schema(inline)]
-            api: Option<#[derive(ToSchema, Deserialize)] pub struct ApiPayload {
-                host: Option<String>,
-                port: Option<u16>,
-
-                #[schema(inline)]
-                ssl: Option<#[derive(ToSchema, Deserialize)] pub struct ApiSslPayload {
-                    enabled: Option<bool>,
-                    cert: Option<String>,
-                    key: Option<String>,
-                }>,
-
-                upload_limit: Option<crate::config::MiB>,
-            }>,
-
-            #[schema(inline)]
-            system: Option<#[derive(ToSchema, Deserialize)] pub struct SystemPayload {
-                #[schema(inline)]
-                sftp: Option<#[derive(ToSchema, Deserialize)] pub struct SystemSftpPayload {
-                    #[schema(value_type = Option<String>)]
-                    bind_address: Option<std::net::IpAddr>,
-                    bind_port: Option<u16>,
-                }>,
-            }>,
-
-            allowed_origins: Option<Vec<String>>,
-
-            allow_cors_private_network: Option<bool>,
-            ignore_panel_config_updates: Option<bool>,
-        }
-    }
 
     #[derive(ToSchema, Serialize)]
     struct Response {
         applied: bool,
     }
 
+    fn strip_paths(value: &mut serde_json::Value, paths: &[&str]) {
+        for path in paths {
+            let mut cursor = &mut *value;
+            let mut parts = path.split('.').peekable();
+
+            while let Some(part) = parts.next() {
+                let serde_json::Value::Object(map) = cursor else {
+                    break;
+                };
+
+                if parts.peek().is_none() {
+                    map.remove(part);
+                    break;
+                }
+
+                match map.get_mut(part) {
+                    Some(next) => cursor = next,
+                    None => break,
+                }
+            }
+        }
+    }
+
     #[utoipa::path(post, path = "/", responses(
         (status = OK, body = inline(Response)),
-    ), request_body = inline(Payload))]
+    ), request_body = serde_json::Value)]
     pub async fn route(
         state: GetState,
-        crate::Payload(data): crate::Payload<Payload>,
+        crate::Payload(mut patch): crate::Payload<serde_json::Value>,
     ) -> ApiResponseResult {
         if state.config.ignore_panel_config_updates {
             return ApiResponse::new_serialized(Response { applied: false }).ok();
         }
 
-        let config = state.config.unsafe_mut();
-        if let Some(debug) = data.debug {
-            config.debug = debug;
-        }
-        if let Some(app_name) = data.app_name {
-            config.app_name = app_name;
-        }
-        if let Some(api) = data.api {
-            if let Some(host) = api.host {
-                config.api.host = host;
-            }
-            if let Some(port) = api.port {
-                config.api.port = port;
-            }
-            if let Some(ssl) = api.ssl {
-                if let Some(enabled) = ssl.enabled {
-                    config.api.ssl.enabled = enabled;
-                }
-                if let Some(cert) = ssl.cert {
-                    config.api.ssl.cert = cert;
-                }
-                if let Some(key) = ssl.key {
-                    config.api.ssl.key = key;
-                }
-            }
-            if let Some(upload_limit) = api.upload_limit {
-                config.api.upload_limit = upload_limit;
-            }
-        }
-        if let Some(system) = data.system
-            && let Some(sftp) = system.sftp
-        {
-            if let Some(bind_address) = sftp.bind_address {
-                config.system.sftp.bind_address = bind_address;
-            }
-            if let Some(bind_port) = sftp.bind_port {
-                config.system.sftp.bind_port = bind_port;
-            }
-        }
-        if let Some(allowed_origins) = data.allowed_origins {
-            config.allowed_origins = allowed_origins;
-        }
-        if let Some(allow_cors_private_network) = data.allow_cors_private_network {
-            config.allow_cors_private_network = allow_cors_private_network;
-        }
-        if let Some(ignore_panel_config_updates) = data.ignore_panel_config_updates {
-            config.ignore_panel_config_updates = ignore_panel_config_updates;
+        if !patch.is_object() {
+            return ApiResponse::error("config patch must be a JSON object")
+                .with_status(axum::http::StatusCode::BAD_REQUEST)
+                .ok();
         }
 
-        tokio::task::spawn_blocking(move || state.config.save()).await??;
+        const FORBIDDEN_PATHS: &[&str] = &[
+            "uuid",
+            "token",
+            "token_id",
+            "remote",
+            "remote_headers",
+            "system.root_directory",
+            "system.log_directory",
+            "system.vmount_directory",
+            "system.data",
+            "system.archive_directory",
+            "system.backup_directory",
+            "system.tmp_directory",
+            "system.passwd.directory",
+            "system.backups.restic.repository",
+            "system.backups.restic.password_file",
+            "system.backups.mounting.path",
+            "system.username",
+            "system.user",
+            "system.passwd",
+            "docker.socket",
+            "allowed_mounts",
+        ];
+
+        strip_paths(&mut patch, FORBIDDEN_PATHS);
+
+        let mut doc = match serde_json::to_value(state.config.unsafe_ref()) {
+            Ok(doc) => doc,
+            Err(err) => {
+                tracing::error!("failed to serialize current config: {err}");
+                return ApiResponse::error("failed to read current config")
+                    .with_status(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+                    .ok();
+            }
+        };
+
+        json_patch::merge(&mut doc, &patch);
+
+        let new_config: InnerConfig = match serde_json::from_value(doc) {
+            Ok(c) => c,
+            Err(err) => {
+                return ApiResponse::error(&format!("invalid config patch: {err}"))
+                    .with_status(axum::http::StatusCode::BAD_REQUEST)
+                    .ok();
+            }
+        };
+
+        let old_config = std::mem::replace(state.config.unsafe_mut(), new_config);
+
+        if let Err(err) = state.config.validate() {
+            *state.config.unsafe_mut() = old_config;
+
+            return ApiResponse::error(&format!("config patch failed validation: {err}"))
+                .with_status(axum::http::StatusCode::BAD_REQUEST)
+                .ok();
+        }
+
+        let state_clone = state.clone();
+        if let Err(err) = tokio::task::spawn_blocking(move || state_clone.config.save()).await? {
+            tracing::error!("failed to save config: {:?}", err);
+            *state.config.unsafe_mut() = old_config;
+
+            return ApiResponse::error("failed to save config")
+                .with_status(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+                .ok();
+        }
 
         ApiResponse::new_serialized(Response { applied: true }).ok()
     }

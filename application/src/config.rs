@@ -1197,6 +1197,10 @@ impl Config {
         unsafe { &mut *self.inner.get() }
     }
 
+    pub fn unsafe_ref(&self) -> &InnerConfig {
+        unsafe { &*self.inner.get() }
+    }
+
     fn ensure_directories(&self) -> std::io::Result<()> {
         let directories = vec![
             &self.system.root_directory,
