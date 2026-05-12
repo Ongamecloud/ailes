@@ -498,7 +498,7 @@ async fn main() {
         if config.api.ssl.enabled {
             tracing::info!("loading ssl certs");
 
-            let config = axum_server::tls_rustls::RustlsConfig::from_pem_file(
+            let rustls_config = axum_server::tls_rustls::RustlsConfig::from_pem_file(
                 config.api.ssl.cert.as_str(),
                 config.api.ssl.key.as_str(),
             )
@@ -506,9 +506,33 @@ async fn main() {
             .context("failed to load SSL certificate and key")
             .unwrap();
 
+            tokio::spawn({
+                let rustls_config = rustls_config.clone();
+                let config = config.clone();
+
+                async move {
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_hours(24)).await;
+                        tracing::info!("reloading ssl certs");
+
+                        if let Err(err) = rustls_config
+                            .reload_from_pem_file(
+                                config.api.ssl.cert.as_str(),
+                                config.api.ssl.key.as_str(),
+                            )
+                            .await
+                        {
+                            tracing::error!("failed to reload SSL certificate and key: {:?}", err);
+                        } else {
+                            tracing::info!("ssl certs reloaded successfully");
+                        }
+                    }
+                }
+            });
+
             tracing::info!("https listening on {}", address.to_string());
 
-            match axum_server::bind_rustls(address, config)
+            match axum_server::bind_rustls(address, rustls_config)
                 .serve(router.into_make_service_with_connect_info::<SocketAddr>())
                 .await
             {
