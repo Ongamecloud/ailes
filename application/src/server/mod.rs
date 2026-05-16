@@ -217,6 +217,9 @@ impl Server {
                                 }
                             }
                         }
+                    } else {
+                        server.state.set_state(state::ServerState::Running).await;
+                        return true;
                     }
 
                     false
@@ -510,11 +513,10 @@ impl Server {
     }
 
     pub async fn send_stdin(&self, data: Vec<u8>) -> Result<(), anyhow::Error> {
-        if let Some(container) = self.process_handle.read().await.as_ref() {
-            container.send_stdin(data).await?;
+        match self.process_handle.read().await.as_ref() {
+            Some(container) => container.send_stdin(data).await,
+            None => Err(anyhow::anyhow!("server has no active process")),
         }
-
-        Ok(())
     }
 
     pub async fn get_stdout_lines(
@@ -1063,8 +1065,14 @@ impl Server {
                     |_| async {
                         server.stopping.store(true, Ordering::SeqCst);
 
-                        if let Some(process_handle) = server.process_handle.read().await.as_ref() {
-                            process_handle.stop().await?;
+                        if let Some(process_handle) = server.process_handle.read().await.as_ref()
+                            && let Err(err) = process_handle.stop().await
+                        {
+                            tracing::warn!(
+                                server = %server.uuid,
+                                "stop command returned error (container may have already stopped): {}",
+                                err
+                            );
                         }
 
                         Ok(())
@@ -1150,10 +1158,33 @@ impl Server {
         tokio::spawn(async move {
             if server.state.get_state() != state::ServerState::Offline {
                 if server.state.get_state() != state::ServerState::Stopping {
-                    server.stop_with_kill_timeout(timeout, true).await?;
+                    server.stop(None, true).await?;
                 }
 
                 server.restarting.store(true, Ordering::SeqCst);
+
+                let deadline = tokio::time::Instant::now() + timeout;
+                loop {
+                    if server.state.get_state() != state::ServerState::Stopping {
+                        break;
+                    }
+                    if tokio::time::Instant::now() >= deadline {
+                        tracing::info!(
+                            server = %server.uuid,
+                            "kill timeout reached during restart, killing server"
+                        );
+                        if let Err(err) = server.kill(true).await {
+                            tracing::error!(
+                                server = %server.uuid,
+                                "failed to kill server during restart: {}",
+                                err
+                            );
+                        }
+                        break;
+                    }
+
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                }
             } else {
                 server.start(aquire_timeout, true).await?;
             }
