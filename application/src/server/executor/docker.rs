@@ -655,16 +655,18 @@ impl DockerProcessHandle {
                         if ratelimit_start.elapsed()
                             < std::time::Duration::from_millis(config.throttles.line_reset_interval)
                         {
-                            tracing::debug!(
-                                server = %server.uuid,
-                                lines = config.throttles.lines,
-                                reset_interval = config.throttles.line_reset_interval,
-                                "ratelimit reached for server output"
-                            );
+                            if ratelimit_counter == config.throttles.lines {
+                                tracing::debug!(
+                                    server = %server.uuid,
+                                    lines = config.throttles.lines,
+                                    reset_interval = config.throttles.line_reset_interval,
+                                    "ratelimit reached for server output"
+                                );
 
-                            server.log_daemon_with_prelude(
-                                "Server is outputting console data too quickly -- throttling...",
-                            );
+                                server.log_daemon_with_prelude(
+                                    "Server is outputting console data too quickly -- throttling...",
+                                );
+                            }
 
                             return false;
                         } else {
@@ -672,6 +674,7 @@ impl DockerProcessHandle {
                             ratelimit_start = std::time::Instant::now();
                         }
                     }
+
                     true
                 };
 
