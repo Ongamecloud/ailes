@@ -20,6 +20,9 @@ pub trait ProcessHandle: Send + Sync {
     ) -> Result<Box<dyn tokio::io::AsyncRead + Send + Unpin>, anyhow::Error>;
 
     async fn send_stdin(&self, data: Vec<u8>) -> Result<(), anyhow::Error>;
+    async fn subscribe_stdout_lines_ratelimited(
+        &self,
+    ) -> Result<tokio::sync::broadcast::Receiver<Arc<compact_str::CompactString>>, anyhow::Error>;
     async fn subscribe_stdout_lines(
         &self,
     ) -> Result<tokio::sync::broadcast::Receiver<Arc<compact_str::CompactString>>, anyhow::Error>;

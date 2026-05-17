@@ -225,9 +225,27 @@ impl Server {
                     false
                 };
 
-                while let Ok(line) = stdout_lines.recv().await {
-                    if check_startup(&line).await {
-                        break;
+                loop {
+                    match stdout_lines.recv().await {
+                        Ok(line) => {
+                            if check_startup(&line).await {
+                                break;
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            tracing::debug!(
+                                server = %server.uuid,
+                                "stdout lines channel closed, ending startup task"
+                            );
+                            break;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
+                            tracing::warn!(
+                                server = %server.uuid,
+                                "lagged {} lines behind in stdout lines channel",
+                                count
+                            );
+                        }
                     }
                 }
             }));
@@ -517,6 +535,25 @@ impl Server {
             Some(container) => container.send_stdin(data).await,
             None => Err(anyhow::anyhow!("server has no active process")),
         }
+    }
+
+    pub async fn get_stdout_lines_ratelimited(
+        &self,
+    ) -> Option<tokio::sync::broadcast::Receiver<Arc<compact_str::CompactString>>> {
+        if let Some(container) = self.process_handle.read().await.as_ref() {
+            match container.subscribe_stdout_lines_ratelimited().await {
+                Ok(rx) => return Some(rx),
+                Err(err) => {
+                    tracing::error!(
+                        server = %self.uuid,
+                        "failed to subscribe to container stdout: {}",
+                        err
+                    );
+                }
+            }
+        }
+
+        None
     }
 
     pub async fn get_stdout_lines(
@@ -1257,6 +1294,9 @@ impl Server {
 
         self.process_handle.write().await.take();
         if let Some(handle) = self.websocket_sender.write().await.take() {
+            handle.abort();
+        }
+        if let Some(handle) = self.process_startup_task.write().await.take() {
             handle.abort();
         }
     }

@@ -576,6 +576,7 @@ struct DockerProcessHandle {
 
     resource_usage: Arc<RwLock<super::super::resources::ResourceUsage>>,
     stdin_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+    stdout_ratelimited_rx: tokio::sync::broadcast::Receiver<Arc<compact_str::CompactString>>,
     stdout_rx: tokio::sync::broadcast::Receiver<Arc<compact_str::CompactString>>,
 
     state_task: tokio::task::JoinHandle<()>,
@@ -596,8 +597,13 @@ impl DockerProcessHandle {
         )>,
     ) -> Result<Self, anyhow::Error> {
         let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(150);
-        let (stdout_tx, stdout_rx) =
-            tokio::sync::broadcast::channel::<Arc<compact_str::CompactString>>(150);
+        let (stdout_ratelimited_tx, stdout_ratelimited_rx) =
+            tokio::sync::broadcast::channel::<Arc<compact_str::CompactString>>(
+                app_config.load().system.websocket_log_count,
+            );
+        let (stdout_tx, stdout_rx) = tokio::sync::broadcast::channel::<
+            Arc<compact_str::CompactString>,
+        >(app_config.load().system.websocket_log_count * 2);
 
         let resource_usage = Arc::new(RwLock::new(super::super::resources::ResourceUsage {
             disk_bytes: server.filesystem.limiter_usage().await,
@@ -627,8 +633,7 @@ impl DockerProcessHandle {
         });
 
         let stdout_task = tokio::spawn({
-            let stdout_tx = stdout_tx.clone();
-            let server_uuid = server.uuid;
+            let server = server.clone();
             let app_config = Arc::clone(&app_config);
 
             async move {
@@ -650,6 +655,17 @@ impl DockerProcessHandle {
                         if ratelimit_start.elapsed()
                             < std::time::Duration::from_millis(config.throttles.line_reset_interval)
                         {
+                            tracing::debug!(
+                                server = %server.uuid,
+                                lines = config.throttles.lines,
+                                reset_interval = config.throttles.line_reset_interval,
+                                "ratelimit reached for server output"
+                            );
+
+                            server.log_daemon_with_prelude(
+                                "Server is outputting console data too quickly -- throttling...",
+                            );
+
                             return false;
                         } else {
                             ratelimit_counter = 0;
@@ -675,9 +691,12 @@ impl DockerProcessHandle {
                                 .trim()
                                 .into();
 
+                                let line = Arc::new(line);
+
                                 if allow_ratelimit() {
-                                    stdout_tx.send(Arc::new(line)).ok();
+                                    stdout_ratelimited_tx.send(Arc::clone(&line)).ok();
                                 }
+                                stdout_tx.send(line).ok();
 
                                 line_start = newline_pos + 1;
                                 search_start = line_start;
@@ -688,9 +707,12 @@ impl DockerProcessHandle {
                                 .trim()
                                 .into();
 
+                                let line = Arc::new(line);
+
                                 if allow_ratelimit() {
-                                    stdout_tx.send(Arc::new(line)).ok();
+                                    stdout_ratelimited_tx.send(Arc::clone(&line)).ok();
                                 }
+                                stdout_tx.send(line).ok();
 
                                 line_start += 512;
                                 search_start = line_start;
@@ -704,9 +726,12 @@ impl DockerProcessHandle {
                                 .trim()
                                 .into();
 
+                                let line = Arc::new(line);
+
                                 if allow_ratelimit() {
-                                    stdout_tx.send(Arc::new(line)).ok();
+                                    stdout_ratelimited_tx.send(Arc::clone(&line)).ok();
                                 }
+                                stdout_tx.send(line).ok();
 
                                 line_start += 512;
                                 search_start = line_start;
@@ -727,12 +752,15 @@ impl DockerProcessHandle {
                         .trim()
                         .into();
 
+                    let line = Arc::new(line);
+
                     if allow_ratelimit() {
-                        stdout_tx.send(Arc::new(line)).ok();
+                        stdout_ratelimited_tx.send(Arc::clone(&line)).ok();
                     }
+                    stdout_tx.send(line).ok();
                 }
 
-                tracing::debug!(server = %server_uuid, "stdout task ended");
+                tracing::debug!(server = %server.uuid, "stdout task ended");
             }
         });
 
@@ -876,6 +904,7 @@ impl DockerProcessHandle {
             app_config,
             resource_usage,
             stdin_tx,
+            stdout_ratelimited_rx,
             stdout_rx,
             state_task,
             stats_task,
@@ -939,6 +968,12 @@ impl super::ProcessHandle for DockerProcessHandle {
         self.stdin_tx.send(data).await.map_err(Into::into)
     }
 
+    async fn subscribe_stdout_lines_ratelimited(
+        &self,
+    ) -> Result<tokio::sync::broadcast::Receiver<Arc<compact_str::CompactString>>, anyhow::Error>
+    {
+        Ok(self.stdout_ratelimited_rx.resubscribe())
+    }
     async fn subscribe_stdout_lines(
         &self,
     ) -> Result<tokio::sync::broadcast::Receiver<Arc<compact_str::CompactString>>, anyhow::Error>

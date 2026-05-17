@@ -803,7 +803,7 @@ impl ShellSession {
                                 continue;
                             }
 
-                            if let Some(mut stdout) = server.get_stdout_lines().await {
+                            if let Some(mut stdout) = server.get_stdout_lines_ratelimited().await {
                                 loop {
                                     if !server
                                         .user_permissions

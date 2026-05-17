@@ -14,7 +14,7 @@ pub async fn script_server(
         .context("Failed to setup script process")?;
 
     let mut stdout_rx = handle
-        .subscribe_stdout_lines()
+        .subscribe_stdout_lines_ratelimited()
         .await
         .context("Failed to subscribe to stdout")?;
 

@@ -268,7 +268,7 @@ impl ServerInstaller {
                     *installer.process_handle.lock().await = Some(Arc::clone(&handle));
 
                     let mut stdout_rx = match handle
-                        .subscribe_stdout_lines()
+                        .subscribe_stdout_lines_ratelimited()
                         .await
                         .context("Failed to subscribe to stdout")
                     {
@@ -422,7 +422,7 @@ impl ServerInstaller {
                     *installer.process_handle.lock().await = Some(Arc::clone(&handle));
 
                     let mut stdout_rx = match handle
-                        .subscribe_stdout_lines()
+                        .subscribe_stdout_lines_ratelimited()
                         .await
                         .context("Failed to subscribe to stdout")
                     {
