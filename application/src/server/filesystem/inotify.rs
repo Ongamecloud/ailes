@@ -12,7 +12,7 @@ use tokio::sync::Mutex;
 type ServerNotifiers = Arc<Mutex<HashMap<uuid::Uuid, InotifyServerNotifier>>>;
 
 pub struct InotifyManager {
-    watcher: Arc<std::sync::Mutex<notify::RecommendedWatcher>>,
+    watcher: Arc<parking_lot::Mutex<notify::RecommendedWatcher>>,
     server_notifiers: ServerNotifiers,
 }
 
@@ -61,7 +61,7 @@ impl InotifyManager {
         )?;
 
         Ok(Self {
-            watcher: Arc::new(std::sync::Mutex::new(watcher)),
+            watcher: Arc::new(parking_lot::Mutex::new(watcher)),
             server_notifiers,
         })
     }
@@ -77,7 +77,6 @@ impl InotifyManager {
         tokio::task::spawn_blocking(move || {
             watcher
                 .lock()
-                .unwrap()
                 .watch(&base_path, notify::RecursiveMode::Recursive)?;
             Ok::<_, anyhow::Error>(())
         })
@@ -94,7 +93,7 @@ impl InotifyManager {
                 let path = notifier.path.clone();
                 let watcher = Arc::clone(&self.watcher);
 
-                move || watcher.lock().unwrap().unwatch(&path)
+                move || watcher.lock().unwatch(&path)
             });
         }
     }

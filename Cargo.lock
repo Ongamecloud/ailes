@@ -6192,6 +6192,7 @@ dependencies = [
  "new_mime_guess",
  "notify",
  "ouroboros",
+ "parking_lot",
  "percent-encoding",
  "positioned-io",
  "rand 0.10.1",

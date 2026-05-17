@@ -7,6 +7,7 @@ use crate::{
     utils::PortablePermissions,
 };
 use cap_std::fs::{Metadata, OpenOptions};
+use parking_lot::Mutex;
 use positioned_io::{ReadAt, WriteAt};
 use russh_sftp::protocol::{
     Data, File, FileAttributes, Handle, Name, OpenFlags, Status, StatusCode,
@@ -15,7 +16,7 @@ use serde_json::json;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::{Arc, RwLock},
+    sync::Arc,
 };
 
 mod extended;
@@ -24,7 +25,7 @@ pub struct FileHandle {
     path: PathBuf,
     path_components: Vec<String>,
 
-    file: Arc<RwLock<std::fs::File>>,
+    file: Arc<Mutex<std::fs::File>>,
 }
 
 pub struct DirHandle {
@@ -1060,7 +1061,7 @@ impl russh_sftp::server::Handler for SftpSession {
             ServerHandle::File(FileHandle {
                 path,
                 path_components,
-                file: Arc::new(RwLock::new(file)),
+                file: Arc::new(Mutex::new(file)),
             }),
         );
 
@@ -1091,7 +1092,7 @@ impl russh_sftp::server::Handler for SftpSession {
 
             move || -> Result<Vec<u8>, std::io::Error> {
                 let mut data = vec![0; len.min(256 * 1024) as usize];
-                let bytes_read = file.read().unwrap().read_at(offset, &mut data)?;
+                let bytes_read = file.lock().read_at(offset, &mut data)?;
 
                 data.truncate(bytes_read);
                 data.shrink_to_fit();
@@ -1145,7 +1146,7 @@ impl russh_sftp::server::Handler for SftpSession {
         tokio::task::spawn_blocking({
             let file = Arc::clone(&handle.file);
 
-            move || file.write().unwrap().write_all_at(offset, &data)
+            move || file.lock().write_all_at(offset, &data)
         })
         .await
         .map_err(|_| StatusCode::Failure)?

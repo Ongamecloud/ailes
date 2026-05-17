@@ -8,12 +8,13 @@ use crate::{
     },
     utils::PortablePermissions,
 };
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::{
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{
-        Arc, RwLock,
+        Arc,
         atomic::{AtomicU64, AtomicUsize, Ordering},
     },
 };
@@ -614,7 +615,7 @@ impl Archive {
                                 let mut read_buffer = vec![0; crate::BUFFER_SIZE];
 
                                 loop {
-                                    if error_clone2.read().unwrap().is_some() {
+                                    if error_clone2.read().is_some() {
                                         return Ok(());
                                     }
 
@@ -710,12 +711,12 @@ impl Archive {
                             };
 
                             if let Err(err) = run() {
-                                error_clone.write().unwrap().replace(err);
+                                error_clone.write().replace(err);
                             }
                         });
                     });
 
-                    if let Some(err) = error.write().unwrap().take() {
+                    if let Some(err) = error.write().take() {
                         Err(err)
                     } else {
                         for i in 0..archive.len() {
@@ -934,7 +935,7 @@ impl Archive {
                             let error_clone = Arc::clone(&error);
 
                             scope.spawn(move |_| {
-                                if error_clone.read().unwrap().is_some() {
+                                if error_clone.read().is_some() {
                                     return;
                                 }
 
@@ -1015,13 +1016,13 @@ impl Archive {
 
                                     Ok(true)
                                 }) {
-                                    error_clone.write().unwrap().replace(err);
+                                    error_clone.write().replace(err);
                                 }
                             });
                         }
                     });
 
-                    if let Some(err) = error.write().unwrap().take() {
+                    if let Some(err) = error.write().take() {
                         Err(err.into())
                     } else {
                         for entry in archive.files {

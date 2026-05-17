@@ -1,9 +1,6 @@
 use crate::server::filesystem::virtualfs::IsIgnoredFn;
-use std::{
-    collections::VecDeque,
-    path::PathBuf,
-    sync::{Arc, RwLock},
-};
+use parking_lot::RwLock;
+use std::{collections::VecDeque, path::PathBuf, sync::Arc};
 use tokio::sync::Semaphore;
 
 #[derive(Clone, Copy, Debug)]
@@ -247,7 +244,7 @@ impl AsyncWalkDir {
                     let error = Arc::clone(&error);
                     let func = Arc::clone(&func);
 
-                    if crate::unlikely(error.read().unwrap().is_some()) {
+                    if crate::unlikely(error.read().is_some()) {
                         break;
                     }
 
@@ -260,7 +257,7 @@ impl AsyncWalkDir {
                         match func(file_type, path).await {
                             Ok(_) => {}
                             Err(err) => {
-                                *error.write().unwrap() = Some(err);
+                                *error.write() = Some(err);
                             }
                         }
                     });
@@ -271,7 +268,7 @@ impl AsyncWalkDir {
 
         semaphore.acquire_many(threads as u32).await.ok();
 
-        if let Some(err) = error.write().unwrap().take() {
+        if let Some(err) = error.write().take() {
             return Err(err);
         }
 

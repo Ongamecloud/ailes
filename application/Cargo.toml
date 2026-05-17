@@ -91,6 +91,7 @@ itaf = "0.2.0"
 arc-swap = "1.9.1"
 rusqlite = { version = "0.39.0", features = ["bundled"] }
 blake3 = "1.8.5"
+parking_lot = "0.12.5"
 
 [target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
 tikv-jemallocator = "0.6.0"

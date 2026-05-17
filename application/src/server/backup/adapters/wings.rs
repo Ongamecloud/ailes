@@ -22,12 +22,13 @@ use crate::{
     utils::PortablePermissions,
 };
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use parking_lot::RwLock;
 use sha1::Digest;
 use std::{
     io::Write,
     path::{Path, PathBuf},
     sync::{
-        Arc, RwLock,
+        Arc,
         atomic::{AtomicU64, AtomicUsize, Ordering},
     },
 };
@@ -548,7 +549,7 @@ impl BackupExt for WingsBackup {
                                 let mut read_buffer = vec![0; crate::BUFFER_SIZE];
 
                                 loop {
-                                    if error_clone2.read().unwrap().is_some() {
+                                    if error_clone2.read().is_some() {
                                         return Ok(());
                                     }
 
@@ -627,7 +628,7 @@ impl BackupExt for WingsBackup {
                             };
 
                             if let Err(err) = run() {
-                                error_clone.write().unwrap().replace(err);
+                                error_clone.write().replace(err);
                             }
                         });
                     });
@@ -662,7 +663,7 @@ impl BackupExt for WingsBackup {
                         }
                     }
 
-                    if let Some(err) = error.write().unwrap().take() {
+                    if let Some(err) = error.write().take() {
                         Err(err)
                     } else {
                         Ok(())
@@ -698,7 +699,7 @@ impl BackupExt for WingsBackup {
                             let error_clone = Arc::clone(&error);
 
                             scope.spawn(move |_| {
-                                if error_clone.read().unwrap().is_some() {
+                                if error_clone.read().is_some() {
                                     return;
                                 }
 
@@ -776,13 +777,13 @@ impl BackupExt for WingsBackup {
 
                                     Ok(true)
                                 }) {
-                                    error_clone.write().unwrap().replace(err);
+                                    error_clone.write().replace(err);
                                 }
                             });
                         }
                     });
 
-                    if let Some(err) = error.write().unwrap().take() {
+                    if let Some(err) = error.write().take() {
                         Err(err.into())
                     } else {
                         for entry in archive.files {

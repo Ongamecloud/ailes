@@ -645,7 +645,7 @@ pub async fn handle_extended(
             tokio::task::spawn_blocking({
                 let file = Arc::clone(&handle.file);
 
-                move || file.read().unwrap().sync_all()
+                move || file.lock().sync_all()
             })
             .await
             .map_err(|_| StatusCode::Failure)?
