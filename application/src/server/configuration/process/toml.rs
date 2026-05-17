@@ -42,7 +42,7 @@ impl super::ProcessConfigurationFileParser for TomlFileParser {
                     .unwrap_or_else(|_| toml::Value::String(other.to_string())),
             };
 
-            let path: Vec<&str> = replacement.r#match.split('.').collect();
+            let path = super::json::parse_path(&replacement.r#match);
             set_nested_value(
                 &mut toml,
                 &path,
@@ -58,34 +58,73 @@ impl super::ProcessConfigurationFileParser for TomlFileParser {
 
 pub fn set_nested_value(
     toml: &mut toml::Value,
-    path: &[&str],
+    path: &[super::json::PathSegment<'_>],
     value: toml::Value,
     insert_new: bool,
     update_existing: bool,
 ) {
-    if path.is_empty() {
+    let Some((head, tail)) = path.split_first() else {
         return;
+    };
+
+    match head {
+        super::json::PathSegment::Key(_) if !toml.is_table() => {
+            *toml = toml::Value::Table(toml::map::Map::new());
+        }
+        super::json::PathSegment::Index(_) if !toml.is_array() => {
+            *toml = toml::Value::Array(Vec::new());
+        }
+        _ => {}
     }
 
-    if !toml.is_table() {
-        *toml = toml::Value::Table(toml::map::Map::new());
-    }
+    if tail.is_empty() {
+        match head {
+            super::json::PathSegment::Key(k) => {
+                let map = toml.as_table_mut().unwrap();
+                let exists = map.contains_key(*k);
 
-    let map = toml.as_table_mut().unwrap();
+                if (exists && update_existing) || (!exists && insert_new) {
+                    map.insert((*k).to_string(), value);
+                }
+            }
+            super::json::PathSegment::Index(i) => {
+                let arr = toml.as_array_mut().unwrap();
+                let exists = *i < arr.len();
 
-    if path.len() == 1 {
-        let key = path[0].to_string();
-        let exists = map.contains_key(&key);
-
-        if (exists && update_existing) || (!exists && insert_new) {
-            map.insert(key, value);
+                if exists && update_existing {
+                    arr[*i] = value;
+                } else if !exists && insert_new {
+                    while arr.len() < *i {
+                        arr.push(toml::Value::Table(toml::map::Map::new()));
+                    }
+                    arr.push(value);
+                }
+            }
         }
         return;
     }
 
-    let child = map
-        .entry(path[0].to_string())
-        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+    let next_is_index = matches!(tail[0], super::json::PathSegment::Index(_));
+    let default_child = || {
+        if next_is_index {
+            toml::Value::Array(Vec::new())
+        } else {
+            toml::Value::Table(toml::map::Map::new())
+        }
+    };
 
-    set_nested_value(child, &path[1..], value, insert_new, update_existing);
+    match head {
+        super::json::PathSegment::Key(k) => {
+            let map = toml.as_table_mut().unwrap();
+            let child = map.entry((*k).to_string()).or_insert_with(default_child);
+            set_nested_value(child, tail, value, insert_new, update_existing);
+        }
+        super::json::PathSegment::Index(i) => {
+            let arr = toml.as_array_mut().unwrap();
+            while arr.len() <= *i {
+                arr.push(default_child());
+            }
+            set_nested_value(&mut arr[*i], tail, value, insert_new, update_existing);
+        }
+    }
 }

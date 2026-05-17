@@ -22,8 +22,6 @@ impl super::ProcessConfigurationFileParser for YamlFileParser {
         };
 
         for replacement in &config.replace {
-            let path_parts: Vec<&str> = replacement.r#match.split('.').collect();
-
             let value = match &replacement.replace_with {
                 serde_json::Value::String(_) => {
                     let resolved = ServerConfigurationFile::replace_all_placeholders(
@@ -37,9 +35,10 @@ impl super::ProcessConfigurationFileParser for YamlFileParser {
                 other => other.clone(),
             };
 
+            let path = super::json::parse_path(&replacement.r#match);
             super::json::set_nested_value(
                 &mut json,
-                &path_parts,
+                &path,
                 value,
                 replacement.insert_new.unwrap_or(true),
                 replacement.update_existing,
