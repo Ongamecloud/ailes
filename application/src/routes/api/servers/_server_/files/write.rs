@@ -24,7 +24,9 @@ mod post {
     }
 
     #[derive(ToSchema, Serialize)]
-    struct Response {}
+    struct Response {
+        revision_id: Option<i64>,
+    }
 
     #[utoipa::path(post, path = "/", responses(
         (status = OK, body = inline(Response)),
@@ -187,6 +189,8 @@ mod post {
         file.shutdown().await?;
         filesystem.async_chown(&path).await?;
 
+        let mut revision_id = None;
+
         if track {
             match filesystem.async_read_file(&path, None).await {
                 Ok(mut handle) => {
@@ -194,16 +198,23 @@ mod post {
                         let mut buf = Vec::with_capacity(handle.size as usize);
                         match handle.reader.read_to_end(&mut buf).await {
                             Ok(_) if buf.len() <= file_size_cap as usize => {
-                                if let Err(err) = server
+                                match server
                                     .diff
                                     .record_edit(&diff_key, captured_before, buf, data.user)
                                     .await
                                 {
-                                    tracing::warn!(
-                                        server = %server.uuid,
-                                        path = %diff_key,
-                                        "diff: record_edit failed: {err:#}"
-                                    );
+                                    Ok(id) => {
+                                        if id != 0 {
+                                            revision_id = Some(id);
+                                        }
+                                    }
+                                    Err(err) => {
+                                        tracing::warn!(
+                                            server = %server.uuid,
+                                            path = %diff_key,
+                                            "diff: record_edit failed: {err:#}"
+                                        );
+                                    }
                                 }
                             }
                             Ok(_) => {
@@ -240,7 +251,7 @@ mod post {
             }
         }
 
-        ApiResponse::new_serialized(Response {}).ok()
+        ApiResponse::new_serialized(Response { revision_id }).ok()
     }
 }
 

@@ -125,9 +125,9 @@ impl DiffManager {
         before: Option<Vec<u8>>,
         after: Vec<u8>,
         user: Option<uuid::Uuid>,
-    ) -> Result<(), anyhow::Error> {
+    ) -> Result<i64, anyhow::Error> {
         if !self.ensure_open().await {
-            return Ok(());
+            return Ok(0);
         }
         let config = self.config.load();
 
@@ -140,51 +140,48 @@ impl DiffManager {
         let path = path.to_string();
         let server = self.server;
         let storage = Arc::clone(&self.storage);
-        tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
+        tokio::task::spawn_blocking(move || -> Result<i64, anyhow::Error> {
             let mut guard = storage.blocking_lock();
             let Some(storage) = guard.as_mut() else {
-                return Ok(());
+                return Ok(0);
             };
+
             let now_ms = chrono::Utc::now().timestamp_millis();
             let file_id = storage.upsert_file(&path)?;
 
             let latest = storage.latest_revision(file_id)?;
-            match latest {
+            let revision_id = match latest {
                 None => match before {
                     Some(before) if before != after => {
                         let baseline =
                             storage.insert_snapshot(file_id, None, &before, now_ms - 1)?;
                         storage.insert_delta(
                             file_id, baseline, baseline, &before, user, &after, now_ms,
-                        )?;
+                        )?
                     }
-                    _ => {
-                        storage.insert_snapshot(file_id, user, &after, now_ms)?;
-                    }
+                    _ => storage.insert_snapshot(file_id, user, &after, now_ms)?,
                 },
                 Some(prev) => {
                     let prev_hash = prev.content_hash;
                     let after_hash = blake3::hash(&after);
                     if &prev_hash == after_hash.as_bytes() {
-                        return Ok(());
+                        return Ok(prev.id);
                     }
 
                     let chain_len = storage.current_chain_length(file_id)?;
                     let should_anchor = chain_len >= anchor_interval;
                     if should_anchor {
-                        storage.insert_snapshot(file_id, user, &after, now_ms)?;
+                        storage.insert_snapshot(file_id, user, &after, now_ms)?
                     } else {
                         let prev_content = storage.reconstruct(prev.id)?;
 
                         let delta_bytes = storage.try_encode_delta(&prev_content, &after)?;
-                        // Estimate at the same zstd level the snapshot would actually use,
-                        // so the delta-vs-snapshot decision is apples-to-apples.
                         let snapshot_estimate = zstd::encode_all(&after[..], storage.zstd_level())
                             .map(|v| v.len())
                             .unwrap_or(usize::MAX);
 
                         if delta_bytes.len() * 10 >= snapshot_estimate * 9 {
-                            storage.insert_snapshot(file_id, user, &after, now_ms)?;
+                            storage.insert_snapshot(file_id, user, &after, now_ms)?
                         } else {
                             storage.insert_delta(
                                 file_id,
@@ -194,11 +191,11 @@ impl DiffManager {
                                 user,
                                 &after,
                                 now_ms,
-                            )?;
+                            )?
                         }
                     }
                 }
-            }
+            };
 
             let protected_chain = storage.latest_chain_id(file_id)?;
             storage.prune_old_chains(file_id, keep_chains)?;
@@ -220,7 +217,7 @@ impl DiffManager {
 
             tracing::debug!(server = %server, path = %path, "recorded file edit");
 
-            Ok(())
+            Ok(revision_id)
         })
         .await?
     }
