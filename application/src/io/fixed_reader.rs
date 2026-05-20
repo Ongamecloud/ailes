@@ -73,27 +73,27 @@ impl<R: AsyncRead + Unpin> AsyncRead for AsyncFixedReader<R> {
         let remaining = self.size - self.bytes_read;
         let to_read = std::cmp::min(buf.remaining(), remaining);
 
-        if to_read == 0 {
+        if crate::unlikely(to_read == 0) {
             return Poll::Ready(Ok(()));
         }
 
-        let mut sub_buf = buf.take(to_read);
-        let filled_before = sub_buf.filled().len();
+        let unfilled = buf.initialize_unfilled_to(to_read);
+        let mut tmp = ReadBuf::new(&mut unfilled[..to_read]);
 
-        match Pin::new(&mut self.inner).poll_read(cx, &mut sub_buf) {
+        match Pin::new(&mut self.inner).poll_read(cx, &mut tmp) {
             Poll::Ready(Ok(())) => {
-                let n = sub_buf.filled().len() - filled_before;
+                let n = tmp.filled().len();
 
                 if crate::unlikely(n == 0) {
-                    buf.initialize_unfilled_to(to_read)[..to_read].fill(0);
+                    unfilled[..to_read].fill(0);
                     buf.advance(to_read);
                     self.bytes_read += to_read;
-                    Poll::Ready(Ok(()))
                 } else {
                     buf.advance(n);
                     self.bytes_read += n;
-                    Poll::Ready(Ok(()))
                 }
+
+                Poll::Ready(Ok(()))
             }
             Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
             Poll::Pending => Poll::Pending,
