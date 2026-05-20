@@ -4,17 +4,26 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 mod post {
     use crate::{
         response::{ApiResponse, ApiResponseResult},
-        routes::{ApiError, api::servers::_server_::GetServer},
+        routes::{ApiError, GetState, api::servers::_server_::GetServer},
+        server::filesystem::{cap::FileType, virtualfs::DirectoryWalkFn},
         utils::PortablePermissions,
     };
     use serde::{Deserialize, Serialize};
-    use std::path::Path;
+    use std::{
+        path::{Path, PathBuf},
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
     use utoipa::ToSchema;
 
     #[derive(ToSchema, Deserialize)]
     pub struct ChmodFile {
         file: compact_str::CompactString,
         mode: compact_str::CompactString,
+        #[serde(default)]
+        recursive: bool,
     }
 
     #[derive(ToSchema, Deserialize)]
@@ -43,6 +52,7 @@ mod post {
         ),
     ), request_body = inline(Payload))]
     pub async fn route(
+        state: GetState,
         server: GetServer,
         crate::Payload(data): crate::Payload<Payload>,
     ) -> ApiResponseResult {
@@ -81,6 +91,57 @@ mod post {
                 .is_ok()
             {
                 updated_count += 1;
+
+                if metadata.file_type.is_dir() && file.recursive {
+                    let updated_count_arc = Arc::new(AtomicUsize::new(0));
+
+                    let walker = async {
+                        let mut walker = filesystem
+                            .async_walk_dir(
+                                &source,
+                                vec![server.filesystem.get_ignored().await].into(),
+                            )
+                            .await?;
+
+                        walker
+                            .run_multithreaded(
+                                state.config.load().system.check_permissions_on_boot_threads,
+                                DirectoryWalkFn::from({
+                                    let filesystem = filesystem.clone();
+                                    let updated_count_arc = updated_count_arc.clone();
+                                    let mode = PortablePermissions::from_mode(mode);
+
+                                    move |file_type: FileType, path: PathBuf| {
+                                        let filesystem = filesystem.clone();
+                                        let updated_count_arc = updated_count_arc.clone();
+
+                                        async move {
+                                            if !file_type.is_file() && !file_type.is_dir() {
+                                                return Ok(());
+                                            }
+
+                                            if filesystem
+                                                .async_set_permissions(&path, mode)
+                                                .await
+                                                .is_ok()
+                                            {
+                                                updated_count_arc.fetch_add(1, Ordering::Relaxed);
+                                            }
+
+                                            Ok(())
+                                        }
+                                    }
+                                }),
+                            )
+                            .await
+                    };
+
+                    if let Err(err) = walker.await {
+                        tracing::warn!("error while walking directory for chmod: {:?}", err);
+                    }
+
+                    updated_count += updated_count_arc.load(Ordering::Relaxed);
+                }
             }
         }
 
