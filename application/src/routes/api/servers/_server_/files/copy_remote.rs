@@ -387,6 +387,7 @@ mod post {
                                     .await?;
 
                                 tokio::io::copy(&mut reader, &mut checksummed_writer).await?;
+                                checksummed_writer.shutdown().await?;
 
                                 Ok::<_, anyhow::Error>(())
                             };
@@ -435,8 +436,7 @@ mod post {
                                     .file_name("checksum")
                                     .mime_str("text/plain")
                                     .unwrap(),
-                                )
-                                .part("test", reqwest::multipart::Part::text("JOHN PORK"));
+                                );
 
                             let response = reqwest::Client::builder()
                                 .connect_timeout(std::time::Duration::from_secs(15))
