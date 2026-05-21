@@ -54,13 +54,11 @@ fn main() {
         && target_os == "linux"
         && let Some((tag, url)) = fetch_release_metadata(&target_arch)
         && (tag != existing_version || release_env.starts_with("latest"))
-        && let Ok(resp) = reqwest::blocking::get(url)
+        && let Ok(mut resp) = ureq::get(url).call()
         && resp.status().is_success()
     {
-        let data = resp.bytes().expect("Failed to read response bytes");
-
-        let compressed_data =
-            zstd::encode_all(&*data, 22).expect("Failed to compress binary with zstd");
+        let compressed_data = zstd::encode_all(resp.body_mut().as_reader(), 22)
+            .expect("Failed to compress binary with zstd");
 
         let mut file = File::create(&bin_path).expect("Failed to create bin");
         file.write_all(&compressed_data)
@@ -86,14 +84,11 @@ fn main() {
 }
 
 fn fetch_release_metadata(arch: &str) -> Option<(String, String)> {
-    let client = reqwest::blocking::Client::builder()
-        .user_agent("rust-build-script")
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
+    let mut resp = ureq::get("https://api.github.com/repos/calagopus/fusequota/releases/latest")
+        .header("User-Agent", "rust-build-script")
+        .call()
         .ok()?;
-
-    let url = "https://api.github.com/repos/calagopus/fusequota/releases/latest";
-    let release: GithubRelease = client.get(url).send().ok()?.json().ok()?;
+    let release: GithubRelease = serde_json::from_reader(resp.body_mut().as_reader()).ok()?;
 
     let expected_name = format!("fusequota-{arch}-linux");
     let asset = release
