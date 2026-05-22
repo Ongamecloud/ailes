@@ -104,6 +104,34 @@ pub async fn backup_upload_urls(
     Ok((response.part_size, response.parts))
 }
 
+pub async fn backup_s3_part_urls(
+    client: &Client,
+    uuid: uuid::Uuid,
+    from_part: usize,
+) -> Result<(u64, Vec<String>), anyhow::Error> {
+    let response: Response = super::into_json(
+        client
+            .client
+            .get(format!(
+                "{}/backups/{}/s3/parts?from_part={}",
+                client.url, uuid, from_part
+            ))
+            .send()
+            .await?
+            .error_for_status()?
+            .text()
+            .await?,
+    )?;
+
+    #[derive(Deserialize)]
+    struct Response {
+        parts: Vec<String>,
+        part_size: u64,
+    }
+
+    Ok((response.part_size, response.parts))
+}
+
 pub async fn backup_restic_configuration(
     client: &Client,
     uuid: uuid::Uuid,

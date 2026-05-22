@@ -320,6 +320,21 @@ impl Client {
     }
 
     #[tracing::instrument(skip(self))]
+    pub async fn backup_s3_part_urls(
+        &self,
+        uuid: uuid::Uuid,
+        from_part: usize,
+    ) -> Result<(u64, Vec<String>), anyhow::Error> {
+        tracing::info!("getting backup S3 part URLs");
+
+        self.retry(
+            || super::backups::backup_s3_part_urls(self, uuid, from_part),
+            Self::skip_client_errors,
+        )
+        .await
+    }
+
+    #[tracing::instrument(skip(self))]
     pub async fn backup_restic_configuration(
         &self,
         uuid: uuid::Uuid,
