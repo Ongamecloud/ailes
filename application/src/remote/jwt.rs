@@ -27,6 +27,9 @@ impl std::error::Error for JwtValidateError {}
 
 #[derive(Deserialize, Serialize)]
 pub struct BasePayload {
+    #[serde(default)]
+    pub scope: compact_str::CompactString,
+
     #[serde(rename = "iss")]
     pub issuer: compact_str::CompactString,
     #[serde(rename = "sub")]
@@ -44,7 +47,11 @@ pub struct BasePayload {
 }
 
 impl BasePayload {
-    pub async fn validate(&self, client: &JwtClient) -> Result<(), JwtValidateError> {
+    pub async fn validate(
+        &self,
+        client: &JwtClient,
+        scope: Option<&str>,
+    ) -> Result<(), JwtValidateError> {
         let now = chrono::Utc::now().timestamp();
 
         if let Some(exp) = self.expiration_time {
@@ -72,6 +79,12 @@ impl BasePayload {
         if let Some(expired_until) = client.denied_jtokens.read().await.get(&self.jwt_id)
             && let Some(issued) = self.issued_at
             && issued < expired_until.timestamp()
+        {
+            return Err(JwtValidateError::Denied);
+        }
+
+        if let Some(scope) = scope
+            && self.scope != scope
         {
             return Err(JwtValidateError::Denied);
         }

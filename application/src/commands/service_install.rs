@@ -42,7 +42,7 @@ User=root
 KillMode=process
 WorkingDirectory=/etc/pterodactyl
 LimitNOFILE=4096
-PIDFile=/var/run/wings/daemon.pid
+PIDFile=/run/calagopus-wings/daemon.pid
 ExecStart={}
 Restart=on-failure
 StartLimitInterval=180
@@ -70,6 +70,7 @@ rc_ulimit="-n 4096"
 
 respawn_delay=5
 respawn_max=30
+respawn_period=180
 
 depend() {{
     need net docker

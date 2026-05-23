@@ -112,7 +112,11 @@ mod post {
                         }
                     };
 
-                if let Err(err) = payload.base.validate(&state.config.jwt).await {
+                if let Err(err) = payload
+                    .base
+                    .validate(&state.config.jwt, Some("file-upload"))
+                    .await
+                {
                     return ApiResponse::error(&format!("invalid token: {err}"))
                         .with_status(StatusCode::UNAUTHORIZED)
                         .ok();
@@ -209,6 +213,7 @@ mod post {
                         continuation_token =
                             Some(state.config.jwt.create(&FileContinueJwtPayload {
                                 base: crate::remote::jwt::BasePayload {
+                                    scope: "file-upload".into(),
                                     issuer: "wings".into(),
                                     subject: None,
                                     audience: Vec::new(),
@@ -244,7 +249,11 @@ mod post {
                     }
                 };
 
-                if let Err(err) = payload.base.validate(&state.config.jwt).await {
+                if let Err(err) = payload
+                    .base
+                    .validate(&state.config.jwt, Some("file-upload"))
+                    .await
+                {
                     return ApiResponse::error(&format!("invalid token: {err}"))
                         .with_status(StatusCode::UNAUTHORIZED)
                         .ok();
@@ -392,6 +401,7 @@ mod post {
                         continuation_token =
                             Some(state.config.jwt.create(&FileContinueJwtPayload {
                                 base: crate::remote::jwt::BasePayload {
+                                    scope: "file-upload".into(),
                                     issuer: "wings".into(),
                                     subject: None,
                                     audience: Vec::new(),

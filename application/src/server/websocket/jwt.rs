@@ -65,7 +65,11 @@ pub async fn handle_jwt(
                 .verify::<WebsocketJwtPayload>(message.args.first().map_or("", |v| v.as_str()))
             {
                 Ok(jwt) => {
-                    if let Err(err) = jwt.base.validate(&state.config.jwt).await {
+                    if let Err(err) = jwt
+                        .base
+                        .validate(&state.config.jwt, Some("websocket"))
+                        .await
+                    {
                         return Err(JwtError::MiscStr(format!("invalid token: {err}")));
                     }
 
@@ -157,7 +161,11 @@ pub async fn handle_jwt(
         }
         _ => {
             if let Some(jwt) = websocket_handler.socket_jwt.read().await.as_ref() {
-                if let Err(err) = jwt.base.validate(&state.config.jwt).await {
+                if let Err(err) = jwt
+                    .base
+                    .validate(&state.config.jwt, Some("websocket"))
+                    .await
+                {
                     return Err(JwtError::MiscStr(format!("invalid token: {err}")));
                 }
 

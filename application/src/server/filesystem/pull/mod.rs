@@ -31,7 +31,7 @@ async fn get_download_client(
     let mut write_lock = DOWNLOAD_CLIENT.write().await;
 
     let new_client = reqwest::Client::builder()
-        .user_agent("Pterodactyl Panel (https://pterodactyl.io)")
+        .user_agent("Calagopus Wings (https://github.com/calagopus/wings)")
         .connect_timeout(std::time::Duration::from_secs(30))
         .dns_resolver(Arc::new(resolver::DnsResolver::new(config)))
         .build()

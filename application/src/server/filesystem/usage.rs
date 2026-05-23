@@ -240,7 +240,7 @@ impl DiskUsage {
         for component in path {
             let entry = current.upsert_entry(component.as_ref());
 
-            tracing::debug!(?component, "applying path delta");
+            tracing::trace!(?component, "applying path delta");
 
             if delta.logical >= 0 {
                 entry.space.add_logical(delta.logical as u64);
@@ -273,7 +273,7 @@ impl DiskUsage {
         let component = components.next()?;
         let name = component.as_os_str().to_str().unwrap_or_default();
 
-        tracing::debug!(?component, "applying path delta");
+        tracing::trace!(?component, "applying path delta");
 
         if components.peek().is_none() {
             let removed = self.remove_entry(name)?;
@@ -316,7 +316,7 @@ impl DiskUsage {
 
         let mut current = self;
         for component in parents {
-            tracing::debug!(?component, "applying path delta");
+            tracing::trace!(?component, "applying path delta");
 
             current.space.add_logical(source_dir.space.get_logical());
             current.space.add_physical(source_dir.space.get_physical());

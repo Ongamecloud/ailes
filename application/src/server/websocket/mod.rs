@@ -266,7 +266,11 @@ impl ServerWebsocketHandler {
     async fn get_server(&self) -> Result<(uuid::Uuid, crate::server::Server), anyhow::Error> {
         let jwt = self.get_jwt().await?;
 
-        if let Err(err) = jwt.base.validate(&self.state.config.jwt).await {
+        if let Err(err) = jwt
+            .base
+            .validate(&self.state.config.jwt, Some("websocket"))
+            .await
+        {
             return Err(anyhow::anyhow!("invalid token: {err}"));
         }
 
