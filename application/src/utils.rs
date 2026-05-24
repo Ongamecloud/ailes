@@ -168,7 +168,9 @@ pub struct PortablePermissions {
 
 impl PortablePermissions {
     pub fn from_mode(mode: u32) -> Self {
-        Self { mode }
+        Self {
+            mode: mode & 0o0777,
+        }
     }
 
     pub fn into_std_permissions(self) -> Option<std::fs::Permissions> {

@@ -1136,7 +1136,16 @@ impl Config {
     }
 
     fn save_to(path: &str, inner: &InnerConfig) -> Result<(), anyhow::Error> {
-        let file = File::create(path).context(format!("failed to create config file {path}"))?;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.create(true).write(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let file = opts
+            .open(path)
+            .context(format!("failed to create config file {path}"))?;
         let writer = std::io::BufWriter::new(file);
         serde_norway::to_writer(writer, inner)
             .context(format!("failed to write config file {path}"))?;

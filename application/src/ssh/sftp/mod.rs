@@ -686,6 +686,10 @@ impl russh_sftp::server::Handler for SftpSession {
             Err(_) => return Err(StatusCode::NoSuchFile),
         };
 
+        if path.components().next().is_none() {
+            return Err(StatusCode::NoSuchFile);
+        }
+
         let metadata = match self.server.filesystem.async_symlink_metadata(&path).await {
             Ok(metadata) => metadata,
             Err(_) => return Err(StatusCode::NoSuchFile),

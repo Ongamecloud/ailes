@@ -328,7 +328,7 @@ impl VirtualReadableFilesystem for VirtualZipArchive {
             Ok(entry) => Ok(FileMetadata {
                 file_type: Self::zip_entry_to_file_type(&entry),
                 permissions: if let Some(mode) = entry.unix_mode() {
-                    PortablePermissions::from_mode(mode & 0o777)
+                    PortablePermissions::from_mode(mode)
                 } else if entry.is_dir() {
                     PortablePermissions::from_mode(0o755)
                 } else {

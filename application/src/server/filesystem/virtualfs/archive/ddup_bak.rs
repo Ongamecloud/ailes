@@ -516,7 +516,7 @@ impl VirtualReadableFilesystem for VirtualDdupBakArchive {
 
         Ok(FileMetadata {
             file_type: Self::ddup_bak_entry_to_file_type(entry),
-            permissions: PortablePermissions::from_mode(entry.mode().bits() & 0o777),
+            permissions: PortablePermissions::from_mode(entry.mode().bits()),
             size: match &entry {
                 ddup_bak::archive::entries::Entry::File(f) => f.size_real,
                 _ => 0,
