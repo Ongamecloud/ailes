@@ -218,6 +218,19 @@ impl DockerServerConfigurationExt for crate::server::configuration::ServerConfig
 
         let resources = self.convert_container_resources(config);
 
+        let mut security_opt = vec!["no-new-privileges".to_string()];
+        if config.load().docker.container_apply_seccomp {
+            security_opt.push(
+                crate::server::configuration::seccomp::Seccomp::default()
+                    .remove_names(
+                        &self.container.seccomp.remove_allowed,
+                        crate::server::configuration::seccomp::Action::Allow,
+                    )
+                    .to_string()
+                    .unwrap(),
+            );
+        }
+
         bollard::plugin::ContainerCreateBody {
             exposed_ports: Some(self.convert_allocations_exposed()),
             host_config: Some(bollard::plugin::HostConfig {
@@ -255,16 +268,7 @@ impl DockerServerConfigurationExt for crate::server::configuration::ServerConfig
                             .collect(),
                     ),
                 }),
-                security_opt: Some(vec![
-                    "no-new-privileges".to_string(),
-                    crate::server::configuration::seccomp::Seccomp::default()
-                        .remove_names(
-                            &self.container.seccomp.remove_allowed,
-                            crate::server::configuration::seccomp::Action::Allow,
-                        )
-                        .to_string()
-                        .unwrap(),
-                ]),
+                security_opt: Some(security_opt),
                 cap_drop: Some(vec![
                     "setpcap".to_string(),
                     "mknod".to_string(),

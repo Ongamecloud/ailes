@@ -401,6 +401,9 @@ fn docker_tmpfs_size() -> u64 {
 fn docker_container_pid_limit() -> u64 {
     5120
 }
+fn docker_container_apply_seccomp() -> bool {
+    true
+}
 
 fn docker_installer_limits_timeout() -> u64 {
     30 * 60
@@ -893,6 +896,8 @@ nestify::nest! {
             pub tmpfs_size: u64,
             #[serde(default = "docker_container_pid_limit")]
             pub container_pid_limit: u64,
+            #[serde(default = "docker_container_apply_seccomp")]
+            pub container_apply_seccomp: bool,
 
             #[serde(default)]
             #[schema(inline)]
