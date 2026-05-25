@@ -208,7 +208,9 @@ fn merge_activities(activities: Vec<Activity>) -> Vec<Activity> {
                     if dt <= 60 {
                         files_acc.extend(extract_files(&activity));
                     } else {
-                        let (mut base, files) = sftp_events.remove(&key).unwrap();
+                        let Some((mut base, files)) = sftp_events.remove(&key) else {
+                            continue;
+                        };
                         finalize_files(&mut base, files);
                         merged.push(base);
                         let init = extract_files(&activity);
@@ -239,7 +241,9 @@ fn merge_activities(activities: Vec<Activity>) -> Vec<Activity> {
                     if dt <= 60 {
                         files_acc.extend(extract_files(&activity));
                     } else {
-                        let (mut base, files) = file_upload_events.remove(&key).unwrap();
+                        let Some((mut base, files)) = file_upload_events.remove(&key) else {
+                            continue;
+                        };
                         finalize_files(&mut base, files);
                         merged.push(base);
                         let init = extract_files(&activity);

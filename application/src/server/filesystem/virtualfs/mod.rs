@@ -108,7 +108,7 @@ impl ByteRange {
             (Bound::Unbounded, Bound::Unbounded) => format!("bytes 0-{}/{}", total - 1, total),
         };
 
-        HeaderValue::from_str(&range_header_value).unwrap()
+        unsafe { HeaderValue::from_str(&range_header_value).unwrap_unchecked() }
     }
 }
 

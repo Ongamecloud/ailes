@@ -113,7 +113,9 @@ pub fn set_nested_value(
     if tail.is_empty() {
         match head {
             PathSegment::Key(k) => {
-                let map = json.as_object_mut().unwrap();
+                let Some(map) = json.as_object_mut() else {
+                    return;
+                };
                 let exists = map.contains_key(*k);
 
                 if (exists && update_existing) || (!exists && insert_new) {
@@ -121,7 +123,9 @@ pub fn set_nested_value(
                 }
             }
             PathSegment::Index(i) => {
-                let arr = json.as_array_mut().unwrap();
+                let Some(arr) = json.as_array_mut() else {
+                    return;
+                };
                 let exists = *i < arr.len();
 
                 if exists && update_existing {
@@ -148,12 +152,18 @@ pub fn set_nested_value(
 
     match head {
         PathSegment::Key(k) => {
-            let map = json.as_object_mut().unwrap();
+            let Some(map) = json.as_object_mut() else {
+                return;
+            };
+
             let child = map.entry((*k).to_string()).or_insert_with(default_child);
             set_nested_value(child, tail, value, insert_new, update_existing);
         }
         PathSegment::Index(i) => {
-            let arr = json.as_array_mut().unwrap();
+            let Some(arr) = json.as_array_mut() else {
+                return;
+            };
+
             while arr.len() <= *i {
                 arr.push(default_child());
             }

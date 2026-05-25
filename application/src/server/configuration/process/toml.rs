@@ -80,7 +80,9 @@ pub fn set_nested_value(
     if tail.is_empty() {
         match head {
             super::json::PathSegment::Key(k) => {
-                let map = toml.as_table_mut().unwrap();
+                let Some(map) = toml.as_table_mut() else {
+                    return;
+                };
                 let exists = map.contains_key(*k);
 
                 if (exists && update_existing) || (!exists && insert_new) {
@@ -88,7 +90,9 @@ pub fn set_nested_value(
                 }
             }
             super::json::PathSegment::Index(i) => {
-                let arr = toml.as_array_mut().unwrap();
+                let Some(arr) = toml.as_array_mut() else {
+                    return;
+                };
                 let exists = *i < arr.len();
 
                 if exists && update_existing {
@@ -115,12 +119,16 @@ pub fn set_nested_value(
 
     match head {
         super::json::PathSegment::Key(k) => {
-            let map = toml.as_table_mut().unwrap();
+            let Some(map) = toml.as_table_mut() else {
+                return;
+            };
             let child = map.entry((*k).to_string()).or_insert_with(default_child);
             set_nested_value(child, tail, value, insert_new, update_existing);
         }
         super::json::PathSegment::Index(i) => {
-            let arr = toml.as_array_mut().unwrap();
+            let Some(arr) = toml.as_array_mut() else {
+                return;
+            };
             while arr.len() <= *i {
                 arr.push(default_child());
             }

@@ -66,6 +66,31 @@ impl Permission {
                 | Permission::AdminWebsocketTransfer
         )
     }
+
+    pub fn to_str(self) -> &'static str {
+        match self {
+            Permission::All => "*",
+            Permission::MetaCalagopus => "meta.calagopus",
+            Permission::WebsocketConnect => "websocket.connect",
+            Permission::ControlReadConsole => "control.read-console",
+            Permission::ControlConsole => "control.console",
+            Permission::ControlStart => "control.start",
+            Permission::ControlStop => "control.stop",
+            Permission::ControlRestart => "control.restart",
+            Permission::AdminWebsocketErrors => "admin.websocket.errors",
+            Permission::AdminWebsocketInstall => "admin.websocket.install",
+            Permission::AdminWebsocketTransfer => "admin.websocket.transfer",
+            Permission::BackupRead => "backup.read",
+            Permission::ScheduleRead => "schedule.read",
+            Permission::FileRead => "file.read",
+            Permission::FileReadContent => "file.read-content",
+            Permission::FileCreate => "file.create",
+            Permission::FileUpdate => "file.update",
+            Permission::FileDelete => "file.delete",
+            Permission::FileArchive => "file.archive",
+            Permission::FileSftp => "file.sftp",
+        }
+    }
 }
 
 type UserPermissions = (

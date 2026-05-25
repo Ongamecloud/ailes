@@ -20,6 +20,7 @@ use crate::{
     },
     utils::PortablePermissions,
 };
+use compact_str::ToCompactString;
 use itaf::encoder::{EncoderOptions, ItafEncoder, Metadata};
 use std::{
     io::{Read, Seek, Write},
@@ -708,7 +709,9 @@ impl VirtualReadableFilesystem for VirtualZipArchive {
                                 let mut archive = self.archive.clone();
 
                                 move || {
-                                    let mut entry = archive.by_index(i).unwrap();
+                                    let Ok(mut entry) = archive.by_index(i) else {
+                                        return;
+                                    };
 
                                     let mut buffer = vec![0; crate::BUFFER_SIZE];
                                     loop {
@@ -799,7 +802,9 @@ impl VirtualReadableFilesystem for VirtualZipArchive {
         let path = path.as_ref().to_path_buf();
         tokio::task::spawn_blocking(move || {
             let runtime = tokio::runtime::Handle::current();
-            let mut entry = archive.better_by_path(&path).unwrap();
+            let Ok(mut entry) = archive.better_by_path(&path) else {
+                return;
+            };
 
             let mut buffer = vec![0; crate::BUFFER_SIZE];
             loop {
@@ -1082,20 +1087,20 @@ impl VirtualReadableFilesystem for VirtualZipArchive {
                     }
                     entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
 
-                    let mut dir_stack: Vec<compact_str::CompactString> = Vec::new();
+                    let mut dir_stack = Vec::new();
 
                     for (relative, zip_index) in entries {
-                        let components: Vec<compact_str::CompactString> = relative
+                        let components: Vec<_> = relative
                             .components()
                             .filter_map(|c| match c {
-                                std::path::Component::Normal(s) => Some(s.to_string_lossy().into()),
+                                std::path::Component::Normal(s) => Some(s.to_string_lossy()),
                                 _ => None,
                             })
                             .collect();
-                        if components.is_empty() {
+                        let Some(name) = components.last() else {
                             continue;
-                        }
-                        let name = components.last().unwrap().clone();
+                        };
+
                         let parent = &components[..components.len() - 1];
 
                         let shared = dir_stack
@@ -1117,7 +1122,7 @@ impl VirtualReadableFilesystem for VirtualZipArchive {
                                     modified: std::time::SystemTime::now(),
                                 },
                             )?;
-                            dir_stack.push(component.clone());
+                            dir_stack.push(component.to_compact_string());
                         }
 
                         let entry = archive.by_index(zip_index)?;
@@ -1134,8 +1139,8 @@ impl VirtualReadableFilesystem for VirtualZipArchive {
 
                         if entry.is_symlink() && (1..=2048).contains(&size) {
                             let link_target = std::io::read_to_string(entry)?;
-                            if itaf::spec::validate_name(&name).is_ok() {
-                                itaf_enc.add_symlink(&name, &link_target, false, &meta)?;
+                            if itaf::spec::validate_name(name).is_ok() {
+                                itaf_enc.add_symlink(name, &link_target, false, &meta)?;
                             }
                         } else if entry.is_file() {
                             let reader: Box<dyn Read> = match &bytes_archived {
@@ -1150,7 +1155,7 @@ impl VirtualReadableFilesystem for VirtualZipArchive {
                                     reader,
                                     size as usize,
                                 );
-                            itaf_enc.add_file(&name, &meta, size, &mut { reader })?;
+                            itaf_enc.add_file(name, &meta, size, &mut { reader })?;
                         }
                     }
 

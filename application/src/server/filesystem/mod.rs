@@ -160,7 +160,11 @@ impl Filesystem {
             disk_usage,
             last_disk_check,
             disk_check_completed,
-            disk_ignored: Arc::new(RwLock::new(disk_ignored.build().unwrap())),
+            disk_ignored: Arc::new(RwLock::new(
+                disk_ignored
+                    .build()
+                    .unwrap_or_else(|_| ignore::gitignore::Gitignore::empty()),
+            )),
 
             archive_fs_cache: moka::future::CacheBuilder::new(8)
                 .time_to_idle(std::time::Duration::from_mins(1))
@@ -192,7 +196,9 @@ impl Filesystem {
             disk_ignored.add_line(None, entry.as_ref()).ok();
         }
 
-        *self.disk_ignored.write().await = disk_ignored.build().unwrap();
+        if let Ok(disk_ignored) = disk_ignored.build() {
+            *self.disk_ignored.write().await = disk_ignored;
+        }
     }
 
     pub async fn is_ignored(&self, path: &Path, is_dir: bool) -> bool {

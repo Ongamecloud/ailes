@@ -11,6 +11,7 @@ use human_bytes::human_bytes;
 use serde::Deserialize;
 use sha2::Digest;
 use std::{
+    borrow::Cow,
     collections::VecDeque,
     path::{Path, PathBuf},
     pin::Pin,
@@ -598,8 +599,12 @@ impl OutgoingServerTransfer {
                         let formatted_archive_percentage = format!("{:.2}%", archive_percentage);
 
                         let time_estimate = if history.len() > 1 && current_bytes_archived < bytes_total {
-                            let &(oldest_time, oldest_progress) = history.front().unwrap();
-                            let &(newest_time, newest_progress) = history.back().unwrap();
+                            let Some(&(oldest_time, oldest_progress)) = history.front() else {
+                                return Cow::Borrowed("unknown");
+                            };
+                            let Some(&(newest_time, newest_progress)) = history.back() else {
+                                return Cow::Borrowed("unknown");
+                            };
 
                             let delta_progress = newest_progress.saturating_sub(oldest_progress) as f64;
                             let delta_time = newest_time.duration_since(oldest_time).as_secs_f64();
@@ -609,7 +614,7 @@ impl OutgoingServerTransfer {
                                 let remaining_bytes = bytes_total.saturating_sub(newest_progress) as f64;
                                 let remaining_seconds = remaining_bytes / rate_30s;
 
-                                if remaining_seconds < 60.0 {
+                                Cow::Owned(if remaining_seconds < 60.0 {
                                     format!("{:.0}s", remaining_seconds)
                                 } else if remaining_seconds < 3600.0 {
                                     format!("{:.0}m {:.0}s", remaining_seconds / 60.0, remaining_seconds % 60.0)
@@ -618,14 +623,14 @@ impl OutgoingServerTransfer {
                                         remaining_seconds / 3600.0,
                                         (remaining_seconds % 3600.0) / 60.0
                                     )
-                                }
+                                })
                             } else {
-                                "calculating...".to_string()
+                                Cow::Borrowed("calculating...")
                             }
                         } else if current_bytes_archived >= bytes_total {
-                            "0s".to_string()
+                            Cow::Borrowed("0s")
                         } else {
-                            "unknown".to_string()
+                            Cow::Borrowed("unknown")
                         };
 
                         let elapsed_time = if total_elapsed_secs < 60.0 {

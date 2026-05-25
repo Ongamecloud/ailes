@@ -19,6 +19,7 @@ use crate::{
     utils::PortablePermissions,
 };
 use chrono::{Datelike, Timelike};
+use compact_str::ToCompactString;
 use itaf::encoder::{EncoderOptions, ItafEncoder, Metadata};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -1294,20 +1295,20 @@ impl VirtualReadableFilesystem for VirtualSevenZipArchive {
                     }
                     entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
 
-                    let mut dir_stack: Vec<compact_str::CompactString> = Vec::new();
+                    let mut dir_stack = Vec::new();
 
                     for (relative, entry_index) in entries {
-                        let components: Vec<compact_str::CompactString> = relative
+                        let components: Vec<_> = relative
                             .components()
                             .filter_map(|c| match c {
-                                std::path::Component::Normal(s) => Some(s.to_string_lossy().into()),
+                                std::path::Component::Normal(s) => Some(s.to_string_lossy()),
                                 _ => None,
                             })
                             .collect();
-                        if components.is_empty() {
+                        let Some(name) = components.last() else {
                             continue;
-                        }
-                        let name = components.last().unwrap().clone();
+                        };
+
                         let parent = &components[..components.len() - 1];
 
                         let shared = dir_stack
@@ -1329,7 +1330,7 @@ impl VirtualReadableFilesystem for VirtualSevenZipArchive {
                                     modified: std::time::SystemTime::now(),
                                 },
                             )?;
-                            dir_stack.push(component.clone());
+                            dir_stack.push(component.to_compact_string());
                         }
 
                         let entry = &archive.files[entry_index];
@@ -1376,13 +1377,13 @@ impl VirtualReadableFilesystem for VirtualSevenZipArchive {
                                             src,
                                             size as usize,
                                         );
-                                    itaf_enc.add_file(&name, &meta, size, &mut { src })?;
+                                    itaf_enc.add_file(name, &meta, size, &mut { src })?;
 
                                     Ok(false)
                                 })
                                 .unwrap_or_default();
                         } else {
-                            itaf_enc.add_file(&name, &meta, size, &mut std::io::empty())?;
+                            itaf_enc.add_file(name, &meta, size, &mut std::io::empty())?;
                         }
                     }
 

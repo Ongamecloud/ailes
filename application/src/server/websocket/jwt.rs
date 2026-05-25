@@ -98,12 +98,7 @@ pub async fn handle_jwt(
 
                     let mut permissions = Vec::new();
                     for permission in jwt.permissions.iter() {
-                        permissions.push(
-                            serde_json::to_value(permission)?
-                                .as_str()
-                                .unwrap()
-                                .to_compact_string(),
-                        );
+                        permissions.push(permission.to_str().to_compact_string());
                     }
 
                     websocket_handler

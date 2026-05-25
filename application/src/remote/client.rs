@@ -2,7 +2,6 @@ use crate::server::{
     activity::ApiActivity, backup::adapters::BackupAdapter, installation::InstallationScript,
     permissions::Permissions, schedule::ApiScheduleCompletionStatus,
 };
-use anyhow::Context;
 use axum::http::{HeaderMap, HeaderName, HeaderValue};
 use serde::Serialize;
 use std::fmt::Debug;
@@ -16,7 +15,7 @@ pub struct Client {
 
 impl Client {
     pub fn new(config: &crate::config::InnerConfig, ignore_certificate_errors: bool) -> Self {
-        let mut headers = HeaderMap::with_capacity(3);
+        let mut headers = HeaderMap::new();
         headers.insert(
             "User-Agent",
             format!(
@@ -25,8 +24,7 @@ impl Client {
                 config.token_id
             )
             .parse()
-            .context("invalid token_id while constructing http client")
-            .unwrap(),
+            .expect("invalid token_id while constructing http client"),
         );
         headers.insert(
             "Accept",
@@ -36,8 +34,7 @@ impl Client {
             "Authorization",
             format!("Bearer {}.{}", config.token_id, config.token)
                 .parse()
-                .context("invalid token while constructing http client")
-                .unwrap(),
+                .expect("invalid token while constructing http client"),
         );
 
         for (key, value) in config.remote_headers.iter() {
@@ -53,7 +50,7 @@ impl Client {
             .tls_danger_accept_invalid_certs(ignore_certificate_errors)
             .default_headers(headers)
             .build()
-            .unwrap();
+            .expect("failed to build HTTP client");
 
         Self {
             config: config.remote_query,

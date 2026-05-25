@@ -425,8 +425,7 @@ mod post {
                                         "archive.{}",
                                         data.archive_format.extension()
                                     ))
-                                    .mime_str("application/x-tar")
-                                    .unwrap(),
+                                    .mime_str("application/x-tar")?,
                                 )
                                 .part(
                                     "checksum",
@@ -434,15 +433,13 @@ mod post {
                                         checksum_receiver.into_stream(),
                                     ))
                                     .file_name("checksum")
-                                    .mime_str("text/plain")
-                                    .unwrap(),
+                                    .mime_str("text/plain")?,
                                 );
 
                             let response = reqwest::Client::builder()
                                 .connect_timeout(std::time::Duration::from_secs(15))
                                 .tcp_keepalive(Some(std::time::Duration::from_secs(30)))
-                                .build()
-                                .unwrap()
+                                .build()?
                                 .post(&data.url)
                                 .header("Authorization", &data.token)
                                 .header("Total-Bytes", total.load(Ordering::Relaxed))

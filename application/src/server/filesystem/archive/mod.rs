@@ -1156,8 +1156,20 @@ impl Archive {
                                 };
 
                                 scope.spawn(move |_| {
-                                    crate::io::copy(&mut reader, &mut writer).unwrap();
-                                    writer.flush().unwrap();
+                                    let mut run = || -> Result<(), std::io::Error> {
+                                        crate::io::copy(&mut reader, &mut writer)?;
+                                        writer.flush()?;
+
+                                        Ok(())
+                                    };
+
+                                    if let Err(err) = run() {
+                                        tracing::debug!(
+                                            path = %destination_path.display(),
+                                            "failed to extract file from archive: {:#?}",
+                                            err
+                                        );
+                                    }
                                 });
                             }
                             ddup_bak::archive::entries::Entry::Symlink(link) => {

@@ -35,16 +35,18 @@ fn api_server_remote_download_limit() -> usize {
     3
 }
 fn api_remote_download_blocked_cidrs() -> Vec<cidr::IpCidr> {
-    Vec::from([
-        cidr::IpCidr::from_str("127.0.0.0/8").unwrap(),
-        cidr::IpCidr::from_str("10.0.0.0/8").unwrap(),
-        cidr::IpCidr::from_str("172.16.0.0/12").unwrap(),
-        cidr::IpCidr::from_str("192.168.0.0/16").unwrap(),
-        cidr::IpCidr::from_str("169.254.0.0/16").unwrap(),
-        cidr::IpCidr::from_str("::1/128").unwrap(),
-        cidr::IpCidr::from_str("fe80::/10").unwrap(),
-        cidr::IpCidr::from_str("fc00::/7").unwrap(),
-    ])
+    unsafe {
+        Vec::from([
+            cidr::IpCidr::from_str("127.0.0.0/8").unwrap_unchecked(),
+            cidr::IpCidr::from_str("10.0.0.0/8").unwrap_unchecked(),
+            cidr::IpCidr::from_str("172.16.0.0/12").unwrap_unchecked(),
+            cidr::IpCidr::from_str("192.168.0.0/16").unwrap_unchecked(),
+            cidr::IpCidr::from_str("169.254.0.0/16").unwrap_unchecked(),
+            cidr::IpCidr::from_str("::1/128").unwrap_unchecked(),
+            cidr::IpCidr::from_str("fe80::/10").unwrap_unchecked(),
+            cidr::IpCidr::from_str("fc00::/7").unwrap_unchecked(),
+        ])
+    }
 }
 fn api_directory_entry_limit() -> usize {
     10000

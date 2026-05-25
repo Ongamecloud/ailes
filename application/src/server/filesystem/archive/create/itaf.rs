@@ -8,8 +8,10 @@ use crate::{
     server::filesystem::virtualfs::IsIgnoredFn,
     utils::PortablePermissions,
 };
+use compact_str::ToCompactString;
 use itaf::encoder::{EncoderOptions, ItafEncoder, Metadata};
 use std::{
+    borrow::Cow,
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::{
@@ -88,7 +90,10 @@ pub async fn create_itaf<W: Write + Send + 'static>(
                     .walk_dir(source)?
                     .with_is_ignored(is_ignored.clone());
 
-                let mut dir_stack = components.clone();
+                let mut dir_stack = components
+                    .into_iter()
+                    .map(|c| c.to_compact_string())
+                    .collect::<Vec<_>>();
 
                 while let Some(Ok((_, path))) = walker.next_entry() {
                     let rel = match path.strip_prefix(&base) {
@@ -114,7 +119,7 @@ pub async fn create_itaf<W: Write + Send + 'static>(
 
                     if metadata.is_dir() {
                         archive.enter_dir(&entry_name, &entry_meta)?;
-                        dir_stack.push(entry_name);
+                        dir_stack.push(entry_name.to_compact_string());
 
                         if let Some(bytes_archived) = &bytes_archived {
                             bytes_archived.fetch_add(metadata.len(), Ordering::SeqCst);
@@ -266,9 +271,11 @@ pub async fn create_itaf_distributed<W: Write + Send + 'static>(
                     &base,
                 )?;
 
-                let name = components.last().unwrap();
+                let Some(name) = components.last() else {
+                    continue;
+                };
                 archive.enter_dir(name, &meta)?;
-                dir_stack.push(name.clone());
+                dir_stack.push(name.to_compact_string());
 
                 if let Some(bytes_archived) = &bytes_archived {
                     bytes_archived.fetch_add(metadata.len(), Ordering::SeqCst);
@@ -283,7 +290,9 @@ pub async fn create_itaf_distributed<W: Write + Send + 'static>(
                     &base,
                 )?;
 
-                let name = components.last().unwrap();
+                let Some(name) = components.last() else {
+                    continue;
+                };
 
                 let file = filesystem.open(&full)?;
                 let reader: Box<dyn Read> = match &bytes_archived {
@@ -306,7 +315,9 @@ pub async fn create_itaf_distributed<W: Write + Send + 'static>(
                     &base,
                 )?;
 
-                let name = components.last().unwrap();
+                let Some(name) = components.last() else {
+                    continue;
+                };
                 let target = link_target.to_string_lossy();
                 if itaf::spec::validate_name(name).is_ok() {
                     archive.add_symlink(name, &target, metadata.is_dir(), &meta)?;
@@ -328,10 +339,10 @@ pub async fn create_itaf_distributed<W: Write + Send + 'static>(
     .await?
 }
 
-fn path_components(path: &Path) -> Vec<compact_str::CompactString> {
+fn path_components<'a>(path: &'a Path) -> Vec<Cow<'a, str>> {
     path.components()
         .filter_map(|c| match c {
-            std::path::Component::Normal(s) => Some(s.to_string_lossy().into()),
+            std::path::Component::Normal(s) => Some(s.to_string_lossy()),
             _ => None,
         })
         .collect()
@@ -339,7 +350,7 @@ fn path_components(path: &Path) -> Vec<compact_str::CompactString> {
 
 fn enter_path_components<W: Write>(
     archive: &mut ItafEncoder<W>,
-    components: &[compact_str::CompactString],
+    components: &[Cow<'_, str>],
     meta: &Metadata,
 ) -> Result<(), std::io::Error> {
     for component in components {
@@ -361,7 +372,7 @@ fn exit_path_components<W: Write>(
 fn sync_dir_stack<W: Write>(
     archive: &mut ItafEncoder<W>,
     dir_stack: &mut Vec<compact_str::CompactString>,
-    target: &[compact_str::CompactString],
+    target: &[Cow<'_, str>],
 ) -> Result<(), std::io::Error> {
     let shared = dir_stack
         .iter()
@@ -382,7 +393,7 @@ fn sync_dir_stack<W: Write>(
             modified: std::time::SystemTime::now(),
         };
         archive.enter_dir(component, &meta)?;
-        dir_stack.push(component.clone());
+        dir_stack.push(component.to_compact_string());
     }
 
     Ok(())
@@ -391,7 +402,7 @@ fn sync_dir_stack<W: Write>(
 fn sync_dir_stack_with_meta<W: Write>(
     archive: &mut ItafEncoder<W>,
     dir_stack: &mut Vec<compact_str::CompactString>,
-    target: &[compact_str::CompactString],
+    target: &[Cow<'_, str>],
     filesystem: &crate::server::filesystem::cap::CapFilesystem,
     base: &Path,
 ) -> Result<(), std::io::Error> {
@@ -407,7 +418,7 @@ fn sync_dir_stack_with_meta<W: Write>(
     }
 
     for component in &target[shared..] {
-        dir_stack.push(component.clone());
+        dir_stack.push(component.to_compact_string());
 
         let mut dir_path = base.to_path_buf();
         for seg in dir_stack.iter() {

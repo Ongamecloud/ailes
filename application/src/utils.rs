@@ -38,8 +38,9 @@ pub fn slice_after_question_mark(s: &str) -> &str {
 }
 
 pub fn parse_content_disposition_filename(header: &str) -> Option<String> {
-    static RE_STAR: LazyLock<regex::Regex> =
-        LazyLock::new(|| regex::Regex::new(r"(?i)filename\*=utf-8''([^;]+)").unwrap());
+    static RE_STAR: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r"(?i)filename\*=utf-8''([^;]+)").expect("Failed to compile regex")
+    });
 
     if let Some(caps) = RE_STAR.captures(header) {
         let encoded_filename = &caps[1];
@@ -49,8 +50,9 @@ pub fn parse_content_disposition_filename(header: &str) -> Option<String> {
         }
     }
 
-    static RE_LEGACY: LazyLock<regex::Regex> =
-        LazyLock::new(|| regex::Regex::new(r#"(?i)filename="?([^";]+)"?"#).unwrap());
+    static RE_LEGACY: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r#"(?i)filename="?([^";]+)"?"#).expect("Failed to compile regex")
+    });
 
     if let Some(caps) = RE_LEGACY.captures(header) {
         return Some(slice_after_question_mark(&caps[1]).to_string());
@@ -308,5 +310,35 @@ impl PortableSizeExt for cap_std::fs::Metadata {
 
     fn size_physical(&self) -> u64 {
         self.len()
+    }
+}
+
+pub trait StdoutTakeExt: Sized {
+    fn take_stdout(&mut self) -> Result<std::process::ChildStdout, std::io::Error>;
+    fn into_stdout(mut self) -> Result<std::process::ChildStdout, std::io::Error> {
+        self.take_stdout()
+    }
+}
+
+impl StdoutTakeExt for std::process::Child {
+    fn take_stdout(&mut self) -> Result<std::process::ChildStdout, std::io::Error> {
+        self.stdout
+            .take()
+            .ok_or_else(|| std::io::Error::other("No stdout available"))
+    }
+}
+
+pub trait TokioStdoutTakeExt: Sized {
+    fn take_stdout(&mut self) -> Result<tokio::process::ChildStdout, std::io::Error>;
+    fn into_stdout(mut self) -> Result<tokio::process::ChildStdout, std::io::Error> {
+        self.take_stdout()
+    }
+}
+
+impl TokioStdoutTakeExt for tokio::process::Child {
+    fn take_stdout(&mut self) -> Result<tokio::process::ChildStdout, std::io::Error> {
+        self.stdout
+            .take()
+            .ok_or_else(|| std::io::Error::other("No stdout available"))
     }
 }

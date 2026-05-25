@@ -20,7 +20,7 @@ use crate::{
             },
         },
     },
-    utils::PortablePermissions,
+    utils::{PortablePermissions, StdoutTakeExt, TokioStdoutTakeExt},
 };
 use chrono::{Datelike, Timelike};
 use compact_str::{CompactString, ToCompactString};
@@ -641,7 +641,7 @@ impl BackupCreateExt for ResticBackup {
             )
         };
 
-        let mut line_reader = tokio::io::BufReader::new(child.stdout.take().unwrap()).lines();
+        let mut line_reader = tokio::io::BufReader::new(child.take_stdout()?).lines();
 
         let mut snapshot_id = None;
         let mut total_bytes_processed = 0;
@@ -756,7 +756,7 @@ impl BackupExt for ResticBackup {
                     let writer = tokio_util::io::SyncIoBridge::new(writer);
                     let mut archive = zip::ZipWriter::new_stream(writer);
 
-                    let mut subtar = tar::Archive::new(child.stdout.unwrap());
+                    let mut subtar = tar::Archive::new(child.into_stdout()?);
                     let mut entries = subtar.entries()?;
 
                     let mut read_buffer = vec![0; crate::BUFFER_SIZE];
@@ -832,7 +832,7 @@ impl BackupExt for ResticBackup {
                         file_compression_threads,
                     )?;
 
-                    if let Err(err) = crate::io::copy(&mut child.stdout.unwrap(), &mut writer) {
+                    if let Err(err) = crate::io::copy(&mut child.into_stdout()?, &mut writer) {
                         tracing::error!(
                             "failed to compress tar archive for restic backup: {}",
                             err
@@ -881,8 +881,8 @@ impl BackupExt for ResticBackup {
                         },
                     )?;
 
-                    let mut dir_stack: Vec<compact_str::CompactString> = Vec::new();
-                    let mut restic_tar = tar::Archive::new(child.stdout.unwrap());
+                    let mut dir_stack = Vec::new();
+                    let mut restic_tar = tar::Archive::new(child.into_stdout()?);
                     let mut entries = restic_tar.entries()?;
 
                     while let Some(Ok(entry)) = entries.next() {
@@ -893,19 +893,18 @@ impl BackupExt for ResticBackup {
                             continue;
                         }
 
-                        let components: Vec<compact_str::CompactString> = relative
+                        let components: Vec<_> = relative
                             .components()
                             .filter_map(|c| match c {
-                                std::path::Component::Normal(s) => Some(s.to_string_lossy().into()),
+                                std::path::Component::Normal(s) => Some(s.to_string_lossy()),
                                 _ => None,
                             })
                             .collect();
-                        if components.is_empty() {
+                        let Some(name) = components.last() else {
                             continue;
-                        }
+                        };
 
                         let is_dir = header.entry_type() == tar::EntryType::Directory;
-                        let name = components.last().unwrap().clone();
                         let parent = &components[..components.len() - 1];
 
                         let mode = header.mode().unwrap_or(if is_dir { 0o755 } else { 0o644 });
@@ -939,13 +938,13 @@ impl BackupExt for ResticBackup {
                                     modified: std::time::SystemTime::now(),
                                 },
                             )?;
-                            dir_stack.push(component.clone());
+                            dir_stack.push(component.to_compact_string());
                         }
 
                         match header.entry_type() {
                             tar::EntryType::Directory => {
-                                itaf_enc.enter_dir(&name, &meta)?;
-                                dir_stack.push(name);
+                                itaf_enc.enter_dir(name, &meta)?;
+                                dir_stack.push(name.to_compact_string());
                             }
                             tar::EntryType::Regular => {
                                 let size = header.size().unwrap_or(0);
@@ -955,14 +954,14 @@ impl BackupExt for ResticBackup {
                                         size as usize,
                                     );
 
-                                itaf_enc.add_file(&name, &meta, size, &mut reader)?;
+                                itaf_enc.add_file(name, &meta, size, &mut reader)?;
                             }
                             tar::EntryType::Symlink => {
                                 let link =
                                     entry.link_name().unwrap_or_default().unwrap_or_default();
                                 let target = link.to_string_lossy();
-                                if itaf::spec::validate_name(&name).is_ok() {
-                                    itaf_enc.add_symlink(&name, &target, false, &meta)?;
+                                if itaf::spec::validate_name(name).is_ok() {
+                                    itaf_enc.add_symlink(name, &target, false, &meta)?;
                                 }
                             }
                             _ => {}
@@ -1039,7 +1038,7 @@ impl BackupExt for ResticBackup {
             .stdout(std::process::Stdio::piped())
             .spawn()?;
 
-        let mut line_reader = tokio::io::BufReader::new(child.stdout.unwrap()).lines();
+        let mut line_reader = tokio::io::BufReader::new(child.into_stdout()?).lines();
 
         while let Ok(Some(line)) = line_reader.next_line().await {
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line)
@@ -1123,7 +1122,7 @@ impl BackupExt for ResticBackup {
             .stderr(std::process::Stdio::null())
             .spawn()?;
 
-        let mut line_reader = tokio::io::BufReader::new(child.stdout.unwrap()).lines();
+        let mut line_reader = tokio::io::BufReader::new(child.into_stdout()?).lines();
         let mut entries: Vec<ResticDirectoryEntry> = Vec::new();
 
         while let Ok(Some(line)) = line_reader.next_line().await {
@@ -1581,14 +1580,12 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
                                     .spawn()
                             })?;
 
-                            let stdout = child.stdout.unwrap();
-
                             let entry_channel_tx = entry_channel_tx.clone();
                             let entry_wanted_notifier = Arc::clone(&entry_wanted_notifier);
                             let is_ignored = is_ignored.clone();
                             tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
                                 let runtime = tokio::runtime::Handle::current();
-                                let mut restic_tar = tar::Archive::new(stdout);
+                                let mut restic_tar = tar::Archive::new(child.into_stdout()?);
                                 let mut entries = restic_tar.entries()?;
 
                                 while let Some(Ok(mut entry)) = entries.next() {
@@ -1642,12 +1639,11 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
                                 .stderr(std::process::Stdio::null())
                                 .spawn()?;
 
-                            let stdout = child.stdout.unwrap();
                             entry_channel_tx
                                 .send(Ok((
                                     file_type,
                                     path,
-                                    Box::new(stdout) as AsyncReadableFileStream,
+                                    Box::new(child.into_stdout()?) as AsyncReadableFileStream,
                                 )))
                                 .await?;
                         }
@@ -1705,7 +1701,7 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
             size: entry.size,
             total_size: entry.size,
             reader_range: None,
-            reader: Box::new(child.stdout.unwrap()),
+            reader: Box::new(child.into_stdout()?),
         })
     }
     async fn async_read_file(
@@ -1744,7 +1740,7 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
             size: entry.size,
             total_size: entry.size,
             reader_range: None,
-            reader: Box::new(child.stdout.unwrap()),
+            reader: Box::new(child.into_stdout()?),
         })
     }
 
@@ -1822,7 +1818,7 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
                     let writer = tokio_util::io::SyncIoBridge::new(writer);
                     let mut zip = zip::ZipWriter::new_stream(writer);
 
-                    let mut restic_tar = tar::Archive::new(child.stdout.take().unwrap());
+                    let mut restic_tar = tar::Archive::new(child.take_stdout()?);
                     let mut entries = restic_tar.entries()?;
 
                     let mut read_buffer = vec![0; crate::BUFFER_SIZE];
@@ -1905,7 +1901,7 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
                     )?;
                     let mut tar = tar::Builder::new(writer);
 
-                    let mut restic_tar = tar::Archive::new(child.stdout.take().unwrap());
+                    let mut restic_tar = tar::Archive::new(child.take_stdout()?);
                     let mut entries = restic_tar.entries()?;
 
                     while let Some(Ok(entry)) = entries.next() {
@@ -1963,8 +1959,8 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
                         },
                     )?;
 
-                    let mut dir_stack: Vec<compact_str::CompactString> = Vec::new();
-                    let mut restic_tar = tar::Archive::new(child.stdout.take().unwrap());
+                    let mut dir_stack = Vec::new();
+                    let mut restic_tar = tar::Archive::new(child.take_stdout()?);
                     let mut entries = restic_tar.entries()?;
 
                     while let Some(Ok(entry)) = entries.next() {
@@ -1987,19 +1983,18 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
                             continue;
                         }
 
-                        let components: Vec<compact_str::CompactString> = relative
+                        let components: Vec<_> = relative
                             .components()
                             .filter_map(|c| match c {
-                                std::path::Component::Normal(s) => Some(s.to_string_lossy().into()),
+                                std::path::Component::Normal(s) => Some(s.to_string_lossy()),
                                 _ => None,
                             })
                             .collect();
-                        if components.is_empty() {
+                        let Some(name) = components.last() else {
                             continue;
-                        }
+                        };
 
                         let is_dir = file_type.is_dir();
-                        let name = components.last().unwrap().clone();
                         let parent = &components[..components.len() - 1];
 
                         let mode = header.mode().unwrap_or(if is_dir { 0o755 } else { 0o644 });
@@ -2033,13 +2028,13 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
                                     modified: std::time::SystemTime::now(),
                                 },
                             )?;
-                            dir_stack.push(component.clone());
+                            dir_stack.push(component.to_compact_string());
                         }
 
                         match file_type {
                             FileType::Dir => {
-                                itaf_enc.enter_dir(&name, &meta)?;
-                                dir_stack.push(name);
+                                itaf_enc.enter_dir(name, &meta)?;
+                                dir_stack.push(name.to_compact_string());
                             }
                             FileType::File => {
                                 let size = header.size().unwrap_or(0);
@@ -2056,14 +2051,14 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
                                         size as usize,
                                     );
 
-                                itaf_enc.add_file(&name, &meta, size, &mut reader)?;
+                                itaf_enc.add_file(name, &meta, size, &mut reader)?;
                             }
                             FileType::Symlink => {
                                 let link =
                                     entry.link_name().unwrap_or_default().unwrap_or_default();
                                 let target = link.to_string_lossy();
-                                if itaf::spec::validate_name(&name).is_ok() {
-                                    itaf_enc.add_symlink(&name, &target, false, &meta)?;
+                                if itaf::spec::validate_name(name).is_ok() {
+                                    itaf_enc.add_symlink(name, &target, false, &meta)?;
                                 }
                             }
                             _ => {}
@@ -2194,8 +2189,7 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
                             ResolvedEntry::Dir { path: entry_path } => {
                                 let mut child = spawn_restic(true, &entry_path)?;
 
-                                let mut restic_tar =
-                                    tar::Archive::new(child.stdout.take().unwrap());
+                                let mut restic_tar = tar::Archive::new(child.take_stdout()?);
                                 let mut entries = restic_tar.entries()?;
 
                                 while let Some(Ok(mut entry)) = entries.next() {
@@ -2286,7 +2280,7 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
 
                                 zip.start_file(entry_path.to_string_lossy(), options)?;
 
-                                let mut restic_file = child.stdout.take().unwrap();
+                                let mut restic_file = child.take_stdout()?;
 
                                 loop {
                                     let n = restic_file.read(&mut read_buffer)?;
@@ -2324,8 +2318,7 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
                             ResolvedEntry::Dir { path: entry_path } => {
                                 let mut child = spawn_restic(true, &entry_path)?;
 
-                                let mut restic_tar =
-                                    tar::Archive::new(child.stdout.take().unwrap());
+                                let mut restic_tar = tar::Archive::new(child.take_stdout()?);
                                 let mut entries = restic_tar.entries()?;
 
                                 while let Some(Ok(entry)) = entries.next() {
@@ -2382,7 +2375,7 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
 
                                 if let Some(counter) = &bytes_archived {
                                     let counting_reader = CountingReader::new_with_bytes_read(
-                                        child.stdout.take().unwrap(),
+                                        child.take_stdout()?,
                                         counter.clone(),
                                     );
                                     tar.append_data(&mut header, &entry_path, counting_reader)?;
@@ -2390,7 +2383,7 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
                                     tar.append_data(
                                         &mut header,
                                         &entry_path,
-                                        child.stdout.take().unwrap(),
+                                        child.take_stdout()?,
                                     )?;
                                 }
                             }
@@ -2421,7 +2414,7 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
                         },
                     )?;
 
-                    let mut dir_stack: Vec<compact_str::CompactString> = Vec::new();
+                    let mut dir_stack = Vec::new();
 
                     resolved.sort_unstable_by(|a, b| {
                         let pa = match a {
@@ -2438,20 +2431,19 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
                     for resolved_entry in resolved {
                         match resolved_entry {
                             ResolvedEntry::Dir { path: entry_path } => {
-                                let components: Vec<compact_str::CompactString> = entry_path
+                                let components: Vec<_> = entry_path
                                     .components()
                                     .filter_map(|c| match c {
                                         std::path::Component::Normal(s) => {
-                                            Some(s.to_string_lossy().into())
+                                            Some(s.to_string_lossy())
                                         }
                                         _ => None,
                                     })
                                     .collect();
-                                if components.is_empty() {
+                                let Some(name) = components.last() else {
                                     continue;
-                                }
+                                };
 
-                                let name = components.last().unwrap().clone();
                                 let parent = &components[..components.len() - 1];
 
                                 let shared = dir_stack
@@ -2473,11 +2465,11 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
                                             modified: std::time::SystemTime::now(),
                                         },
                                     )?;
-                                    dir_stack.push(component.clone());
+                                    dir_stack.push(component.to_compact_string());
                                 }
 
                                 itaf_enc.enter_dir(
-                                    &name,
+                                    name,
                                     &Metadata {
                                         uid: 0,
                                         gid: 0,
@@ -2485,12 +2477,11 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
                                         modified: std::time::SystemTime::now(),
                                     },
                                 )?;
-                                dir_stack.push(name);
+                                dir_stack.push(name.to_compact_string());
 
                                 let base_depth = dir_stack.len();
                                 let mut child = spawn_restic(true, &entry_path)?;
-                                let mut restic_tar =
-                                    tar::Archive::new(child.stdout.take().unwrap());
+                                let mut restic_tar = tar::Archive::new(child.take_stdout()?);
                                 let mut entries = restic_tar.entries()?;
 
                                 while let Some(Ok(entry)) = entries.next() {
@@ -2513,21 +2504,19 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
                                         continue;
                                     }
 
-                                    let inner_components: Vec<compact_str::CompactString> =
-                                        relative
-                                            .components()
-                                            .filter_map(|c| match c {
-                                                std::path::Component::Normal(s) => {
-                                                    Some(s.to_string_lossy().into())
-                                                }
-                                                _ => None,
-                                            })
-                                            .collect();
-                                    if inner_components.is_empty() {
+                                    let inner_components: Vec<_> = relative
+                                        .components()
+                                        .filter_map(|c| match c {
+                                            std::path::Component::Normal(s) => {
+                                                Some(s.to_string_lossy())
+                                            }
+                                            _ => None,
+                                        })
+                                        .collect();
+                                    let Some(inner_name) = inner_components.last() else {
                                         continue;
-                                    }
+                                    };
 
-                                    let inner_name = inner_components.last().unwrap().clone();
                                     let inner_parent =
                                         &inner_components[..inner_components.len() - 1];
 
@@ -2550,7 +2539,7 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
                                                 modified: std::time::SystemTime::now(),
                                             },
                                         )?;
-                                        dir_stack.push(component.clone());
+                                        dir_stack.push(component.to_compact_string());
                                     }
 
                                     let is_dir = file_type.is_dir();
@@ -2572,8 +2561,8 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
 
                                     match file_type {
                                         FileType::Dir => {
-                                            itaf_enc.enter_dir(&inner_name, &meta)?;
-                                            dir_stack.push(inner_name);
+                                            itaf_enc.enter_dir(inner_name, &meta)?;
+                                            dir_stack.push(inner_name.to_compact_string());
                                         }
                                         FileType::File => {
                                             let size = header.size().unwrap_or(0);
@@ -2592,7 +2581,7 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
                                             );
 
                                             itaf_enc.add_file(
-                                                &inner_name,
+                                                inner_name,
                                                 &meta,
                                                 size,
                                                 &mut reader,
@@ -2604,12 +2593,9 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
                                                 .unwrap_or_default()
                                                 .unwrap_or_default();
                                             let target = link.to_string_lossy();
-                                            if itaf::spec::validate_name(&inner_name).is_ok() {
+                                            if itaf::spec::validate_name(inner_name).is_ok() {
                                                 itaf_enc.add_symlink(
-                                                    &inner_name,
-                                                    &target,
-                                                    false,
-                                                    &meta,
+                                                    inner_name, &target, false, &meta,
                                                 )?;
                                             }
                                         }
@@ -2632,11 +2618,10 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
                                         _ => None,
                                     })
                                     .collect();
-                                if components.is_empty() {
+                                let Some(file_name) = components.last() else {
                                     continue;
-                                }
+                                };
 
-                                let file_name = components.last().unwrap().clone();
                                 let parent = &components[..components.len() - 1];
 
                                 let shared = dir_stack
@@ -2671,10 +2656,10 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
                                 let mut child = spawn_restic(false, &entry_path)?;
                                 let reader: Box<dyn Read> = match &bytes_archived {
                                     Some(counter) => Box::new(CountingReader::new_with_bytes_read(
-                                        child.stdout.take().unwrap(),
+                                        child.take_stdout()?,
                                         counter.clone(),
                                     )),
-                                    None => Box::new(child.stdout.take().unwrap()),
+                                    None => Box::new(child.take_stdout()?),
                                 };
                                 let mut reader =
                                     crate::io::fixed_reader::FixedReader::new_with_fixed_bytes(
@@ -2682,7 +2667,7 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
                                         size as usize,
                                     );
 
-                                itaf_enc.add_file(&file_name, &meta, size, &mut reader)?;
+                                itaf_enc.add_file(file_name, &meta, size, &mut reader)?;
                             }
                         }
                     }
