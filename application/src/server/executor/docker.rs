@@ -780,19 +780,36 @@ impl DockerProcessHandle {
             let mut prev_cpu_total: u64 = 0;
             let mut prev_instant: Option<std::time::Instant> = None;
 
-            let mut stream = stats_docker.stats(
-                &stats_id,
-                Some(bollard::query_parameters::StatsOptions {
-                    stream: true,
-                    one_shot: false,
-                }),
-            );
-
-            while let Some(Ok(stats)) = stream.next().await {
-                let (disk_bytes, _) = tokio::join!(
-                    stats_server.filesystem.limiter_usage(),
-                    tokio::time::sleep(std::time::Duration::from_millis(500)),
+            let get_stats = async || {
+                let mut stream = stats_docker.stats(
+                    &stats_id,
+                    Some(bollard::query_parameters::StatsOptions {
+                        stream: false,
+                        one_shot: true,
+                    }),
                 );
+
+                let (r1, r2, _) = tokio::join!(
+                    stream.next(),
+                    stats_server.filesystem.limiter_usage(),
+                    tokio::time::sleep(std::time::Duration::from_secs(1))
+                );
+
+                (r1, r2)
+            };
+
+            while let (Some(stats), disk_bytes) = get_stats().await {
+                let stats = match stats {
+                    Ok(stats) => stats,
+                    Err(err) => {
+                        tracing::warn!(
+                            server = %stats_server.uuid,
+                            "failed to get container stats: {:?}",
+                            err
+                        );
+                        continue;
+                    }
+                };
 
                 let mut usage = stats_usage.write().await;
 

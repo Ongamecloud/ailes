@@ -110,16 +110,15 @@ impl ServerStateLock {
     /// and `Err` if an error occurred during the action execution.
     /// If `aquire_timeout` is `Some`, it will wait for the specified duration to acquire the lock.
     /// If the lock is not acquired within the timeout, it returns `Ok(false)`.
-    pub async fn execute_action<F, Fut>(
+    pub async fn execute_action<
+        F: FnOnce(bool) -> Fut,
+        Fut: Future<Output = Result<(), anyhow::Error>>,
+    >(
         &self,
         state: ServerState,
         action: F,
         aquire_timeout: Option<std::time::Duration>,
-    ) -> Result<bool, anyhow::Error>
-    where
-        F: FnOnce(bool) -> Fut,
-        Fut: Future<Output = Result<(), anyhow::Error>>,
-    {
+    ) -> Result<bool, anyhow::Error> {
         let old_state = self.get_state();
 
         let mut aquired = false;
