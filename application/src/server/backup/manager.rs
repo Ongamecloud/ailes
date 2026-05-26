@@ -163,18 +163,15 @@ impl BackupManager {
                         crate::server::websocket::WebsocketEvent::ServerBackupCompleted,
                     )
                     .arg(uuid.to_compact_string())
-                    .arg(
-                        serde_json::json!({
-                            "checksum_type": "",
-                            "checksum": "",
-                            "size": 0,
-                            "files": 0,
-                            "successful": false,
-                            "browsable": false,
-                            "streaming": false,
-                        })
-                        .to_compact_string(),
-                    )
+                    .json_arg(serde_json::json!({
+                        "checksum_type": "",
+                        "checksum": "",
+                        "size": 0,
+                        "files": 0,
+                        "successful": false,
+                        "browsable": false,
+                        "streaming": false,
+                    }))
                     .build(),
                 )?;
                 self.cached_backup_adapters.insert(uuid, adapter).await;
@@ -198,18 +195,15 @@ impl BackupManager {
                 crate::server::websocket::WebsocketEvent::ServerBackupCompleted,
             )
             .arg(uuid.to_compact_string())
-            .arg(
-                serde_json::json!({
-                    "checksum_type": backup.checksum_type,
-                    "checksum": backup.checksum,
-                    "size": backup.size,
-                    "files": backup.files,
-                    "successful": backup.successful,
-                    "browsable": backup.browsable,
-                    "streaming": backup.streaming,
-                })
-                .to_compact_string(),
-            )
+            .json_arg(serde_json::json!({
+                "checksum_type": backup.checksum_type,
+                "checksum": backup.checksum,
+                "size": backup.size,
+                "files": backup.files,
+                "successful": backup.successful,
+                "browsable": backup.browsable,
+                "streaming": backup.streaming,
+            }))
             .build(),
         )?;
         server.configuration.write().await.backups.push(uuid);

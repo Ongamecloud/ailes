@@ -52,7 +52,7 @@ async fn get_client(server: &crate::server::Server) -> Arc<reqwest::Client> {
             ))
             .tls_danger_accept_invalid_certs(server.app_state.config.ignore_certificate_errors)
             .build()
-            .expect("failed to build reqwest client for s3 backup adapter"),
+            .expect("failed to build HTTP client"),
     );
 
     *CLIENT.write().await = Some(Arc::clone(&client));

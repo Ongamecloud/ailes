@@ -35,7 +35,7 @@ zip = { version = "8.0.0", default-features = false, features = ["bzip2", "defla
 sevenz-rust2 = { version = "0.21.0", features = ["deflate", "compress", "brotli", "zstd", "bzip2", "ppmd", "lz4"] }
 flate2 = { version = "1.1.1", default-features = false, features = ["zlib-ng"] }
 sha2 = "0.11.0"
-ddup-bak = "0.8.0"
+ddup-bak = "0.9.0"
 infer = "0.19.0"
 rustls = { version = "0.23.27", features = ["aws-lc-rs"] }
 ignore = "0.4.23"
@@ -89,12 +89,12 @@ hex = "0.4.3"
 json-patch = "4.2.0"
 itaf = "0.2.0"
 arc-swap = "1.9.1"
-rusqlite = { version = "0.39.0", features = ["bundled"] }
+rusqlite = { version = "0.40.0", features = ["bundled"] }
 blake3 = "1.8.5"
 parking_lot = "0.12.5"
 
 [target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
-tikv-jemallocator = "0.6.0"
+tikv-jemallocator = "0.7.0"
 
 [target.'cfg(target_arch = "riscv64gc")'.dependencies]
 libz-ng-sys = "=1.1.23" # temporary pin due to riscv64 issues

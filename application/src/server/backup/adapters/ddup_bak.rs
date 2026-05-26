@@ -64,7 +64,7 @@ pub async fn get_repository(
             tokio::task::spawn_blocking(move || {
                 ddup_bak::repository::Repository::new(&path, 1024 * 1024, 0, None)
             })
-            .await?,
+            .await??,
         );
         repository.save()?;
         *REPOSITORY.write().await = Some(Arc::clone(&repository));
