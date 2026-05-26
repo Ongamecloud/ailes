@@ -12,7 +12,11 @@ use std::{
     str::FromStr,
     sync::Arc,
 };
-use tracing_subscriber::fmt::writer::MakeWriterExt;
+use tracing::level_filters::LevelFilter;
+use tracing_subscriber::{
+    fmt::writer::MakeWriterExt,
+    layer::{Layered, SubscriberExt}, util::SubscriberInitExt,
+};
 use utoipa::ToSchema;
 
 fn app_name() -> String {
@@ -1028,9 +1032,14 @@ pub struct ConfigGuard(
 );
 
 pub type ConfigSnapshot = arc_swap::Guard<Arc<InnerConfig>>;
+type ReloadHandle = tracing_subscriber::reload::Handle<
+    LevelFilter,
+    Layered<LevelFilter, tracing_subscriber::Registry>,
+>;
 
 pub struct Config {
     inner: ArcSwap<InnerConfig>,
+    log_reload_handle: ReloadHandle,
 
     pub path: String,
     pub ignore_certificate_errors: bool,
@@ -1087,31 +1096,39 @@ impl Config {
         Self::validate_inner(&inner)?;
         Self::save_to(path, &inner)?;
 
+        let initial_level = if inner.debug && !ignore_debug {
+            LevelFilter::DEBUG
+        } else {
+            LevelFilter::INFO
+        };
+        let (reload_layer, log_reload_handle) =
+            tracing_subscriber::reload::Layer::new(initial_level);
+
+        let fmt_layer = tracing_subscriber::fmt::layer()
+            .with_timer(tracing_subscriber::fmt::time::ChronoLocal::new(
+                "%Y-%m-%d %H:%M:%S %z".to_string(),
+            ))
+            .with_writer(stdout_writer.and(file_appender))
+            .with_target(false)
+            .with_level(true)
+            .with_file(true)
+            .with_line_number(true);
+
+        tracing_subscriber::registry()
+            .with(LevelFilter::DEBUG)
+            .with(reload_layer)
+            .with(fmt_layer)
+            .try_init()
+            .context("failed to install tracing subscriber")?;
+
         let disk_check_concurrency_semaphore =
             tokio::sync::Semaphore::new(inner.system.disk_check_concurrency);
         let client = crate::remote::client::Client::new(&inner, ignore_certificate_errors);
         let jwt = crate::remote::jwt::JwtClient::new(&inner);
 
-        tracing::subscriber::set_global_default(
-            tracing_subscriber::fmt()
-                .with_timer(tracing_subscriber::fmt::time::ChronoLocal::new(
-                    "%Y-%m-%d %H:%M:%S %z".to_string(),
-                ))
-                .with_writer(stdout_writer.and(file_appender))
-                .with_target(false)
-                .with_level(true)
-                .with_file(true)
-                .with_line_number(true)
-                .with_max_level(if inner.debug && !ignore_debug {
-                    tracing::Level::DEBUG
-                } else {
-                    tracing::Level::INFO
-                })
-                .finish(),
-        )?;
-
         let config = Arc::new(Self {
             inner: ArcSwap::new(Arc::new(inner)),
+            log_reload_handle,
 
             path: path.to_string(),
             ignore_certificate_errors,
@@ -1131,7 +1148,24 @@ impl Config {
     pub fn replace(&self, new: InnerConfig) -> Result<(), anyhow::Error> {
         Self::validate_inner(&new)?;
         Self::save_to(&self.path, &new)?;
+
+        let old_debug = self.load().debug;
+        let new_debug = new.debug;
+
         self.inner.store(Arc::new(new));
+
+        if old_debug != new_debug {
+            let new_level = if new_debug {
+                LevelFilter::DEBUG
+            } else {
+                LevelFilter::INFO
+            };
+
+            self.log_reload_handle
+                .modify(|filter| *filter = new_level)
+                .context("failed to reload tracing level filter")?;
+        }
+
         Ok(())
     }
 
