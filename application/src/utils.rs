@@ -163,6 +163,29 @@ pub fn is_valid_utf8_slice(s: &[u8]) -> bool {
     false
 }
 
+pub fn strip_paths(value: &mut serde_json::Value, paths: &[&str]) {
+    for path in paths {
+        let mut cursor = &mut *value;
+        let mut parts = path.split('.').peekable();
+
+        while let Some(part) = parts.next() {
+            let serde_json::Value::Object(map) = cursor else {
+                break;
+            };
+
+            if parts.peek().is_none() {
+                map.remove(part);
+                break;
+            }
+
+            match map.get_mut(part) {
+                Some(next) => cursor = next,
+                None => break,
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PortablePermissions {
     pub mode: u32,

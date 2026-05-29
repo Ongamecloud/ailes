@@ -103,4 +103,4 @@ libz-ng-sys = "=1.1.23" # temporary pin due to riscv64 issues
 ureq = { version = "3.3.0", default-features = false, features = ["rustls"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
-zstd = { version = "0.13.3", features = ["zstdmt"] }
+zstd = "0.13.3"

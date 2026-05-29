@@ -15,29 +15,6 @@ mod post {
         applied: bool,
     }
 
-    fn strip_paths(value: &mut serde_json::Value, paths: &[&str]) {
-        for path in paths {
-            let mut cursor = &mut *value;
-            let mut parts = path.split('.').peekable();
-
-            while let Some(part) = parts.next() {
-                let serde_json::Value::Object(map) = cursor else {
-                    break;
-                };
-
-                if parts.peek().is_none() {
-                    map.remove(part);
-                    break;
-                }
-
-                match map.get_mut(part) {
-                    Some(next) => cursor = next,
-                    None => break,
-                }
-            }
-        }
-    }
-
     #[utoipa::path(post, path = "/", responses(
         (status = OK, body = inline(Response)),
     ), request_body = serde_json::Value)]
@@ -55,31 +32,7 @@ mod post {
                 .ok();
         }
 
-        const FORBIDDEN_PATHS: &[&str] = &[
-            "uuid",
-            "token",
-            "token_id",
-            "remote",
-            "remote_headers",
-            "system.root_directory",
-            "system.log_directory",
-            "system.vmount_directory",
-            "system.data",
-            "system.archive_directory",
-            "system.backup_directory",
-            "system.tmp_directory",
-            "system.passwd.directory",
-            "system.backups.restic.repository",
-            "system.backups.restic.password_file",
-            "system.backups.mounting.path",
-            "system.username",
-            "system.user",
-            "system.passwd",
-            "docker.socket",
-            "allowed_mounts",
-        ];
-
-        strip_paths(&mut patch, FORBIDDEN_PATHS);
+        crate::utils::strip_paths(&mut patch, crate::config::FORBIDDEN_PATHS);
 
         let mut doc = match serde_json::to_value(&**state.config.load()) {
             Ok(doc) => doc,

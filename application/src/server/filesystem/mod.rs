@@ -858,12 +858,24 @@ impl Filesystem {
         }
 
         if delta.logical > 0 {
-            let delta_u64 = delta.logical as u64;
+            self.disk_usage_cached_logical
+                .fetch_add(delta.logical as u64, Ordering::Relaxed);
+        } else if delta.logical < 0 {
+            let abs = delta.logical.unsigned_abs();
+            self.disk_usage_cached_logical
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                    Some(current.saturating_sub(abs))
+                })
+                .ok();
+        }
+
+        if delta.physical > 0 {
+            let delta_u64 = delta.physical as u64;
 
             if !ignorant && self.disk_limit() != 0 {
                 let limit = self.disk_limit() as u64;
 
-                let result = self.disk_usage_cached_logical.fetch_update(
+                let result = self.disk_usage_cached_physical.fetch_update(
                     Ordering::SeqCst,
                     Ordering::Relaxed,
                     |current| {
@@ -884,21 +896,9 @@ impl Filesystem {
                     return false;
                 }
             } else {
-                self.disk_usage_cached_logical
+                self.disk_usage_cached_physical
                     .fetch_add(delta_u64, Ordering::Relaxed);
             }
-        } else if delta.logical < 0 {
-            let abs = delta.logical.unsigned_abs();
-            self.disk_usage_cached_logical
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                    Some(current.saturating_sub(abs))
-                })
-                .ok();
-        }
-
-        if delta.physical > 0 {
-            self.disk_usage_cached_physical
-                .fetch_add(delta.physical as u64, Ordering::Relaxed);
         } else if delta.physical < 0 {
             let abs = delta.physical.unsigned_abs();
             self.disk_usage_cached_physical

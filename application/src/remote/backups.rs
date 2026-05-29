@@ -24,7 +24,7 @@ pub struct RawServerBackup {
     pub parts: Vec<RawServerBackupPart>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, ToSchema, Deserialize)]
 pub struct ResticBackupConfiguration {
     pub repository: String,
     pub password_file: Option<String>,

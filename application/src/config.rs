@@ -1026,6 +1026,30 @@ impl DockerOverhead {
     }
 }
 
+pub const FORBIDDEN_PATHS: &[&str] = &[
+    "uuid",
+    "token",
+    "token_id",
+    "remote",
+    "remote_headers",
+    "system.root_directory",
+    "system.log_directory",
+    "system.vmount_directory",
+    "system.data",
+    "system.archive_directory",
+    "system.backup_directory",
+    "system.tmp_directory",
+    "system.passwd.directory",
+    "system.backups.restic.repository",
+    "system.backups.restic.password_file",
+    "system.backups.mounting.path",
+    "system.username",
+    "system.user",
+    "system.passwd",
+    "docker.socket",
+    "allowed_mounts",
+];
+
 #[allow(dead_code)]
 pub struct ConfigGuard(
     tracing_appender::non_blocking::WorkerGuard,
