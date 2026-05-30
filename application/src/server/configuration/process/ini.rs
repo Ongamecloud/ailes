@@ -1,4 +1,5 @@
 use super::ServerConfigurationFile;
+use compact_str::ToCompactString;
 
 pub struct IniFileParser;
 
@@ -52,16 +53,13 @@ impl super::ProcessConfigurationFileParser for IniFileParser {
             "\n"
         };
         let mut out = String::with_capacity(content.len() + 64);
-        let mut current_section: Option<String> = None;
+        let mut current_section = None;
 
         for item in ini_roundtrip::Parser::new(content) {
             match item {
                 ini_roundtrip::Item::SectionEnd => {
                     for p in pending.iter_mut() {
-                        if !p.applied
-                            && p.insert_new
-                            && p.section.as_deref() == current_section.as_deref()
-                        {
+                        if !p.applied && p.insert_new && p.section == current_section {
                             out.push_str(&p.key);
                             out.push('=');
                             out.push_str(&p.value);
@@ -71,16 +69,14 @@ impl super::ProcessConfigurationFileParser for IniFileParser {
                     }
                 }
                 ini_roundtrip::Item::Section { name, raw } => {
-                    current_section = Some(name.to_string());
+                    current_section = Some(name.to_compact_string());
                     out.push_str(raw);
                     out.push_str(newline);
                 }
                 ini_roundtrip::Item::Property { key, val: _, raw } => {
-                    let matched = pending.iter_mut().find(|p| {
-                        !p.applied
-                            && p.section.as_deref() == current_section.as_deref()
-                            && p.key == key
-                    });
+                    let matched = pending
+                        .iter_mut()
+                        .find(|p| !p.applied && p.section == current_section && p.key == key);
 
                     match matched {
                         Some(p) => {

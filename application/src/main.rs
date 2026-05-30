@@ -412,7 +412,13 @@ async fn main_rt() {
         mime_cache: moka::future::Cache::new(20480),
     });
 
-    state.server_manager.boot(&state, servers).await;
+    tokio::spawn({
+        let state = Arc::clone(&state);
+
+        async move {
+            state.server_manager.boot(&state, servers).await;
+        }
+    });
 
     let app = OpenApiRouter::new()
         .merge(crate::routes::router(&state))
