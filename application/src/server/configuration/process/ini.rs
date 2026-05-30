@@ -59,29 +59,11 @@ fn parse_ini_path(path: &str) -> (String, String) {
 
     for ch in path.chars() {
         match ch {
-            '[' => {
-                bracket_depth += 1;
-                if in_section {
-                    section.push(ch);
-                } else {
-                    key.push(ch);
-                }
-            }
-            ']' => {
-                bracket_depth -= 1;
-                if in_section {
-                    section.push(ch);
-                } else {
-                    key.push(ch);
-                }
-            }
+            '[' => bracket_depth += 1,
+            ']' => bracket_depth -= 1,
             '.' => {
                 if bracket_depth > 0 {
-                    if in_section {
-                        section.push(ch);
-                    } else {
-                        key.push(ch);
-                    }
+                    section.push(ch);
                 } else if in_section && !section.is_empty() {
                     in_section = false;
                 } else {

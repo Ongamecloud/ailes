@@ -241,15 +241,20 @@ impl ServerConfigurationFile {
         let mut config_json = serde_json::to_value(&**config.load())
             .context("failed to serialize Wings configuration")?;
 
-        crate::utils::strip_paths(&mut config_json, crate::config::FORBIDDEN_PATHS);
+        if let Some(obj) = config_json.as_object_mut() {
+            obj.retain(|k, _| k == "docker");
+        }
+
+        crate::utils::strip_paths(&mut config_json, &["docker.registries"]);
 
         let mut current = &config_json;
         for part in parts {
             match current.get(part) {
                 Some(value) => current = value,
                 None => {
-                    tracing::warn!("config path not found: {}", parts.join("."));
-                    return Ok(compact_str::CompactString::default());
+                    let joined = parts.join(".");
+                    tracing::warn!("config path not found: {}", joined);
+                    return Ok(compact_str::format_compact!("{{{{config.{}}}}}", joined));
                 }
             }
         }
@@ -353,7 +358,9 @@ impl ProcessConfiguration {
         for config in self.configs.iter() {
             let file_path = server.filesystem.relative_path(Path::new(&config.file));
 
-            if let Some(parent) = file_path.parent() {
+            if let Some(parent) = file_path.parent()
+                && parent.components().next().is_some()
+            {
                 server.filesystem.async_create_dir_all(&parent).await?;
             }
 
