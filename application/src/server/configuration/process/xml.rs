@@ -77,17 +77,26 @@ fn update_xml_element(
     if path.len() == 1 {
         let tag = path[0];
 
-        if let Some(attr_value) = value.strip_prefix('@') {
-            if let Some(eq_pos) = attr_value.find('=') {
-                let attr_name = &attr_value[..eq_pos];
-                let attr_val = &attr_value[eq_pos + 1..];
+        if let Some(attr_assignment) = value.strip_prefix('@') {
+            let Some(eq_pos) = attr_assignment.find('=') else {
+                return;
+            };
+            let attr_name = &attr_assignment[..eq_pos];
+            let attr_val = &attr_assignment[eq_pos + 1..];
 
-                let exists = element.attributes.contains_key(attr_name);
+            if let Some(child) = element.get_mut_child(tag) {
+                let exists = child.attributes.contains_key(attr_name);
                 if (exists && update_existing) || (!exists && insert_new) {
-                    element
+                    child
                         .attributes
                         .insert(attr_name.to_string(), attr_val.to_string());
                 }
+            } else if insert_new {
+                let mut new_child = xmltree::Element::new(tag);
+                new_child
+                    .attributes
+                    .insert(attr_name.to_string(), attr_val.to_string());
+                element.children.push(xmltree::XMLNode::Element(new_child));
             }
             return;
         }
