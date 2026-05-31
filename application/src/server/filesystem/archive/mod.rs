@@ -791,7 +791,10 @@ impl Archive {
                     if let Some(total) = total {
                         let mut entry_total = 0;
                         let archive = unrar::Archive::new_owned(
-                            self.server.filesystem.base_path.join(&self.path),
+                            self.server
+                                .filesystem
+                                .base_path
+                                .join(self.server.filesystem.relative_path(&self.path)),
                         )
                         .open_for_listing()?;
                         for entry in archive.flatten() {
@@ -801,9 +804,13 @@ impl Archive {
                         total.store(entry_total, Ordering::Relaxed);
                     }
 
-                    let mut archive =
-                        unrar::Archive::new_owned(self.server.filesystem.base_path.join(self.path))
-                            .open_for_processing()?;
+                    let mut archive = unrar::Archive::new_owned(
+                        self.server
+                            .filesystem
+                            .base_path
+                            .join(self.server.filesystem.relative_path(&self.path)),
+                    )
+                    .open_for_processing()?;
                     let mut directory_entries = chunked_vec::ChunkedVec::new();
 
                     loop {

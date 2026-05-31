@@ -72,7 +72,9 @@ impl ServerStateLock {
                 .build(),
             )
             .unwrap_or_default();
-        if state == ServerState::Offline && self.get_pending_restart() {
+        if (state == ServerState::Offline || state == ServerState::Starting)
+            && self.get_pending_restart()
+        {
             self.set_pending_restart(false);
         }
     }
