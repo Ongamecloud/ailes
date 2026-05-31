@@ -1675,9 +1675,9 @@ impl Config {
                     let mut attempts = 0;
                     loop {
                         fn increment_ip_or_cidr(ip: &str) -> String {
-                            let Some((ip, network_mask)) = ip.split_once('/') else {
-                                return ip.into();
-                            };
+                            let (ip, network_mask) = ip
+                                .split_once('/')
+                                .unwrap_or((ip, if ip.contains(':') { "128" } else { "32" }));
 
                             if let Ok(ip) = ip.parse::<std::net::Ipv4Addr>() {
                                 let octets = ip.octets();
@@ -1687,7 +1687,7 @@ impl Config {
                                     octets[2],
                                     octets[3],
                                 );
-                                format!("{}{}", incremented, network_mask)
+                                format!("{incremented}/{network_mask}")
                             } else if let Ok(ip) = ip.parse::<std::net::Ipv6Addr>() {
                                 let segments = ip.segments();
                                 let incremented = std::net::Ipv6Addr::new(
@@ -1700,7 +1700,7 @@ impl Config {
                                     segments[6],
                                     segments[7],
                                 );
-                                format!("{}{}", incremented, network_mask)
+                                format!("{incremented}/{network_mask}")
                             } else {
                                 ip.into()
                             }
