@@ -1,5 +1,6 @@
 use crate::{
     io::{
+        SafeAsyncWrite, SafeDigest, SafeSliceMut,
         compression::{CompressionType, reader::CompressionReader},
         counting_reader::CountingReader,
         limited_reader::{AsyncLimitedReader, LimitedReader},
@@ -290,14 +291,14 @@ impl S3Backup {
                     while valid_len < part_size {
                         let want =
                             std::cmp::min(buffer.len() as u64, part_size - valid_len) as usize;
-                        let bytes_read = archive_reader.read(&mut buffer[..want]).await?;
+                        let bytes_read = archive_reader.read(buffer.get_slice_mut(..want)?).await?;
                         if crate::unlikely(bytes_read == 0) {
                             eof = true;
                             break;
                         }
 
-                        sha1.update(&buffer[..bytes_read]);
-                        scratch.write_all(&buffer[..bytes_read]).await?;
+                        sha1.safe_update(&buffer, bytes_read)?;
+                        scratch.safe_write_all(&buffer, bytes_read).await?;
 
                         valid_len += bytes_read as u64;
                         total.fetch_add(bytes_read as u64, Ordering::Relaxed);
@@ -399,8 +400,8 @@ impl S3Backup {
                     break;
                 }
 
-                sha1.update(&buffer[..bytes_read]);
-                file.write_all(&buffer[..bytes_read]).await?;
+                sha1.safe_update(&buffer, bytes_read)?;
+                file.safe_write_all(&buffer, bytes_read).await?;
                 total.fetch_add(bytes_read as u64, Ordering::Relaxed);
             }
 

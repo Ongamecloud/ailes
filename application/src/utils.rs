@@ -151,16 +151,10 @@ pub fn deduplicate_paths(mut paths: Vec<PathBuf>) -> Vec<PathBuf> {
 
 #[inline]
 pub fn is_valid_utf8_slice(s: &[u8]) -> bool {
-    let mut idx = s.len();
-    while idx > s.len().saturating_sub(4) {
-        if str::from_utf8(&s[..idx]).is_ok() {
-            return true;
-        }
-
-        idx -= 1;
+    match str::from_utf8(s) {
+        Ok(_) => true,
+        Err(e) => e.error_len().is_none(),
     }
-
-    false
 }
 
 pub fn strip_paths(value: &mut serde_json::Value, paths: &[&str]) {

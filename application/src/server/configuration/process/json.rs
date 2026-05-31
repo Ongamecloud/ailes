@@ -76,13 +76,13 @@ pub fn parse_path(raw: &str) -> Vec<PathSegment<'_>> {
             out.push(PathSegment::Key(key));
         }
 
-        while !rest.is_empty() {
-            let Some(end) = rest.find(']') else { break };
-            let idx_str = &rest[1..end];
-            if let Ok(idx) = idx_str.parse::<usize>() {
+        while let Some((head, tail)) = rest.split_once(']') {
+            if let Some(idx_str) = head.strip_prefix('[')
+                && let Ok(idx) = idx_str.parse::<usize>()
+            {
                 out.push(PathSegment::Index(idx));
             }
-            rest = &rest[end + 1..];
+            rest = tail;
         }
     }
 
@@ -110,7 +110,7 @@ pub fn set_nested_value(
         _ => {}
     }
 
-    if tail.is_empty() {
+    let Some(tail_first) = tail.first() else {
         match head {
             PathSegment::Key(k) => {
                 let Some(map) = json.as_object_mut() else {
@@ -126,11 +126,13 @@ pub fn set_nested_value(
                 let Some(arr) = json.as_array_mut() else {
                     return;
                 };
-                let exists = *i < arr.len();
+                let mut arr_element = arr.get_mut(*i);
 
-                if exists && update_existing {
-                    arr[*i] = value;
-                } else if !exists && insert_new {
+                if let Some(el) = arr_element.as_mut()
+                    && update_existing
+                {
+                    **el = value;
+                } else if arr_element.is_none() && insert_new {
                     while arr.len() < *i {
                         arr.push(serde_json::Value::Null);
                     }
@@ -139,11 +141,10 @@ pub fn set_nested_value(
             }
         }
         return;
-    }
+    };
 
-    let next_is_index = matches!(tail[0], PathSegment::Index(_));
     let default_child = || {
-        if next_is_index {
+        if matches!(tail_first, PathSegment::Index(_)) {
             serde_json::Value::Array(Vec::new())
         } else {
             serde_json::Value::Object(serde_json::Map::new())
@@ -167,7 +168,10 @@ pub fn set_nested_value(
             while arr.len() <= *i {
                 arr.push(default_child());
             }
-            set_nested_value(&mut arr[*i], tail, value, insert_new, update_existing);
+            let Some(el) = arr.get_mut(*i) else {
+                return;
+            };
+            set_nested_value(el, tail, value, insert_new, update_existing);
         }
     }
 }

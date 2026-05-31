@@ -1138,7 +1138,10 @@ impl russh_sftp::server::Handler for SftpSession {
             .server
             .filesystem
             .async_allocate_in_path_iterator(
-                &handle.path_components[0..handle.path_components.len() - 1],
+                handle
+                    .path_components
+                    .get(0..handle.path_components.len() - 1)
+                    .ok_or(StatusCode::Failure)?,
                 data.len() as i64,
                 false,
             )

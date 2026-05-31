@@ -245,7 +245,10 @@ impl crate::commands::CliCommand<ServiceInstallArgs> for ServiceInstallCommand {
                             }
                         }
                     }
-                    InitSystem::Auto => unreachable!(),
+                    InitSystem::Auto => {
+                        eprintln!("{}", "failed to detect init system".red());
+                        return Ok(1);
+                    }
                 }
 
                 Ok(0)

@@ -3,6 +3,7 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 
 mod post {
     use crate::{
+        io::{SafeSlice, SafeSliceMut},
         response::{ApiResponse, ApiResponseResult},
         routes::{ApiError, GetState, api::servers::_server_::GetServer},
         server::filesystem::{cap::FileType, virtualfs::DirectoryWalkFn},
@@ -52,16 +53,16 @@ mod post {
         };
 
         loop {
-            let n = reader
-                .read(&mut buffer[valid_bytes..valid_bytes + crate::BUFFER_SIZE])
+            let bytes_read = reader
+                .read(buffer.get_slice_mut(valid_bytes..valid_bytes + crate::BUFFER_SIZE)?)
                 .await?;
 
-            if crate::unlikely(n == 0) {
+            if crate::unlikely(bytes_read == 0) {
                 return Ok(false);
             }
 
-            let data_end = valid_bytes + n;
-            let active_slice = &buffer[..data_end];
+            let data_end = valid_bytes + bytes_read;
+            let active_slice = buffer.get_slice(..data_end)?;
 
             let found = if let Some(f) = &finder {
                 f.find(active_slice).is_some()
@@ -269,7 +270,12 @@ mod post {
                                             };
                                         let mut reader = BufReader::new(file_read.reader);
                                         let buffer = match reader.fill_buf().await {
-                                            Ok(buffer) => buffer[..buffer.len().min(64)].to_vec(),
+                                            Ok(buffer) => {
+                                                match buffer.get_slice(..buffer.len().min(64)) {
+                                                    Ok(slice) => slice.to_vec(),
+                                                    Err(_) => return Ok(()),
+                                                }
+                                            }
                                             Err(_) => return Ok(()),
                                         };
 
@@ -403,11 +409,13 @@ mod post {
                                         };
 
                                         let buf_len = buffer.len().min(128);
-                                        local_buffer[..buf_len].copy_from_slice(&buffer[..buf_len]);
+                                        local_buffer
+                                            .get_slice_mut(..buf_len)?
+                                            .copy_from_slice(buffer.get_slice(..buf_len)?);
 
                                         if metadata.size <= content_filter.max_search_size {
                                             if !crate::utils::is_valid_utf8_slice(
-                                                &local_buffer[..buf_len],
+                                                local_buffer.get_slice(..buf_len)?,
                                             ) {
                                                 return Ok(());
                                             }
@@ -423,7 +431,7 @@ mod post {
                                             }
                                         }
 
-                                        &local_buffer[..buf_len]
+                                        local_buffer.get_slice(..buf_len)?
                                     } else if data
                                         .content_filter
                                         .as_ref()
@@ -442,7 +450,7 @@ mod post {
                                                 Err(_) => return Ok(()),
                                             };
 
-                                        &local_buffer[..bytes_read]
+                                        local_buffer.get_slice(..bytes_read)?
                                     } else {
                                         &[]
                                     };

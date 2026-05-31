@@ -3,6 +3,7 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 
 mod get {
     use crate::{
+        io::SafeDigest,
         response::{ApiResponse, ApiResponseResult},
         routes::{ApiError, api::servers::_server_::GetServer},
     };
@@ -145,7 +146,7 @@ mod get {
                 loop {
                     match file.read(&mut buffer).await? {
                         0 => break,
-                        bytes_read => hasher.update(&buffer[..bytes_read]),
+                        bytes_read => hasher.safe_update(&buffer, bytes_read)?,
                     }
                 }
 

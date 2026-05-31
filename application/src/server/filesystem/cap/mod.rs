@@ -1,5 +1,8 @@
 use crate::{
-    io::abort::{AbortGuard, AbortListener},
+    io::{
+        SafeSlice,
+        abort::{AbortGuard, AbortListener},
+    },
     utils::{PortablePermissions, PortablePermissionsApplier},
 };
 use cap_std::fs::{Metadata, OpenOptions};
@@ -342,15 +345,15 @@ impl CapFilesystem {
         let mut file = self.async_open(path).await?;
         let mut content = Vec::new();
 
-        let mut buf = vec![0; crate::BUFFER_SIZE];
+        let mut buffer = vec![0; crate::BUFFER_SIZE];
         loop {
-            let bytes_read = file.read(&mut buf).await?;
+            let bytes_read = file.read(&mut buffer).await?;
 
             if crate::unlikely(bytes_read == 0) {
                 break;
             }
 
-            content.extend_from_slice(&buf[..bytes_read]);
+            content.extend_from_slice(buffer.get_slice(..bytes_read)?);
 
             if crate::unlikely(content.len() >= limit) {
                 content.truncate(limit);

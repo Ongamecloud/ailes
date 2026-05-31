@@ -3,6 +3,7 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 
 mod post {
     use crate::{
+        io::SafeDigest,
         response::{ApiResponse, ApiResponseResult},
         routes::{ApiError, GetState},
     };
@@ -116,7 +117,7 @@ mod post {
         loop {
             match file.read(&mut buffer).await? {
                 0 => break,
-                bytes_read => hasher.update(&buffer[..bytes_read]),
+                bytes_read => hasher.safe_update(&buffer, bytes_read)?,
             }
         }
 

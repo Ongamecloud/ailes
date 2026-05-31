@@ -1,5 +1,6 @@
 use crate::{
     io::{
+        SafeAsyncWrite,
         compression::{CompressionLevel, writer::CompressionWriter},
         counting_reader::CountingReader,
         fixed_reader::FixedReader,
@@ -97,7 +98,7 @@ impl CmpSortExt for Entry {
                     SizeDesc => b_log.cmp(&a_log),
                     PhysicalSizeAsc => a_phy.cmp(&b_phy),
                     PhysicalSizeDesc => b_phy.cmp(&a_phy),
-                    _ => unreachable!(),
+                    _ => std::cmp::Ordering::Equal,
                 }
             }
             ModifiedAsc | CreatedAsc => self.mtime().cmp(&other.mtime()),
@@ -136,7 +137,7 @@ fn sort_dir_entries_by_size(
                     SizeDesc => b_space.get_logical().cmp(&a_space.get_logical()),
                     PhysicalSizeAsc => a_space.get_physical().cmp(&b_space.get_physical()),
                     PhysicalSizeDesc => b_space.get_physical().cmp(&a_space.get_physical()),
-                    _ => unreachable!(),
+                    _ => std::cmp::Ordering::Equal,
                 }
             });
         }
@@ -795,8 +796,11 @@ impl VirtualReadableFilesystem for VirtualDdupBakArchive {
             loop {
                 match entry_reader.read(&mut buffer) {
                     Ok(0) => break,
-                    Ok(n) => {
-                        if runtime.block_on(writer.write_all(&buffer[..n])).is_err() {
+                    Ok(bytes_read) => {
+                        if runtime
+                            .block_on(writer.safe_write_all(&buffer, bytes_read))
+                            .is_err()
+                        {
                             break;
                         }
                     }
@@ -1151,9 +1155,11 @@ impl VirtualReadableFilesystem for VirtualDdupBakArchive {
                                     loop {
                                         match entry_reader.read(&mut buffer) {
                                             Ok(0) => break,
-                                            Ok(n) => {
+                                            Ok(bytes_read) => {
                                                 if runtime
-                                                    .block_on(writer.write_all(&buffer[..n]))
+                                                    .block_on(
+                                                        writer.safe_write_all(&buffer, bytes_read),
+                                                    )
                                                     .is_err()
                                                 {
                                                     break;

@@ -1,5 +1,6 @@
 use crate::{
     io::{
+        SafeSlice,
         abort::{AbortGuard, AbortWriter},
         compression::{CompressionLevel, CompressionType, writer::CompressionWriter},
         counting_reader::CountingReader,
@@ -107,7 +108,8 @@ pub async fn create_itaf<W: Write + Send + 'static>(
                     };
 
                     let entry_components = path_components(rel);
-                    let entry_dirs = &entry_components[..entry_components.len().saturating_sub(1)];
+                    let entry_dirs =
+                        entry_components.get_slice(..entry_components.len().saturating_sub(1))?;
                     let entry_name = match entry_components.last() {
                         Some(n) => n.clone(),
                         None => continue,
@@ -167,9 +169,9 @@ pub async fn create_itaf<W: Write + Send + 'static>(
                     Some(n) => n.clone(),
                     None => continue,
                 };
-                let enclosing = components[..components.len() - 1].to_vec();
+                let enclosing = components.get_slice(..components.len() - 1)?;
 
-                enter_path_components(&mut archive, &enclosing, &meta)?;
+                enter_path_components(&mut archive, enclosing, &meta)?;
 
                 let file = filesystem.open(&source)?;
                 let reader: Box<dyn Read> = match &bytes_archived {
@@ -191,9 +193,9 @@ pub async fn create_itaf<W: Write + Send + 'static>(
                     Some(n) => n.clone(),
                     None => continue,
                 };
-                let enclosing = components[..components.len() - 1].to_vec();
+                let enclosing = components.get_slice(..components.len() - 1)?;
 
-                enter_path_components(&mut archive, &enclosing, &meta)?;
+                enter_path_components(&mut archive, enclosing, &meta)?;
 
                 let target = link_target.to_string_lossy();
                 if itaf::spec::validate_name(&name).is_ok() {
@@ -262,7 +264,7 @@ pub async fn create_itaf_distributed<W: Write + Send + 'static>(
             }
 
             if metadata.is_dir() {
-                let parent_components = &components[..components.len() - 1];
+                let parent_components = components.get_slice(..components.len() - 1)?;
                 sync_dir_stack_with_meta(
                     &mut archive,
                     &mut dir_stack,
@@ -281,7 +283,7 @@ pub async fn create_itaf_distributed<W: Write + Send + 'static>(
                     bytes_archived.fetch_add(metadata.len(), Ordering::SeqCst);
                 }
             } else if metadata.is_file() {
-                let dir_components = &components[..components.len() - 1];
+                let dir_components = components.get_slice(..components.len() - 1)?;
                 sync_dir_stack_with_meta(
                     &mut archive,
                     &mut dir_stack,
@@ -306,7 +308,7 @@ pub async fn create_itaf_distributed<W: Write + Send + 'static>(
 
                 archive.add_file(name, &meta, metadata.len(), &mut { reader })?;
             } else if let Ok(link_target) = filesystem.read_link_contents(&full) {
-                let dir_components = &components[..components.len() - 1];
+                let dir_components = components.get_slice(..components.len() - 1)?;
                 sync_dir_stack_with_meta(
                     &mut archive,
                     &mut dir_stack,
@@ -379,13 +381,12 @@ fn sync_dir_stack<W: Write>(
         .zip(target.iter())
         .take_while(|(a, b)| a == b)
         .count();
-
     while dir_stack.len() > shared {
         archive.exit_dir()?;
         dir_stack.pop();
     }
 
-    for component in &target[shared..] {
+    for component in target.get_slice(shared..)? {
         let meta = Metadata {
             uid: 0,
             gid: 0,
@@ -411,13 +412,12 @@ fn sync_dir_stack_with_meta<W: Write>(
         .zip(target.iter())
         .take_while(|(a, b)| a == b)
         .count();
-
     while dir_stack.len() > shared {
         archive.exit_dir()?;
         dir_stack.pop();
     }
 
-    for component in &target[shared..] {
+    for component in target.get_slice(shared..)? {
         dir_stack.push(component.to_compact_string());
 
         let mut dir_path = base.to_path_buf();

@@ -90,11 +90,11 @@ async fn fetch_xfs_quota(mount_point: &Path) -> Result<HashMap<u32, i64>, String
     let mut usage_map = HashMap::new();
 
     for line in output_str.lines() {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 2 {
-            let id_str = parts[0].trim_start_matches('#');
+        let mut line_split = line.split_whitespace();
+        if let (Some(id_str), Some(usage_str)) = (line_split.next(), line_split.next()) {
+            let id_str = id_str.trim_start_matches('#');
 
-            if let (Ok(pid), Ok(used)) = (id_str.parse::<u32>(), parts[1].parse::<i64>()) {
+            if let (Ok(pid), Ok(used)) = (id_str.parse::<u32>(), usage_str.parse::<i64>()) {
                 usage_map.insert(pid, used * 1024);
             }
         }
@@ -173,12 +173,12 @@ async fn get_mount_point(path: &Path) -> Result<PathBuf, std::io::Error> {
     }
 
     let output_str = String::from_utf8_lossy(&output.stdout);
-    let lines: Vec<&str> = output_str.lines().collect();
-    if lines.len() < 2 {
-        return Err(std::io::Error::other("Unexpected output format"));
-    }
+    let line = output_str
+        .lines()
+        .nth(1)
+        .ok_or_else(|| std::io::Error::other("Unexpected output format from df command"))?;
 
-    Ok(PathBuf::from(lines[1].trim()))
+    Ok(PathBuf::from(line.trim()))
 }
 
 pub struct XfsQuotaLimiter<'a> {

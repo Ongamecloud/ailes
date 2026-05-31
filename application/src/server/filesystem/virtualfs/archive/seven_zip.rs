@@ -1,5 +1,6 @@
 use crate::{
     io::{
+        SafeAsyncWrite, SafeSlice, SafeWrite,
         compression::{CompressionLevel, writer::CompressionWriter},
         counting_reader::CountingReader,
     },
@@ -371,14 +372,14 @@ impl VirtualReadableFilesystem for VirtualSevenZipArchive {
                     }
                 };
 
-                match archive.stream_map.file_block_index[entry_index] {
-                    Some(block_index)
+                match archive.stream_map.file_block_index.get(entry_index) {
+                    Some(Some(block_index))
                         if !mime_cache.contains_key(&entry_index) && !entry.is_directory() =>
                     {
                         let password = sevenz_rust2::Password::empty();
                         let folder = sevenz_rust2::BlockDecoder::new(
                             1,
-                            block_index,
+                            *block_index,
                             &archive,
                             &password,
                             &mut reader,
@@ -558,11 +559,11 @@ impl VirtualReadableFilesystem for VirtualSevenZipArchive {
                 directory_entries.sort_by(|a, b| {
                     let (a_path, a_real) = match a {
                         DirItem::Dir { path, real_entry } => (path, real_entry.as_ref()),
-                        _ => unreachable!(),
+                        _ => return std::cmp::Ordering::Equal,
                     };
                     let (b_path, b_real) = match b {
                         DirItem::Dir { path, real_entry } => (path, real_entry.as_ref()),
-                        _ => unreachable!(),
+                        _ => return std::cmp::Ordering::Equal,
                     };
 
                     match sort {
@@ -585,7 +586,7 @@ impl VirtualReadableFilesystem for VirtualSevenZipArchive {
                                 DirectorySortingMode::PhysicalSizeDesc => {
                                     b_space.get_physical().cmp(&a_space.get_physical())
                                 }
-                                _ => unreachable!(),
+                                _ => std::cmp::Ordering::Equal,
                             }
                         }
                         _ => match (a_real, b_real) {
@@ -648,12 +649,12 @@ impl VirtualReadableFilesystem for VirtualSevenZipArchive {
                             let entry_path = Path::new(archive_entry.name());
                             let needs_read = !mime_cache.contains_key(&entry_index);
 
-                            match archive.stream_map.file_block_index[entry_index] {
-                                Some(block_index) if needs_read => {
+                            match archive.stream_map.file_block_index.get(entry_index) {
+                                Some(Some(block_index)) if needs_read => {
                                     let password = sevenz_rust2::Password::empty();
                                     let folder = sevenz_rust2::BlockDecoder::new(
                                         1,
-                                        block_index,
+                                        *block_index,
                                         &archive,
                                         &password,
                                         &mut reader,
@@ -789,9 +790,11 @@ impl VirtualReadableFilesystem for VirtualSevenZipArchive {
                 if (is_ignored)(file_type, name_path.to_path_buf()).is_some() {
                     if entry.is_directory() {
                         loose_files.push_back((entry.name().to_string(), file_type));
-                    } else if let Some(block_index) = archive.stream_map.file_block_index[i] {
+                    } else if let Some(Some(block_index)) =
+                        archive.stream_map.file_block_index.get(i)
+                    {
                         target_files_by_block
-                            .entry(block_index)
+                            .entry(*block_index)
                             .or_default()
                             .insert(entry.name().to_string());
                     } else {
@@ -817,7 +820,9 @@ impl VirtualReadableFilesystem for VirtualSevenZipArchive {
             sorted_blocks.sort_unstable();
 
             for block_index in sorted_blocks {
-                let targets = &target_files_by_block[&block_index];
+                let Some(targets) = &target_files_by_block.get(&block_index) else {
+                    continue;
+                };
 
                 let password = sevenz_rust2::Password::empty();
                 let folder = sevenz_rust2::BlockDecoder::new(
@@ -847,9 +852,11 @@ impl VirtualReadableFilesystem for VirtualSevenZipArchive {
                         loop {
                             match entry_reader.read(&mut buffer) {
                                 Ok(0) => break,
-                                Ok(n) => {
+                                Ok(bytes_read) => {
                                     if runtime
-                                        .block_on(simplex_writer.write_all(&buffer[..n]))
+                                        .block_on(
+                                            simplex_writer.safe_write_all(&buffer, bytes_read),
+                                        )
                                         .is_err()
                                     {
                                         break;
@@ -912,11 +919,11 @@ impl VirtualReadableFilesystem for VirtualSevenZipArchive {
         let (pipe_reader, mut writer) = std::io::pipe()?;
 
         tokio::task::spawn_blocking(move || {
-            if let Some(block_index) = archive.stream_map.file_block_index[entry_index] {
+            if let Some(Some(block_index)) = archive.stream_map.file_block_index.get(entry_index) {
                 let password = sevenz_rust2::Password::empty();
                 let folder = sevenz_rust2::BlockDecoder::new(
                     1,
-                    block_index,
+                    *block_index,
                     &archive,
                     &password,
                     &mut reader,
@@ -933,8 +940,8 @@ impl VirtualReadableFilesystem for VirtualSevenZipArchive {
                     loop {
                         match reader.read(&mut buffer) {
                             Ok(0) => break,
-                            Ok(n) => {
-                                if writer.write_all(&buffer[..n]).is_err() {
+                            Ok(bytes_read) => {
+                                if writer.safe_write_all(&buffer, bytes_read).is_err() {
                                     break;
                                 }
                             }
@@ -981,11 +988,11 @@ impl VirtualReadableFilesystem for VirtualSevenZipArchive {
         tokio::task::spawn_blocking(move || {
             let runtime = tokio::runtime::Handle::current();
 
-            if let Some(block_index) = archive.stream_map.file_block_index[entry_index] {
+            if let Some(Some(block_index)) = archive.stream_map.file_block_index.get(entry_index) {
                 let password = sevenz_rust2::Password::empty();
                 let folder = sevenz_rust2::BlockDecoder::new(
                     1,
-                    block_index,
+                    *block_index,
                     &archive,
                     &password,
                     &mut reader,
@@ -1002,8 +1009,11 @@ impl VirtualReadableFilesystem for VirtualSevenZipArchive {
                     loop {
                         match reader.read(&mut buffer) {
                             Ok(0) => break,
-                            Ok(n) => {
-                                if runtime.block_on(writer.write_all(&buffer[..n])).is_err() {
+                            Ok(bytes_read) => {
+                                if runtime
+                                    .block_on(writer.safe_write_all(&buffer, bytes_read))
+                                    .is_err()
+                                {
                                     break;
                                 }
                             }
@@ -1111,11 +1121,13 @@ impl VirtualReadableFilesystem for VirtualSevenZipArchive {
                         } else {
                             zip.start_file(name.to_string_lossy(), zip_options)?;
 
-                            if let Some(block_index) = archive.stream_map.file_block_index[i] {
+                            if let Some(Some(block_index)) =
+                                archive.stream_map.file_block_index.get(i)
+                            {
                                 let password = sevenz_rust2::Password::empty();
                                 let folder = sevenz_rust2::BlockDecoder::new(
                                     1,
-                                    block_index,
+                                    *block_index,
                                     &archive,
                                     &password,
                                     &mut reader,
@@ -1205,11 +1217,13 @@ impl VirtualReadableFilesystem for VirtualSevenZipArchive {
                             entry_header.set_entry_type(tar::EntryType::Regular);
                             entry_header.set_size(entry.size);
 
-                            if let Some(block_index) = archive.stream_map.file_block_index[i] {
+                            if let Some(Some(block_index)) =
+                                archive.stream_map.file_block_index.get(i)
+                            {
                                 let password = sevenz_rust2::Password::empty();
                                 let folder = sevenz_rust2::BlockDecoder::new(
                                     1,
-                                    block_index,
+                                    *block_index,
                                     &archive,
                                     &password,
                                     &mut reader,
@@ -1309,7 +1323,7 @@ impl VirtualReadableFilesystem for VirtualSevenZipArchive {
                             continue;
                         };
 
-                        let parent = &components[..components.len() - 1];
+                        let parent = components.get_slice(..components.len() - 1)?;
 
                         let shared = dir_stack
                             .iter()
@@ -1320,7 +1334,8 @@ impl VirtualReadableFilesystem for VirtualSevenZipArchive {
                             itaf_enc.exit_dir()?;
                             dir_stack.pop();
                         }
-                        for component in &parent[shared..] {
+
+                        for component in parent.get_slice(shared..)? {
                             itaf_enc.enter_dir(
                                 component,
                                 &Metadata {
@@ -1333,7 +1348,9 @@ impl VirtualReadableFilesystem for VirtualSevenZipArchive {
                             dir_stack.push(component.to_compact_string());
                         }
 
-                        let entry = &archive.files[entry_index];
+                        let Some(entry) = &archive.files.get(entry_index) else {
+                            continue;
+                        };
                         let mtime = if entry.has_last_modified_date {
                             std::time::SystemTime::from(entry.last_modified_date)
                         } else {
@@ -1347,12 +1364,13 @@ impl VirtualReadableFilesystem for VirtualSevenZipArchive {
                         };
                         let size = entry.size;
 
-                        if let Some(block_index) = archive.stream_map.file_block_index[entry_index]
+                        if let Some(Some(block_index)) =
+                            archive.stream_map.file_block_index.get(entry_index)
                         {
                             let password = sevenz_rust2::Password::empty();
                             let folder = sevenz_rust2::BlockDecoder::new(
                                 1,
-                                block_index,
+                                *block_index,
                                 &archive,
                                 &password,
                                 &mut reader,

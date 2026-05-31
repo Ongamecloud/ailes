@@ -1,5 +1,6 @@
 use crate::{
     io::{
+        SafeDigest,
         compression::{CompressionLevel, writer::CompressionWriter},
         counting_reader::CountingReader,
         fixed_reader::FixedReader,
@@ -425,7 +426,7 @@ impl BackupCreateExt for DdupBakBackup {
                 break;
             }
 
-            sha1.update(&buffer[..bytes_read]);
+            sha1.safe_update(&buffer, bytes_read)?;
         }
 
         Ok(RawServerBackup {

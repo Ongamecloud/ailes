@@ -1007,12 +1007,12 @@ impl DockerOverhead {
             return 1.05;
         }
 
-        for m in self.multipliers.keys().copied().rev() {
-            if memory > m {
+        for (m, v) in self.multipliers.iter().rev() {
+            if memory > *m {
                 continue;
             }
 
-            return self.multipliers[&m];
+            return *v;
         }
 
         self.default_multiplier
@@ -1675,12 +1675,9 @@ impl Config {
                     let mut attempts = 0;
                     loop {
                         fn increment_ip_or_cidr(ip: &str) -> String {
-                            let network_mask = if let Some(slash) = ip.find('/') {
-                                &ip[slash..]
-                            } else {
-                                ""
+                            let Some((ip, network_mask)) = ip.split_once('/') else {
+                                return ip.into();
                             };
-                            let ip = ip.trim_end_matches(network_mask);
 
                             if let Ok(ip) = ip.parse::<std::net::Ipv4Addr>() {
                                 let octets = ip.octets();

@@ -117,18 +117,20 @@ pub struct DiskUsage {
 impl DiskUsage {
     fn upsert_entry(&mut self, key: &str) -> &mut DiskUsage {
         match self.entries.binary_search_by(|a| a.0.as_str().cmp(key)) {
-            Ok(idx) => &mut self.entries[idx].1,
+            // SAFETY: The binary search guarantees that the index is within bounds, and the entry at that index has the same key as the provided key.
+            Ok(idx) => unsafe { &mut self.entries.get_unchecked_mut(idx).1 },
             Err(idx) => {
                 self.entries
                     .insert(idx, (key.to_compact_string(), DiskUsage::default()));
-                &mut self.entries[idx].1
+                // SAFETY: We just inserted an entry at the index, so it is guaranteed to be within bounds, and the entry at that index has the same key as the provided key.
+                unsafe { &mut self.entries.get_unchecked_mut(idx).1 }
             }
         }
     }
 
     fn get_mut_entry(&mut self, key: &str) -> Option<&mut DiskUsage> {
         if let Ok(idx) = self.entries.binary_search_by(|a| a.0.as_str().cmp(key)) {
-            Some(&mut self.entries[idx].1)
+            Some(&mut self.entries.get_mut(idx)?.1)
         } else {
             None
         }
@@ -159,7 +161,7 @@ impl DiskUsage {
                 .entries
                 .binary_search_by(|(n, _)| n.as_str().cmp(name))
                 .ok()?;
-            current = &current.entries[idx].1;
+            current = &current.entries.get(idx)?.1;
         }
 
         Some(current.space)
@@ -177,7 +179,7 @@ impl DiskUsage {
                 .entries
                 .binary_search_by(|(n, _)| n.as_str().cmp(name))
                 .ok()?;
-            current = &current.entries[idx].1;
+            current = &current.entries.get(idx)?.1;
         }
 
         Some(current)

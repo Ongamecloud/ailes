@@ -1440,7 +1440,7 @@ impl Filesystem {
                         Ok(mut file) => {
                             let bytes_read = file.read(&mut buffer).await.unwrap_or(0);
 
-                            Some(&buffer[..bytes_read])
+                            buffer.get(..bytes_read)
                         }
                         Err(_) => None,
                     }

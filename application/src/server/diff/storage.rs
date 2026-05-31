@@ -317,17 +317,22 @@ impl Storage {
         }
 
         chain.reverse();
+
+        let (Some(chain_first), Some(chain_slice)) = (chain.first(), chain.get(1..)) else {
+            return Err(anyhow::anyhow!("revision {id} not found"));
+        };
+
         let mut content =
-            zstd::decode_all(&chain[0].2[..]).context("decode snapshot at chain head")?;
+            zstd::decode_all(&chain_first.2[..]).context("decode snapshot at chain head")?;
         let h = blake3::hash(&content);
-        if h.as_bytes() != &chain[0].3 {
+        if h.as_bytes() != &chain_first.3 {
             return Err(anyhow::anyhow!(
                 "content hash mismatch at chain head (revision {})",
-                chain[0].0
+                chain_first.0
             ));
         }
 
-        for step in &chain[1..] {
+        for step in chain_slice {
             let next = decode_with_dictionary(&step.2, &content)?;
             let h = blake3::hash(&next);
             if h.as_bytes() != &step.3 {

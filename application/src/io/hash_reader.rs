@@ -1,3 +1,4 @@
+use crate::io::{SafeDigest, SafeSlice};
 use sha1::{Digest, digest::Output};
 use std::{
     io::Read,
@@ -29,7 +30,7 @@ impl<H: Digest, R: Read> Read for HashReader<H, R> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let bytes_read = self.inner.read(buf)?;
 
-        self.hasher.update(&buf[..bytes_read]);
+        self.hasher.safe_update(buf, bytes_read)?;
 
         Ok(bytes_read)
     }
@@ -60,8 +61,12 @@ impl<H: Digest + Unpin, R: AsyncRead + Unpin> AsyncRead for AsyncHashReader<H, R
         let poll_result = Pin::new(&mut self.inner).poll_read(cx, buf);
 
         if let Poll::Ready(Ok(())) = &poll_result {
-            let filled_after = buf.filled().len();
-            let newly_filled = &buf.filled()[filled_before..filled_after];
+            let newly_filled = buf.filled();
+            let filled_after = newly_filled.len();
+            let newly_filled = match newly_filled.get_slice(filled_before..filled_after) {
+                Ok(slice) => slice,
+                Err(err) => return Poll::Ready(Err(err)),
+            };
 
             self.hasher.update(newly_filled);
         }

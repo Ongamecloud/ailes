@@ -3,6 +3,7 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 
 mod get {
     use crate::{
+        io::{SafeDigest, SafeSlice, SafeWrite},
         response::{ApiResponse, ApiResponseResult},
         routes::api::servers::_server_::GetServer,
     };
@@ -111,7 +112,7 @@ mod get {
                                     break;
                                 }
 
-                                hasher.consume(&buffer[..bytes_read]);
+                                hasher.safe_write_all(&buffer, bytes_read)?;
                             }
 
                             compact_str::format_compact!("{:x}", hasher.finalize())
@@ -121,11 +122,11 @@ mod get {
 
                             loop {
                                 let bytes_read = file.read(&mut buffer).await?;
-                                if bytes_read == 0 {
+                                if crate::unlikely(bytes_read == 0) {
                                     break;
                                 }
 
-                                hasher.update(&buffer[..bytes_read]);
+                                hasher.update(buffer.get_slice(..bytes_read)?);
                             }
 
                             compact_str::format_compact!("{:x}", hasher.finalize())
@@ -135,11 +136,11 @@ mod get {
 
                             loop {
                                 let bytes_read = file.read(&mut buffer).await?;
-                                if bytes_read == 0 {
+                                if crate::unlikely(bytes_read == 0) {
                                     break;
                                 }
 
-                                hasher.update(&buffer[..bytes_read]);
+                                hasher.safe_update(&buffer, bytes_read)?;
                             }
 
                             hex::encode(hasher.finalize()).into()
@@ -149,11 +150,11 @@ mod get {
 
                             loop {
                                 let bytes_read = file.read(&mut buffer).await?;
-                                if bytes_read == 0 {
+                                if crate::unlikely(bytes_read == 0) {
                                     break;
                                 }
 
-                                hasher.update(&buffer[..bytes_read]);
+                                hasher.safe_update(&buffer, bytes_read)?;
                             }
 
                             hex::encode(hasher.finalize()).into()
@@ -163,11 +164,11 @@ mod get {
 
                             loop {
                                 let bytes_read = file.read(&mut buffer).await?;
-                                if bytes_read == 0 {
+                                if crate::unlikely(bytes_read == 0) {
                                     break;
                                 }
 
-                                hasher.update(&buffer[..bytes_read]);
+                                hasher.safe_update(&buffer, bytes_read)?;
                             }
 
                             hex::encode(hasher.finalize()).into()
@@ -177,11 +178,11 @@ mod get {
 
                             loop {
                                 let bytes_read = file.read(&mut buffer).await?;
-                                if bytes_read == 0 {
+                                if crate::unlikely(bytes_read == 0) {
                                     break;
                                 }
 
-                                hasher.update(&buffer[..bytes_read]);
+                                hasher.safe_update(&buffer, bytes_read)?;
                             }
 
                             hex::encode(hasher.finalize()).into()
@@ -191,11 +192,11 @@ mod get {
 
                             loop {
                                 let bytes_read = file.read(&mut buffer).await?;
-                                if bytes_read == 0 {
+                                if crate::unlikely(bytes_read == 0) {
                                     break;
                                 }
 
-                                hasher.update(&buffer[..bytes_read]);
+                                hasher.safe_update(&buffer, bytes_read)?;
                             }
 
                             hex::encode(hasher.finalize()).into()
@@ -212,11 +213,11 @@ mod get {
 
                             loop {
                                 let bytes_read = file.read(&mut buffer).await?;
-                                if bytes_read == 0 {
+                                if crate::unlikely(bytes_read == 0) {
                                     break;
                                 }
 
-                                for &b in &buffer[..bytes_read] {
+                                for &b in buffer.get_slice(..bytes_read)? {
                                     if !is_ignored_in_curseforge_fingerprint(b) {
                                         normalized_length = normalized_length.wrapping_add(1);
                                     }
@@ -233,11 +234,11 @@ mod get {
 
                             loop {
                                 let bytes_read = file.read(&mut buffer).await?;
-                                if bytes_read == 0 {
+                                if crate::unlikely(bytes_read == 0) {
                                     break;
                                 }
 
-                                for &b in &buffer[..bytes_read] {
+                                for &b in buffer.get_slice(..bytes_read)? {
                                     if !is_ignored_in_curseforge_fingerprint(b) {
                                         num3 |= (b as u32) << num4;
                                         num4 = num4.wrapping_add(8);

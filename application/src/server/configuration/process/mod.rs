@@ -79,24 +79,24 @@ impl ServerConfigurationFile {
         );
 
         let parts: Vec<&str> = variable.split('.').collect();
-        if parts.is_empty() {
+        let (Some(section), Some(section_slice)) = (parts.first(), parts.get(1..)) else {
             tracing::error!(
                 server = %server.uuid,
                 "empty variable path"
             );
             return Ok(compact_str::CompactString::default());
-        }
+        };
 
-        match parts[0] {
-            "server" => Self::lookup_server_variable(server, &parts[1..]).await,
-            "config" => Self::lookup_config_variable(&server.app_state.config, &parts[1..]).await,
+        match *section {
+            "server" => Self::lookup_server_variable(server, section_slice).await,
+            "config" => Self::lookup_config_variable(&server.app_state.config, section_slice).await,
             "env" => {
-                if parts.len() < 2 {
+                let Some(env_var) = parts.get(1) else {
                     return Ok(compact_str::CompactString::default());
-                }
+                };
+
                 let config = server.configuration.read().await;
-                let env_var = parts[1];
-                if let Some(value) = config.environment.get(env_var) {
+                if let Some(value) = config.environment.get(*env_var) {
                     Ok(value
                         .as_str()
                         .map_or_else(|| value.to_compact_string(), |v| v.into()))
@@ -109,11 +109,11 @@ impl ServerConfigurationFile {
                     Ok(compact_str::CompactString::default())
                 }
             }
-            _ => {
+            part => {
                 tracing::error!(
                     server = %server.uuid,
                     "unknown variable prefix: {}",
-                    parts[0]
+                    part
                 );
                 Ok(compact_str::CompactString::default())
             }
@@ -124,19 +124,19 @@ impl ServerConfigurationFile {
         server: &crate::server::Server,
         parts: &[&str],
     ) -> Result<compact_str::CompactString, anyhow::Error> {
-        if parts.is_empty() {
+        let Some(section) = parts.first() else {
             return Ok(compact_str::CompactString::default());
-        }
+        };
 
         let config = server.configuration.read().await;
 
-        match parts[0] {
+        match *section {
             "build" => {
-                if parts.len() < 2 {
+                let Some(subpath) = parts.get(1) else {
                     return Ok(compact_str::CompactString::default());
-                }
+                };
 
-                match parts[1] {
+                match *subpath {
                     "memory" => Ok(config.build.memory_limit.to_compact_string()),
                     "swap" => Ok(config.build.swap.to_compact_string()),
                     "io" => Ok(config
@@ -147,10 +147,11 @@ impl ServerConfigurationFile {
                     "disk" => Ok(config.build.disk_space.to_compact_string()),
                     "threads" => Ok(config.build.threads.clone().unwrap_or_default()),
                     "default" => {
-                        if parts.len() < 3 {
+                        let Some(subpath) = parts.get(2) else {
                             return Ok(compact_str::CompactString::default());
-                        }
-                        match parts[2] {
+                        };
+
+                        match *subpath {
                             "port" => Ok(config
                                 .allocations
                                 .default
@@ -163,22 +164,22 @@ impl ServerConfigurationFile {
                                 .as_ref()
                                 .map(|d| d.ip.to_compact_string())
                                 .unwrap_or_default()),
-                            _ => {
+                            part => {
                                 tracing::error!(
                                     server = %server.uuid,
                                     "unknown server.build.default subpath: {}",
-                                    parts[2]
+                                    part
                                 );
                                 Ok(compact_str::CompactString::default())
                             }
                         }
                     }
                     "env" => {
-                        if parts.len() < 3 {
+                        let Some(env_var) = parts.get(2) else {
                             return Ok(compact_str::CompactString::default());
-                        }
-                        let env_var = parts[2];
-                        if let Some(value) = config.environment.get(env_var) {
+                        };
+
+                        if let Some(value) = config.environment.get(*env_var) {
                             Ok(value
                                 .as_str()
                                 .map_or_else(|| value.to_compact_string(), |v| v.into()))
@@ -195,18 +196,18 @@ impl ServerConfigurationFile {
                         tracing::error!(
                             server = %server.uuid,
                             "unknown server.build subpath: {}",
-                            parts[1]
+                            subpath
                         );
                         Ok(compact_str::CompactString::default())
                     }
                 }
             }
             "env" => {
-                if parts.len() < 2 {
+                let Some(env_var) = parts.get(1) else {
                     return Ok(compact_str::CompactString::default());
-                }
-                let env_var = parts[1];
-                if let Some(value) = config.environment.get(env_var) {
+                };
+
+                if let Some(value) = config.environment.get(*env_var) {
                     Ok(value
                         .as_str()
                         .map_or_else(|| value.to_compact_string(), |v| v.into()))
@@ -219,11 +220,11 @@ impl ServerConfigurationFile {
                     Ok(compact_str::CompactString::default())
                 }
             }
-            _ => {
+            part => {
                 tracing::error!(
                     server = %server.uuid,
                     "unknown server section: {}",
-                    parts[0]
+                    part
                 );
                 Ok(compact_str::CompactString::default())
             }
@@ -234,7 +235,7 @@ impl ServerConfigurationFile {
         config: &crate::config::Config,
         parts: &[&str],
     ) -> Result<compact_str::CompactString, anyhow::Error> {
-        if parts.is_empty() || parts[0] == "token_id" || parts[0] == "token" {
+        if parts.is_empty() {
             return Ok(compact_str::CompactString::default());
         }
 

@@ -1,6 +1,6 @@
 use crate::{
     io::{
-        compression::reader::CompressionReaderMt, counting_reader::CountingReader,
+        SafeDigest, compression::reader::CompressionReaderMt, counting_reader::CountingReader,
         limited_reader::LimitedReader, limited_writer::LimitedWriter,
         range_reader::AsyncRangeReader,
     },
@@ -278,7 +278,7 @@ impl BackupCreateExt for WingsBackup {
         loop {
             match file.read(&mut buffer).await? {
                 0 => break,
-                bytes_read => checksum_writer.update(&buffer[..bytes_read]),
+                bytes_read => checksum_writer.safe_update(&buffer, bytes_read)?,
             }
         }
 

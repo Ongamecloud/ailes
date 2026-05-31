@@ -1,3 +1,4 @@
+use crate::io::SafeSliceMut;
 use std::{
     collections::VecDeque,
     io::{Cursor, SeekFrom},
@@ -29,11 +30,11 @@ pub async fn async_tail<R: AsyncRead + AsyncSeek + Unpin>(
         current_pos -= read_size;
 
         reader.seek(SeekFrom::Start(current_pos)).await?;
-        let chunk = &mut buf[..read_size as usize];
+        let chunk = buf.get_slice_mut(..read_size as usize)?;
         reader.read_exact(chunk).await?;
 
         for i in (0..read_size as usize).rev() {
-            if chunk[i] == b'\n' {
+            if chunk.get(i) == Some(&b'\n') {
                 if current_pos + (i as u64) == file_size - 1 {
                     continue;
                 }

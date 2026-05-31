@@ -1,5 +1,6 @@
 use crate::{
     io::{
+        SafeSlice, SafeWrite,
         compression::{CompressionLevel, writer::CompressionWriter},
         counting_reader::CountingReader,
     },
@@ -132,7 +133,7 @@ impl ResticTreeNode {
                     file_type: match entry.r#type {
                         ResticEntryType::File => FileType::File,
                         ResticEntryType::Symlink => FileType::Symlink,
-                        ResticEntryType::Dir => unreachable!(),
+                        ResticEntryType::Dir => FileType::Dir,
                     },
                     mode: entry.mode,
                     size: entry.size.unwrap_or(0),
@@ -140,7 +141,8 @@ impl ResticTreeNode {
                 };
                 let leaf_name = leaf.to_compact_string();
                 match parent.files.binary_search_by(|(n, _)| n.as_str().cmp(leaf)) {
-                    Ok(idx) => parent.files[idx].1 = meta,
+                    // SAFETY: `idx` is guaranteed to be a valid index into `parent.files` due to the logic above.
+                    Ok(idx) => unsafe { parent.files.get_unchecked_mut(idx) }.1 = meta,
                     Err(idx) => parent.files.insert(idx, (leaf_name, meta)),
                 }
             }
@@ -159,7 +161,8 @@ impl ResticTreeNode {
                     idx
                 }
             };
-            current = &mut current.dirs[idx].1;
+            // SAFETY: `idx` is guaranteed to be a valid index into `current.dirs` due to the logic above.
+            current = unsafe { &mut current.dirs.get_unchecked_mut(idx).1 };
         }
         current
     }
@@ -184,7 +187,7 @@ impl ResticTreeNode {
                 .dirs
                 .binary_search_by(|(n, _)| n.as_str().cmp(name))
                 .ok()?;
-            current = &current.dirs[idx].1;
+            current = &current.dirs.get(idx)?.1;
         }
         Some(current)
     }
@@ -198,7 +201,7 @@ impl ResticTreeNode {
             .files
             .binary_search_by(|(n, _)| n.as_str().cmp(leaf))
             .ok()?;
-        Some(&parent.files[idx].1)
+        Some(&parent.files.get(idx)?.1)
     }
 }
 
@@ -905,7 +908,7 @@ impl BackupExt for ResticBackup {
                         };
 
                         let is_dir = header.entry_type() == tar::EntryType::Directory;
-                        let parent = &components[..components.len() - 1];
+                        let parent = components.get_slice(..components.len() - 1)?;
 
                         let mode = header.mode().unwrap_or(if is_dir { 0o755 } else { 0o644 });
                         let mtime = header
@@ -928,7 +931,8 @@ impl BackupExt for ResticBackup {
                             itaf_enc.exit_dir()?;
                             dir_stack.pop();
                         }
-                        for component in &parent[shared..] {
+
+                        for component in parent.get_slice(shared..)? {
                             itaf_enc.enter_dir(
                                 component,
                                 &Metadata {
@@ -1868,13 +1872,14 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
                                 zip.start_file(relative.to_string_lossy(), options)?;
 
                                 loop {
-                                    let n = entry.read(&mut read_buffer)?;
-                                    if n == 0 {
+                                    let bytes_read = entry.read(&mut read_buffer)?;
+                                    if crate::unlikely(bytes_read == 0) {
                                         break;
                                     }
-                                    zip.write_all(&read_buffer[..n])?;
+
+                                    zip.safe_write_all(&read_buffer, bytes_read)?;
                                     if let Some(counter) = &bytes_archived {
-                                        counter.fetch_add(n as u64, Ordering::SeqCst);
+                                        counter.fetch_add(bytes_read as u64, Ordering::SeqCst);
                                     }
                                 }
                             }
@@ -1995,7 +2000,7 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
                         };
 
                         let is_dir = file_type.is_dir();
-                        let parent = &components[..components.len() - 1];
+                        let parent = components.get_slice(..components.len() - 1)?;
 
                         let mode = header.mode().unwrap_or(if is_dir { 0o755 } else { 0o644 });
                         let mtime = header
@@ -2018,7 +2023,8 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
                             itaf_enc.exit_dir()?;
                             dir_stack.pop();
                         }
-                        for component in &parent[shared..] {
+
+                        for component in parent.get_slice(shared..)? {
                             itaf_enc.enter_dir(
                                 component,
                                 &Metadata {
@@ -2240,13 +2246,17 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
                                             zip.start_file(relative.to_string_lossy(), options)?;
 
                                             loop {
-                                                let n = entry.read(&mut read_buffer)?;
-                                                if n == 0 {
+                                                let bytes_read = entry.read(&mut read_buffer)?;
+                                                if crate::unlikely(bytes_read == 0) {
                                                     break;
                                                 }
-                                                zip.write_all(&read_buffer[..n])?;
+
+                                                zip.safe_write_all(&read_buffer, bytes_read)?;
                                                 if let Some(counter) = &bytes_archived {
-                                                    counter.fetch_add(n as u64, Ordering::SeqCst);
+                                                    counter.fetch_add(
+                                                        bytes_read as u64,
+                                                        Ordering::SeqCst,
+                                                    );
                                                 }
                                             }
                                         }
@@ -2283,13 +2293,14 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
                                 let mut restic_file = child.take_stdout()?;
 
                                 loop {
-                                    let n = restic_file.read(&mut read_buffer)?;
-                                    if n == 0 {
+                                    let bytes_read = restic_file.read(&mut read_buffer)?;
+                                    if crate::unlikely(bytes_read == 0) {
                                         break;
                                     }
-                                    zip.write_all(&read_buffer[..n])?;
+
+                                    zip.safe_write_all(&read_buffer, bytes_read)?;
                                     if let Some(counter) = &bytes_archived {
-                                        counter.fetch_add(n as u64, Ordering::SeqCst);
+                                        counter.fetch_add(bytes_read as u64, Ordering::SeqCst);
                                     }
                                 }
                             }
@@ -2444,7 +2455,7 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
                                     continue;
                                 };
 
-                                let parent = &components[..components.len() - 1];
+                                let parent = components.get_slice(..components.len() - 1)?;
 
                                 let shared = dir_stack
                                     .iter()
@@ -2455,7 +2466,8 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
                                     itaf_enc.exit_dir()?;
                                     dir_stack.pop();
                                 }
-                                for component in &parent[shared..] {
+
+                                for component in parent.get_slice(shared..)? {
                                     itaf_enc.enter_dir(
                                         component,
                                         &Metadata {
@@ -2518,9 +2530,10 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
                                     };
 
                                     let inner_parent =
-                                        &inner_components[..inner_components.len() - 1];
+                                        inner_components.get_slice(..inner_components.len() - 1)?;
 
-                                    let shared = dir_stack[base_depth..]
+                                    let shared = dir_stack
+                                        .get_slice(base_depth..)?
                                         .iter()
                                         .zip(inner_parent.iter())
                                         .take_while(|(a, b)| a == b)
@@ -2529,7 +2542,8 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
                                         itaf_enc.exit_dir()?;
                                         dir_stack.pop();
                                     }
-                                    for component in &inner_parent[shared..] {
+
+                                    for component in inner_parent.get_slice(shared..)? {
                                         itaf_enc.enter_dir(
                                             component,
                                             &Metadata {
@@ -2622,7 +2636,7 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
                                     continue;
                                 };
 
-                                let parent = &components[..components.len() - 1];
+                                let parent = components.get_slice(..components.len() - 1)?;
 
                                 let shared = dir_stack
                                     .iter()
@@ -2633,7 +2647,8 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
                                     itaf_enc.exit_dir()?;
                                     dir_stack.pop();
                                 }
-                                for component in &parent[shared..] {
+
+                                for component in parent.get_slice(shared..)? {
                                     itaf_enc.enter_dir(
                                         component,
                                         &Metadata {

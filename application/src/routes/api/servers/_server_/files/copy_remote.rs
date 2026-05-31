@@ -3,7 +3,10 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 
 mod post {
     use crate::{
-        io::{compression::CompressionLevel, counting_reader::AsyncCountingReader},
+        io::{
+            SafeAsyncWrite, SafeDigest, compression::CompressionLevel,
+            counting_reader::AsyncCountingReader,
+        },
         response::{ApiResponse, ApiResponseResult},
         routes::{ApiError, GetState, api::servers::_server_::GetServer},
         server::{
@@ -402,8 +405,8 @@ mod post {
                                         break;
                                     }
 
-                                    hasher.update(&buffer[..bytes_read]);
-                                    writer.write_all(&buffer[..bytes_read]).await?;
+                                    hasher.safe_update(&buffer, bytes_read)?;
+                                    writer.safe_write_all(&buffer, bytes_read).await?;
                                 }
 
                                 checksum_sender.send(hex::encode(hasher.finalize())).ok();

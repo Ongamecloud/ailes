@@ -96,15 +96,15 @@ pub fn set_nested_value(
         return;
     };
 
-    if tail.is_empty() {
+    let Some(tail_first) = tail.first() else {
         let exists = table.contains_key(k);
         if (exists && update_existing) || (!exists && insert_new) {
             table.insert(k, Item::Value(value));
         }
         return;
-    }
+    };
 
-    match &tail[0] {
+    match tail_first {
         super::json::PathSegment::Key(_) => {
             let child = table.entry(k).or_insert(Item::Table(Table::new()));
             if let Some(child_table) = child.as_table_like_mut() {
@@ -130,7 +130,7 @@ fn set_in_array_under_key(
     };
     let i = *i;
 
-    if rest.is_empty() {
+    let Some(rest_first) = rest.first() else {
         let child = table
             .entry(key)
             .or_insert(Item::Value(Value::Array(Array::new())));
@@ -149,7 +149,11 @@ fn set_in_array_under_key(
             }
             arr.push(value);
         }
-    } else if matches!(rest[0], super::json::PathSegment::Key(_)) {
+
+        return;
+    };
+
+    if matches!(rest_first, super::json::PathSegment::Key(_)) {
         let child = table
             .entry(key)
             .or_insert(Item::ArrayOfTables(ArrayOfTables::new()));

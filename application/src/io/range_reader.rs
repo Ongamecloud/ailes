@@ -1,3 +1,4 @@
+use crate::io::SafeSliceMut;
 use futures::ready;
 use std::{
     io::{self, Read, Seek, SeekFrom},
@@ -63,7 +64,7 @@ impl<R: Read + Seek> RangeReader<R> {
 }
 
 impl<R: Read + Seek> Read for RangeReader<R> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+    fn read(&mut self, mut buf: &mut [u8]) -> io::Result<usize> {
         if let Some(end) = self.end {
             if self.pos > end {
                 return Ok(0);
@@ -72,7 +73,7 @@ impl<R: Read + Seek> Read for RangeReader<R> {
             let remaining = (end - self.pos + 1) as usize;
             let to_read = buf.len().min(remaining);
 
-            let bytes_read = self.inner.read(&mut buf[..to_read])?;
+            let bytes_read = self.inner.read(buf.get_slice_mut(..to_read)?)?;
             self.pos += bytes_read as u64;
 
             Ok(bytes_read)
@@ -154,10 +155,10 @@ impl<R: AsyncRead + AsyncSeek + Unpin> AsyncRead for AsyncRangeReader<R> {
             }
 
             let remaining = (end - me.pos + 1) as usize;
-            let unfilled = buf.initialize_unfilled();
+            let mut unfilled = buf.initialize_unfilled();
 
             let to_read = unfilled.len().min(remaining);
-            let limited_buf = &mut unfilled[..to_read];
+            let limited_buf = unfilled.get_slice_mut(..to_read)?;
 
             let mut limited_read_buf = tokio::io::ReadBuf::new(limited_buf);
 

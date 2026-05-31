@@ -1,5 +1,6 @@
 use crate::{
     io::{
+        SafeAsyncWrite, SafeDigest,
         compression::{CompressionLevel, CompressionType},
         counting_reader::AsyncCountingReader,
         hash_reader::AsyncHashReader,
@@ -392,8 +393,8 @@ impl OutgoingServerTransfer {
                             break;
                         }
 
-                        hasher.update(&buffer[..bytes_read]);
-                        writer.write_all(&buffer[..bytes_read]).await?;
+                        hasher.safe_update(&buffer, bytes_read)?;
+                        writer.safe_write_all(&buffer, bytes_read).await?;
                         bytes_sent.fetch_add(bytes_read as u64, Ordering::Relaxed);
                     }
 
@@ -739,8 +740,8 @@ impl OutgoingServerTransfer {
                                 break;
                             }
 
-                            hasher.update(&buffer[..bytes_read]);
-                            writer.write_all(&buffer[..bytes_read]).await?;
+                            hasher.safe_update(&buffer, bytes_read)?;
+                            writer.safe_write_all(&buffer, bytes_read).await?;
                             bytes_sent.fetch_add(bytes_read as u64, Ordering::Relaxed);
                         }
 

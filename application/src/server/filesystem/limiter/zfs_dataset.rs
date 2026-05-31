@@ -39,11 +39,12 @@ static DISK_USAGE: LazyLock<Arc<RwLock<DiskUsageMap>>> = LazyLock::new(|| {
                     let mut system_usage: HashMap<&str, i64> = HashMap::new();
 
                     for line in output_str.lines() {
-                        let parts: Vec<&str> = line.split('\t').collect();
-                        if parts.len() >= 2
-                            && let Ok(bytes) = parts[1].parse::<i64>()
+                        let mut line_split = line.split('\t');
+                        if let (Some(dataset_name), Some(usage_str)) =
+                            (line_split.next(), line_split.next())
+                            && let Ok(bytes) = usage_str.parse::<i64>()
                         {
-                            system_usage.insert(parts[0], bytes);
+                            system_usage.insert(dataset_name, bytes);
                         }
                     }
 
@@ -94,21 +95,19 @@ async fn get_root_pool_name(path: &Path) -> Result<String, std::io::Error> {
     let mut best_match_len = 0;
 
     for line in output_str.lines() {
-        let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() >= 2 {
-            let dataset = parts[0];
-            let mountpoint = parts[1];
-
-            if path_str.starts_with(mountpoint) && mountpoint.len() > best_match_len {
-                best_match = Some(dataset.to_string());
-                best_match_len = mountpoint.len();
-            }
+        let mut line_split = line.split('\t');
+        if let (Some(dataset), Some(mountpoint)) = (line_split.next(), line_split.next())
+            && path_str.starts_with(mountpoint)
+            && mountpoint.len() > best_match_len
+        {
+            best_match = Some(dataset.to_string());
+            best_match_len = mountpoint.len();
         }
     }
 
     if let Some(dataset) = best_match {
-        if let Some(pool_end) = dataset.find('/') {
-            return Ok(dataset[0..pool_end].to_string());
+        if let Some(pool_end) = dataset.split('/').next() {
+            return Ok(pool_end.to_string());
         }
         return Ok(dataset);
     }

@@ -1,5 +1,6 @@
 use crate::{
     io::{
+        SafeAsyncWrite, SafeSlice,
         compression::{CompressionLevel, writer::CompressionWriter},
         counting_reader::CountingReader,
     },
@@ -717,9 +718,11 @@ impl VirtualReadableFilesystem for VirtualZipArchive {
                                     loop {
                                         match entry.read(&mut buffer) {
                                             Ok(0) => break,
-                                            Ok(n) => {
+                                            Ok(bytes_read) => {
                                                 if runtime
-                                                    .block_on(writer.write_all(&buffer[..n]))
+                                                    .block_on(
+                                                        writer.safe_write_all(&buffer, bytes_read),
+                                                    )
                                                     .is_err()
                                                 {
                                                     break;
@@ -810,8 +813,11 @@ impl VirtualReadableFilesystem for VirtualZipArchive {
             loop {
                 match entry.read(&mut buffer) {
                     Ok(0) => break,
-                    Ok(n) => {
-                        if runtime.block_on(writer.write_all(&buffer[..n])).is_err() {
+                    Ok(bytes_read) => {
+                        if runtime
+                            .block_on(writer.safe_write_all(&buffer, bytes_read))
+                            .is_err()
+                        {
                             break;
                         }
                     }
@@ -1101,7 +1107,7 @@ impl VirtualReadableFilesystem for VirtualZipArchive {
                             continue;
                         };
 
-                        let parent = &components[..components.len() - 1];
+                        let parent = components.get_slice(..components.len() - 1)?;
 
                         let shared = dir_stack
                             .iter()
@@ -1112,7 +1118,8 @@ impl VirtualReadableFilesystem for VirtualZipArchive {
                             itaf_enc.exit_dir()?;
                             dir_stack.pop();
                         }
-                        for component in &parent[shared..] {
+
+                        for component in parent.get_slice(shared..)? {
                             itaf_enc.enter_dir(
                                 component,
                                 &Metadata {

@@ -355,7 +355,9 @@ impl ShellSession {
                         return;
                     };
 
-                    let history_cmd = &command_history[history_index];
+                    let Some(history_cmd) = command_history.get(history_index) else {
+                        return;
+                    };
 
                     data_writer.write_all(b"\r").await.unwrap_or_default();
                     let mut output = Vec::with_capacity(history_cmd.len() + 3);
@@ -374,9 +376,8 @@ impl ShellSession {
             }
             b'B' => {
                 if let Some(inner_history_index) = history_index {
-                    if *inner_history_index < command_history.len() - 1 {
+                    if let Some(history_cmd) = command_history.get(*inner_history_index + 1) {
                         *inner_history_index += 1;
-                        let history_cmd = &command_history[*inner_history_index];
 
                         data_writer.write_all(b"\r").await.unwrap_or_default();
                         let mut output = Vec::with_capacity(history_cmd.len() + 3);
@@ -556,12 +557,13 @@ impl ShellSession {
                         current_line.remove(*cursor_pos - 1);
                         *cursor_pos -= 1;
 
+                        let Some(line_slice) = current_line.get(*cursor_pos..) else {
+                            return;
+                        };
+
                         data_writer.write_all(b"\x08").await.unwrap_or_default();
                         data_writer.write_all(b"\x1b[K").await.unwrap_or_default();
-                        data_writer
-                            .write_all(&current_line[*cursor_pos..])
-                            .await
-                            .unwrap_or_default();
+                        data_writer.write_all(line_slice).await.unwrap_or_default();
 
                         if *cursor_pos < current_line.len() {
                             let move_back = current_line.len() - *cursor_pos;
@@ -591,11 +593,12 @@ impl ShellSession {
                         current_line.insert(*cursor_pos, byte);
                         *cursor_pos += 1;
 
+                        let Some(line_slice) = current_line.get(*cursor_pos..) else {
+                            return;
+                        };
+
                         data_writer.write_all(&[byte]).await.unwrap_or_default();
-                        data_writer
-                            .write_all(&current_line[*cursor_pos..])
-                            .await
-                            .unwrap_or_default();
+                        data_writer.write_all(line_slice).await.unwrap_or_default();
 
                         if *cursor_pos < current_line.len() {
                             let move_back = current_line.len() - *cursor_pos;
@@ -751,12 +754,15 @@ impl ShellSession {
                                     }
                                     WebsocketEvent::ServerStatus => {
                                         let prelude = state.config.daemon_prelude();
+                                        let Some(status) = message.args.first() else {
+                                            return;
+                                        };
 
                                         writer
                                             .write_all(
                                                 format!(
                                                     "{prelude} Server marked as {}...\r\n\x1b[2K",
-                                                    message.args[0]
+                                                    status
                                                 )
                                                 .as_bytes(),
                                             )
@@ -875,8 +881,12 @@ impl ShellSession {
                     loop {
                         match reader.read(&mut buffer).await {
                             Ok(0) => break,
-                            Ok(n) => {
-                                for &byte in &buffer[..n] {
+                            Ok(bytes_read) => {
+                                let Some(buffer_slice) = buffer.get(..bytes_read) else {
+                                    continue;
+                                };
+
+                                for &byte in buffer_slice {
                                     if escape_sequence {
                                         sequence_buffer.push(byte);
 

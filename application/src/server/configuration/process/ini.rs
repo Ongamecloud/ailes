@@ -136,19 +136,22 @@ impl super::ProcessConfigurationFileParser for IniFileParser {
 }
 
 fn rewrite_property(raw: &str, key: &str, new_value: &str) -> compact_str::CompactString {
-    match raw.find('=') {
-        Some(eq) => {
-            let after = &raw[eq + 1..];
-            let ws_len = after.len() - after.trim_start().len();
-            let mut s =
-                compact_str::CompactString::with_capacity(eq + 1 + ws_len + new_value.len());
-            s.push_str(&raw[..=eq]);
-            s.push_str(&after[..ws_len]);
-            s.push_str(new_value);
-            s
-        }
-        None => compact_str::format_compact!("{key}={new_value}"),
-    }
+    let Some((before, after)) = raw.split_once('=') else {
+        return compact_str::format_compact!("{key}={new_value}");
+    };
+
+    let leading_ws = after
+        .get(..after.len() - after.trim_start().len())
+        .unwrap_or("");
+
+    let mut s = compact_str::CompactString::with_capacity(
+        before.len() + 1 + leading_ws.len() + new_value.len(),
+    );
+    s.push_str(before);
+    s.push('=');
+    s.push_str(leading_ws);
+    s.push_str(new_value);
+    s
 }
 
 fn parse_ini_path(path: &str) -> (compact_str::CompactString, compact_str::CompactString) {

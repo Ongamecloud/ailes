@@ -70,19 +70,15 @@ fn update_xml_element(
     insert_new: bool,
     update_existing: bool,
 ) {
-    if path.is_empty() {
+    let Some(&tag) = path.first() else {
         return;
-    }
+    };
 
     if path.len() == 1 {
-        let tag = path[0];
-
         if let Some(attr_assignment) = value.strip_prefix('@') {
-            let Some(eq_pos) = attr_assignment.find('=') else {
+            let Some((attr_name, attr_val)) = attr_assignment.split_once('=') else {
                 return;
             };
-            let attr_name = &attr_assignment[..eq_pos];
-            let attr_val = &attr_assignment[eq_pos + 1..];
 
             if let Some(child) = element.get_mut_child(tag) {
                 let exists = child.attributes.contains_key(attr_name);
@@ -115,21 +111,20 @@ fn update_xml_element(
                 .push(xmltree::XMLNode::Text(value.to_string()));
             element.children.push(xmltree::XMLNode::Element(new_child));
         }
+
         return;
     }
 
-    let tag = path[0];
+    let subpath = match path.get(1..) {
+        Some(p) if !p.is_empty() => p,
+        _ => return,
+    };
+
     if let Some(child) = element.get_mut_child(tag) {
-        update_xml_element(child, &path[1..], value, insert_new, update_existing);
+        update_xml_element(child, subpath, value, insert_new, update_existing);
     } else if insert_new {
         let mut new_child = xmltree::Element::new(tag);
-        update_xml_element(
-            &mut new_child,
-            &path[1..],
-            value,
-            insert_new,
-            update_existing,
-        );
+        update_xml_element(&mut new_child, subpath, value, insert_new, update_existing);
         element.children.push(xmltree::XMLNode::Element(new_child));
     }
 }
@@ -141,11 +136,14 @@ fn update_xml_wildcard(
     insert_new: bool,
     update_existing: bool,
 ) {
-    if path.is_empty() {
+    let Some(&tag) = path.first() else {
         return;
-    }
+    };
 
-    let tag = path[0];
+    let subpath = match path.get(1..) {
+        Some(p) if !p.is_empty() => p,
+        _ => return,
+    };
 
     let should_check_insertion = tag != "*" && insert_new;
     let mut found_match = false;
@@ -170,7 +168,7 @@ fn update_xml_wildcard(
                     .push(xmltree::XMLNode::Text(value.to_string()));
             }
         } else {
-            update_xml_wildcard(child_elem, &path[1..], value, insert_new, update_existing);
+            update_xml_wildcard(child_elem, subpath, value, insert_new, update_existing);
         }
     }
 
@@ -183,13 +181,7 @@ fn update_xml_wildcard(
             element.children.push(xmltree::XMLNode::Element(new_child));
         } else {
             let mut new_child = xmltree::Element::new(tag);
-            update_xml_wildcard(
-                &mut new_child,
-                &path[1..],
-                value,
-                insert_new,
-                update_existing,
-            );
+            update_xml_wildcard(&mut new_child, subpath, value, insert_new, update_existing);
             element.children.push(xmltree::XMLNode::Element(new_child));
         }
     }

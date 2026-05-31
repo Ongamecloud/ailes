@@ -305,12 +305,10 @@ impl<R: std::io::Read> Iterator for PropertiesParser<R> {
             key_end_idx = trimmed_logical.len();
         }
 
-        let key_raw = &trimmed_logical[..key_end_idx];
-        let val_raw = if found_sep && (key_end_idx + sep_len < trimmed_logical.len()) {
-            &trimmed_logical[key_end_idx + sep_len..]
-        } else {
-            ""
-        };
+        let key_raw = trimmed_logical.get(..key_end_idx).unwrap_or("");
+        let val_raw = trimmed_logical
+            .get(key_end_idx.saturating_add(sep_len)..)
+            .unwrap_or("");
 
         match (Self::unescape(key_raw), Self::unescape(val_raw)) {
             (Some(k), Some(v)) => Some(PropertyLine::Pair(k, v)),

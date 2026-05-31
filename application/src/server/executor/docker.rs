@@ -13,6 +13,8 @@ use tokio::{
     sync::RwLock,
 };
 
+use crate::io::SafeSlice;
+
 #[inline]
 pub fn string_to_option(s: &str) -> Option<String> {
     if s.is_empty() {
@@ -130,17 +132,20 @@ impl DockerServerConfigurationExt for crate::server::configuration::ServerConfig
             if let Some(binds) = binds_option {
                 let mut i = 0;
                 while i < binds.len() {
+                    let Some(binding) = binds.get_mut(i) else {
+                        break;
+                    };
                     if config.docker.network.disable_interface_binding {
-                        binds[i].host_ip = None;
+                        binding.host_ip = None;
                     }
 
-                    if binds[i].host_ip.as_deref() == Some("127.0.0.1") {
+                    if binding.host_ip.as_deref() == Some("127.0.0.1") {
                         if config.docker.network.ispn {
                             binds.remove(i);
 
                             continue;
                         } else {
-                            binds[i].host_ip = Some(iface.clone());
+                            binding.host_ip = Some(iface.clone());
                         }
                     }
 
@@ -554,8 +559,13 @@ impl tokio::io::AsyncRead for LogsReader {
         loop {
             if self.pos < self.buffer.len() {
                 let n = buf.remaining().min(self.buffer.len() - self.pos);
-                buf.put_slice(&self.buffer[self.pos..self.pos + n]);
+                let buffer_slice = match self.buffer.get_slice(self.pos..self.pos + n) {
+                    Ok(slice) => slice,
+                    Err(err) => return Poll::Ready(Err(err)),
+                };
+                buf.put_slice(buffer_slice);
                 self.pos += n;
+
                 return Poll::Ready(Ok(()));
             }
 
@@ -688,15 +698,19 @@ impl DockerProcessHandle {
                     let mut search_start = line_start;
 
                     loop {
-                        if let Some(pos) = buffer[search_start..].iter().position(|&b| b == b'\n') {
+                        if let Some(pos) = buffer
+                            .get(search_start..)
+                            .and_then(|slice| slice.iter().position(|&b| b == b'\n'))
+                        {
                             let newline_pos = search_start + pos;
 
                             if newline_pos - line_start <= 512 {
-                                let line = compact_str::CompactString::from_utf8_lossy(
-                                    &buffer[line_start..newline_pos],
-                                )
-                                .trim()
-                                .into();
+                                let Some(line_slice) = buffer.get(line_start..newline_pos) else {
+                                    break;
+                                };
+                                let line = compact_str::CompactString::from_utf8_lossy(line_slice)
+                                    .trim()
+                                    .into();
 
                                 let line = Arc::new(line);
 
@@ -708,11 +722,13 @@ impl DockerProcessHandle {
                                 line_start = newline_pos + 1;
                                 search_start = line_start;
                             } else {
-                                let line = compact_str::CompactString::from_utf8_lossy(
-                                    &buffer[line_start..(line_start + 512)],
-                                )
-                                .trim()
-                                .into();
+                                let Some(line_slice) = buffer.get(line_start..line_start + 512)
+                                else {
+                                    break;
+                                };
+                                let line = compact_str::CompactString::from_utf8_lossy(line_slice)
+                                    .trim()
+                                    .into();
 
                                 let line = Arc::new(line);
 
@@ -727,11 +743,13 @@ impl DockerProcessHandle {
                         } else {
                             let current_line_length = buffer.len() - line_start;
                             if current_line_length > 512 {
-                                let line = compact_str::CompactString::from_utf8_lossy(
-                                    &buffer[line_start..(line_start + 512)],
-                                )
-                                .trim()
-                                .into();
+                                let Some(line_slice) = buffer.get(line_start..line_start + 512)
+                                else {
+                                    break;
+                                };
+                                let line = compact_str::CompactString::from_utf8_lossy(line_slice)
+                                    .trim()
+                                    .into();
 
                                 let line = Arc::new(line);
 
@@ -754,8 +772,10 @@ impl DockerProcessHandle {
                     }
                 }
 
-                if line_start < buffer.len() {
-                    let line = compact_str::CompactString::from_utf8_lossy(&buffer[line_start..])
+                if let Some(line_slice) = buffer.get(line_start..)
+                    && !line_slice.is_empty()
+                {
+                    let line = compact_str::CompactString::from_utf8_lossy(line_slice)
                         .trim()
                         .into();
 

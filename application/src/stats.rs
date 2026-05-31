@@ -98,10 +98,13 @@ impl Default for StatsManager {
                     let total_memory = sys.total_memory();
                     let used_memory = sys.used_memory();
 
-                    let disk = disks
-                        .iter()
-                        .find(|d| d.mount_point() == Path::new("/"))
-                        .unwrap_or(&disks[0]);
+                    let disk = match disks.iter().find(|d| d.mount_point() == Path::new("/")) {
+                        Some(d) => d,
+                        None => match disks.first() {
+                            Some(d) => d,
+                            None => continue,
+                        },
+                    };
                     let total_disk_space = disk.total_space();
                     let used_disk_space = disk.total_space() - disk.available_space();
                     let total_disk_read = disk.usage().total_read_bytes;

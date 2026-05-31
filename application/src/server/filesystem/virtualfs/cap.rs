@@ -265,7 +265,7 @@ impl super::VirtualReadableFilesystem for VirtualCapFilesystem {
                     ModifiedDesc => b.modified.cmp(&a.modified),
                     CreatedAsc => a.created.cmp(&b.created),
                     CreatedDesc => b.created.cmp(&a.created),
-                    NameAsc | NameDesc => unreachable!(),
+                    NameAsc | NameDesc => std::cmp::Ordering::Equal,
                 },
             });
 
