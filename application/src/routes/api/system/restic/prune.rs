@@ -6,7 +6,10 @@ static RESTIC_PRUNE_CACHE: RwLock<Option<ResticTaskResult>> = RwLock::const_new(
 static RESTIC_PRUNE_RUNNING: RwLock<bool> = RwLock::const_new(false);
 
 mod get {
-    use crate::response::{ApiResponse, ApiResponseResult};
+    use crate::{
+        response::{ApiResponse, ApiResponseResult},
+        routes::ApiError,
+    };
     use axum::http::StatusCode;
     use serde::Serialize;
     use utoipa::ToSchema;
@@ -18,7 +21,7 @@ mod get {
 
     #[utoipa::path(get, path = "/", responses(
         (status = OK, body = inline(Response)),
-        (status = NOT_FOUND, body = crate::routes::ApiError),
+        (status = NOT_FOUND, body = ApiError),
     ))]
     pub async fn route() -> ApiResponseResult {
         let cache = super::RESTIC_PRUNE_CACHE.read().await;
@@ -35,7 +38,7 @@ mod post {
     use crate::{
         response::{ApiResponse, ApiResponseResult},
         routes::{
-            GetState,
+            ApiError, GetState,
             api::system::restic::{
                 build_restic_command, execute_restic_command, system_restic_configuration,
             },
@@ -67,7 +70,7 @@ mod post {
     #[utoipa::path(post, path = "/", responses(
         (status = OK, body = inline(Response)),
         (status = ACCEPTED, body = inline(ResponseAccepted)),
-        (status = CONFLICT, body = crate::routes::ApiError),
+        (status = CONFLICT, body = ApiError),
     ), request_body = inline(Payload))]
     pub async fn route(
         state: GetState,

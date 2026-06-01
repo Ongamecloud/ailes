@@ -88,89 +88,88 @@ pub fn set_nested_value(
     insert_new: bool,
     update_existing: bool,
 ) {
-    let Some((head, tail)) = path.split_first() else {
-        return;
-    };
+    let mut table = table;
+    let mut path = path;
 
-    let super::json::PathSegment::Key(k) = head else {
-        return;
-    };
-
-    let Some(tail_first) = tail.first() else {
-        let exists = table.contains_key(k);
-        if (exists && update_existing) || (!exists && insert_new) {
-            table.insert(k, Item::Value(value));
-        }
-        return;
-    };
-
-    match tail_first {
-        super::json::PathSegment::Key(_) => {
-            let child = table.entry(k).or_insert(Item::Table(Table::new()));
-            if let Some(child_table) = child.as_table_like_mut() {
-                set_nested_value(child_table, tail, value, insert_new, update_existing);
-            }
-        }
-        super::json::PathSegment::Index(_) => {
-            set_in_array_under_key(table, k, tail, value, insert_new, update_existing);
-        }
-    }
-}
-
-fn set_in_array_under_key(
-    table: &mut dyn TableLike,
-    key: &str,
-    path: &[super::json::PathSegment<'_>],
-    value: Value,
-    insert_new: bool,
-    update_existing: bool,
-) {
-    let Some((super::json::PathSegment::Index(i), rest)) = path.split_first() else {
-        return;
-    };
-    let i = *i;
-
-    let Some(rest_first) = rest.first() else {
-        let child = table
-            .entry(key)
-            .or_insert(Item::Value(Value::Array(Array::new())));
-        let Some(arr) = child.as_array_mut() else {
+    loop {
+        let Some((head, tail)) = path.split_first() else {
+            return;
+        };
+        let super::json::PathSegment::Key(k) = head else {
             return;
         };
 
-        if i < arr.len() {
-            if update_existing {
-                arr.remove(i);
-                arr.insert(i, value);
+        let (Some(tail_first), Some(tail_slice)) = (tail.first(), tail.get(1..)) else {
+            let exists = table.contains_key(k);
+            if (exists && update_existing) || (!exists && insert_new) {
+                table.insert(k, Item::Value(value));
             }
-        } else if insert_new {
-            while arr.len() < i {
-                arr.push(Value::InlineTable(InlineTable::new()));
-            }
-            arr.push(value);
-        }
-
-        return;
-    };
-
-    if matches!(rest_first, super::json::PathSegment::Key(_)) {
-        let child = table
-            .entry(key)
-            .or_insert(Item::ArrayOfTables(ArrayOfTables::new()));
-        let Some(aot) = child.as_array_of_tables_mut() else {
             return;
         };
 
-        if i >= aot.len() {
-            if !insert_new {
-                return;
+        match tail_first {
+            super::json::PathSegment::Key(_) => {
+                let child = table.entry(k).or_insert(Item::Table(Table::new()));
+                let Some(child_table) = child.as_table_like_mut() else {
+                    return;
+                };
+
+                table = child_table;
+                path = tail;
             }
-            while aot.len() <= i {
-                aot.push(Table::new());
+            super::json::PathSegment::Index(i) => {
+                let i = *i;
+
+                let Some(rest_first) = tail.get(1) else {
+                    let child = table
+                        .entry(k)
+                        .or_insert(Item::Value(Value::Array(Array::new())));
+                    let Some(arr) = child.as_array_mut() else {
+                        return;
+                    };
+
+                    if i < arr.len() {
+                        if update_existing {
+                            arr.remove(i);
+                            arr.insert(i, value);
+                        }
+                    } else if insert_new {
+                        while arr.len() < i {
+                            arr.push(Value::InlineTable(InlineTable::new()));
+                        }
+                        arr.push(value);
+                    }
+
+                    return;
+                };
+
+                if !matches!(rest_first, super::json::PathSegment::Key(_)) {
+                    return;
+                }
+
+                let child = table
+                    .entry(k)
+                    .or_insert(Item::ArrayOfTables(ArrayOfTables::new()));
+                let Some(aot) = child.as_array_of_tables_mut() else {
+                    return;
+                };
+
+                if i >= aot.len() {
+                    if !insert_new {
+                        return;
+                    }
+                    while aot.len() <= i {
+                        aot.push(Table::new());
+                    }
+                }
+
+                let Some(elem) = aot.get_mut(i) else {
+                    return;
+                };
+
+                table = elem;
+                path = tail_slice;
             }
-        }
-        if let Some(elem) = aot.get_mut(i) {
-            set_nested_value(elem, rest, value, insert_new, update_existing);
         }
     }
 }

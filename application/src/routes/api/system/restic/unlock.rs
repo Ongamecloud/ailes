@@ -6,7 +6,10 @@ static RESTIC_UNLOCK_CACHE: RwLock<Option<ResticTaskResult>> = RwLock::const_new
 static RESTIC_UNLOCK_RUNNING: RwLock<bool> = RwLock::const_new(false);
 
 mod get {
-    use crate::response::{ApiResponse, ApiResponseResult};
+    use crate::{
+        response::{ApiResponse, ApiResponseResult},
+        routes::ApiError,
+    };
     use axum::http::StatusCode;
     use serde::Serialize;
     use utoipa::ToSchema;
@@ -18,7 +21,7 @@ mod get {
 
     #[utoipa::path(get, path = "/", responses(
         (status = OK, body = inline(Response)),
-        (status = NOT_FOUND, body = crate::routes::ApiError),
+        (status = NOT_FOUND, body = ApiError),
     ))]
     pub async fn route() -> ApiResponseResult {
         let cache = super::RESTIC_UNLOCK_CACHE.read().await;

@@ -74,62 +74,83 @@ pub async fn get_repository(
     }
 }
 
+fn calculate_entry_size(total_size: &mut u64, total_files: &mut u64, entry: &Entry) {
+    let mut stack = vec![entry];
+
+    while let Some(entry) = stack.pop() {
+        match entry {
+            Entry::File(file) => {
+                *total_size += file.size_real;
+                *total_files += 1;
+            }
+            Entry::Directory(directory) => stack.extend(directory.entries.iter()),
+            Entry::Symlink(_) => {
+                *total_files += 1;
+            }
+        }
+    }
+}
+
 pub struct DdupBakBackup {
     uuid: uuid::Uuid,
     archive: Arc<ddup_bak::archive::Archive>,
 }
 
 impl DdupBakBackup {
-    fn tar_recursive_convert_entries(
+    fn tar_convert_entries(
         entry: &Entry,
         repository: &ddup_bak::repository::Repository,
         archive: &mut tar::Builder<impl Write + 'static>,
         parent_path: &Path,
     ) -> Result<(), anyhow::Error> {
-        let mut entry_header = tar::Header::new_gnu();
-        entry_header.set_size(0);
-        entry_header.set_mode(entry.mode().bits());
-        entry_header.set_mtime(
-            entry
-                .mtime()
-                .duration_since(std::time::UNIX_EPOCH)?
-                .as_secs(),
-        );
+        let mut stack: Vec<(PathBuf, &Entry)> = vec![(parent_path.to_path_buf(), entry)];
 
-        let path = parent_path.join(entry.name());
+        while let Some((parent_path, entry)) = stack.pop() {
+            let mut entry_header = tar::Header::new_gnu();
+            entry_header.set_size(0);
+            entry_header.set_mode(entry.mode().bits());
+            entry_header.set_mtime(
+                entry
+                    .mtime()
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .as_secs(),
+            );
 
-        match entry {
-            Entry::Directory(dir) => {
-                entry_header.set_entry_type(tar::EntryType::Directory);
+            let path = parent_path.join(entry.name());
 
-                archive.append_data(&mut entry_header, &path, std::io::empty())?;
+            match entry {
+                Entry::Directory(dir) => {
+                    entry_header.set_entry_type(tar::EntryType::Directory);
 
-                for entry in dir.entries.iter() {
-                    Self::tar_recursive_convert_entries(entry, repository, archive, &path)?;
+                    archive.append_data(&mut entry_header, &path, std::io::empty())?;
+
+                    for child in dir.entries.iter().rev() {
+                        stack.push((path.clone(), child));
+                    }
                 }
-            }
-            Entry::File(file) => {
-                entry_header.set_entry_type(tar::EntryType::Regular);
-                entry_header.set_size(file.size_real);
+                Entry::File(file) => {
+                    entry_header.set_entry_type(tar::EntryType::Regular);
+                    entry_header.set_size(file.size_real);
 
-                let reader = FixedReader::new_with_fixed_bytes(
-                    Box::new(repository.entry_reader(Entry::File(file.clone()))?),
-                    file.size_real as usize,
-                );
+                    let reader = FixedReader::new_with_fixed_bytes(
+                        Box::new(repository.entry_reader(Entry::File(file.clone()))?),
+                        file.size_real as usize,
+                    );
 
-                archive.append_data(&mut entry_header, &path, reader)?;
-            }
-            Entry::Symlink(link) => {
-                entry_header.set_entry_type(tar::EntryType::Symlink);
+                    archive.append_data(&mut entry_header, &path, reader)?;
+                }
+                Entry::Symlink(link) => {
+                    entry_header.set_entry_type(tar::EntryType::Symlink);
 
-                archive.append_link(&mut entry_header, &path, &link.target)?;
+                    archive.append_link(&mut entry_header, &path, &link.target)?;
+                }
             }
         }
 
         Ok(())
     }
 
-    fn zip_recursive_convert_entries(
+    fn zip_convert_entries(
         entry: &Entry,
         repository: &ddup_bak::repository::Repository,
         zip: &mut zip::ZipWriter<
@@ -140,107 +161,131 @@ impl DdupBakBackup {
         compression_level: CompressionLevel,
         parent_path: &Path,
     ) -> Result<(), anyhow::Error> {
-        let size = match entry {
-            Entry::File(file) => file.size,
-            _ => 0,
-        };
+        let mut stack: Vec<(PathBuf, &Entry)> = vec![(parent_path.to_path_buf(), entry)];
 
-        let mut options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default()
-            .compression_level(Some(compression_level.to_deflate_level() as i64))
-            .unix_permissions(entry.mode().bits())
-            .large_file(size >= u32::MAX as u64);
-        {
-            let mtime: chrono::DateTime<chrono::Utc> = chrono::DateTime::from(entry.mtime());
+        while let Some((parent_path, entry)) = stack.pop() {
+            let size = match entry {
+                Entry::File(file) => file.size,
+                _ => 0,
+            };
 
-            options = options.last_modified_time(zip::DateTime::from_date_and_time(
-                mtime.year() as u16,
-                mtime.month() as u8,
-                mtime.day() as u8,
-                mtime.hour() as u8,
-                mtime.minute() as u8,
-                mtime.second() as u8,
-            )?);
-        }
+            let mut options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default()
+                .compression_level(Some(compression_level.to_deflate_level() as i64))
+                .unix_permissions(entry.mode().bits())
+                .large_file(size >= u32::MAX as u64);
+            {
+                let mtime: chrono::DateTime<chrono::Utc> = chrono::DateTime::from(entry.mtime());
 
-        let path = parent_path.join(entry.name());
+                options = options.last_modified_time(zip::DateTime::from_date_and_time(
+                    mtime.year() as u16,
+                    mtime.month() as u8,
+                    mtime.day() as u8,
+                    mtime.hour() as u8,
+                    mtime.minute() as u8,
+                    mtime.second() as u8,
+                )?);
+            }
 
-        match entry {
-            Entry::Directory(dir) => {
-                zip.add_directory(path.to_string_lossy(), options)?;
+            let path = parent_path.join(entry.name());
 
-                for entry in dir.entries.iter() {
-                    Self::zip_recursive_convert_entries(
-                        entry,
-                        repository,
-                        zip,
-                        compression_level,
-                        &path,
-                    )?;
+            match entry {
+                Entry::Directory(dir) => {
+                    zip.add_directory(path.to_string_lossy(), options)?;
+
+                    for child in dir.entries.iter().rev() {
+                        stack.push((path.clone(), child));
+                    }
                 }
-            }
-            Entry::File(file) => {
-                let mut reader = FixedReader::new_with_fixed_bytes(
-                    Box::new(repository.entry_reader(Entry::File(file.clone()))?),
-                    file.size_real as usize,
-                );
+                Entry::File(file) => {
+                    let mut reader = FixedReader::new_with_fixed_bytes(
+                        Box::new(repository.entry_reader(Entry::File(file.clone()))?),
+                        file.size_real as usize,
+                    );
 
-                zip.start_file(path.to_string_lossy(), options)?;
-                crate::io::copy(&mut reader, zip)?;
-            }
-            Entry::Symlink(link) => {
-                zip.add_symlink(&link.name, &link.target, options)?;
+                    zip.start_file(path.to_string_lossy(), options)?;
+                    crate::io::copy(&mut reader, zip)?;
+                }
+                Entry::Symlink(link) => {
+                    zip.add_symlink(&link.name, &link.target, options)?;
+                }
             }
         }
 
         Ok(())
     }
 
-    fn itaf_recursive_convert_entries<W: std::io::Write>(
+    fn itaf_convert_entries<W: std::io::Write>(
         entry: &Entry,
         repository: &ddup_bak::repository::Repository,
         itaf_enc: &mut ItafEncoder<W>,
         parent_path: &Path,
     ) -> Result<(), anyhow::Error> {
-        let path = parent_path.join(entry.name());
+        enum Work<'a> {
+            Visit {
+                parent_path: PathBuf,
+                entry: &'a Entry,
+            },
+            ExitDir,
+        }
 
-        let mtime = entry
-            .mtime()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default();
-        let meta = Metadata {
-            uid: 0,
-            gid: 0,
-            mode: entry.mode().bits(),
-            modified: std::time::UNIX_EPOCH + mtime,
-        };
-        let name: compact_str::CompactString = path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into();
+        let mut stack: Vec<Work> = vec![Work::Visit {
+            parent_path: parent_path.to_path_buf(),
+            entry,
+        }];
 
-        match entry {
-            Entry::Directory(dir) => {
-                if itaf::spec::validate_name(&name).is_ok() {
-                    itaf_enc.enter_dir(&name, &meta)?;
-                    for child in &dir.entries {
-                        Self::itaf_recursive_convert_entries(child, repository, itaf_enc, &path)?;
-                    }
+        while let Some(work) = stack.pop() {
+            let (parent_path, entry) = match work {
+                Work::ExitDir => {
                     itaf_enc.exit_dir()?;
+                    continue;
                 }
-            }
-            Entry::File(file) => {
-                if itaf::spec::validate_name(&name).is_ok() {
-                    let mut reader = FixedReader::new_with_fixed_bytes(
-                        Box::new(repository.entry_reader(Entry::File(file.clone()))?),
-                        file.size_real as usize,
-                    );
-                    itaf_enc.add_file(&name, &meta, file.size_real, &mut { reader })?;
+                Work::Visit { parent_path, entry } => (parent_path, entry),
+            };
+
+            let path = parent_path.join(entry.name());
+
+            let mtime = entry
+                .mtime()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default();
+            let meta = Metadata {
+                uid: 0,
+                gid: 0,
+                mode: entry.mode().bits(),
+                modified: std::time::UNIX_EPOCH + mtime,
+            };
+            let name: compact_str::CompactString = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into();
+
+            match entry {
+                Entry::Directory(dir) => {
+                    if itaf::spec::validate_name(&name).is_ok() {
+                        itaf_enc.enter_dir(&name, &meta)?;
+                        stack.push(Work::ExitDir);
+                        for child in dir.entries.iter().rev() {
+                            stack.push(Work::Visit {
+                                parent_path: path.clone(),
+                                entry: child,
+                            });
+                        }
+                    }
                 }
-            }
-            Entry::Symlink(link) => {
-                if itaf::spec::validate_name(&name).is_ok() {
-                    itaf_enc.add_symlink(&name, &link.target, false, &meta)?;
+                Entry::File(file) => {
+                    if itaf::spec::validate_name(&name).is_ok() {
+                        let mut reader = FixedReader::new_with_fixed_bytes(
+                            Box::new(repository.entry_reader(Entry::File(file.clone()))?),
+                            file.size_real as usize,
+                        );
+                        itaf_enc.add_file(&name, &meta, file.size_real, &mut reader)?;
+                    }
+                }
+                Entry::Symlink(link) => {
+                    if itaf::spec::validate_name(&name).is_ok() {
+                        itaf_enc.add_symlink(&name, &link.target, false, &meta)?;
+                    }
                 }
             }
         }
@@ -384,26 +429,8 @@ impl BackupCreateExt for DdupBakBackup {
                 let mut total_size = 0;
                 let mut total_files = 0;
 
-                fn recursive_size(total_size: &mut u64, total_files: &mut u64, entry: Entry) {
-                    match entry {
-                        Entry::File(file) => {
-                            *total_size += file.size_real;
-                            *total_files += 1;
-                        }
-                        Entry::Directory(directory) => {
-                            directory
-                                .entries
-                                .into_iter()
-                                .for_each(|e| recursive_size(total_size, total_files, e));
-                        }
-                        Entry::Symlink(_) => {
-                            *total_files += 1;
-                        }
-                    }
-                }
-
                 for entry in archive.entries.into_iter() {
-                    recursive_size(&mut total_size, &mut total_files, entry.clone());
+                    calculate_entry_size(&mut total_size, &mut total_files, &entry);
                 }
 
                 Ok((total_size, total_files))
@@ -472,7 +499,7 @@ impl BackupExt for DdupBakBackup {
                     let mut zip = zip::ZipWriter::new_stream(writer);
 
                     for entry in archive.entries.iter() {
-                        DdupBakBackup::zip_recursive_convert_entries(
+                        DdupBakBackup::zip_convert_entries(
                             entry,
                             &repository,
                             &mut zip,
@@ -501,7 +528,7 @@ impl BackupExt for DdupBakBackup {
                     tar.mode(tar::HeaderMode::Complete);
 
                     for entry in archive.entries.iter() {
-                        DdupBakBackup::tar_recursive_convert_entries(
+                        DdupBakBackup::tar_convert_entries(
                             entry,
                             &repository,
                             &mut tar,
@@ -535,7 +562,7 @@ impl BackupExt for DdupBakBackup {
                     )?;
 
                     for entry in archive.entries.iter() {
-                        DdupBakBackup::itaf_recursive_convert_entries(
+                        DdupBakBackup::itaf_convert_entries(
                             entry,
                             &repository,
                             &mut itaf_enc,
@@ -583,76 +610,101 @@ impl BackupExt for DdupBakBackup {
 
         let server = server.clone();
         tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
-            fn recursive_size(entry: &Entry) -> u64 {
-                match entry {
-                    Entry::File(file) => file.size_real,
-                    Entry::Directory(directory) => {
-                        directory.entries.iter().map(recursive_size).sum()
-                    }
-                    Entry::Symlink(_) => 0,
-                }
+            let mut total_size = 0;
+
+            for entry in archive.entries.iter() {
+                calculate_entry_size(&mut total_size, &mut 0, entry);
             }
 
-            total.store(
-                archive.entries().iter().map(recursive_size).sum(),
-                Ordering::SeqCst,
-            );
+            total.store(total_size, Ordering::SeqCst);
 
-            fn recursive_restore(
+            fn restore_entry(
                 repository: &Arc<ddup_bak::repository::Repository>,
                 entry: &Entry,
                 path: &Path,
                 server: &crate::server::Server,
                 progress: &Arc<AtomicU64>,
             ) -> Result<(), anyhow::Error> {
-                let path = path.join(entry.name());
-
-                if server
-                    .filesystem
-                    .is_ignored_sync(&path, entry.is_directory())
-                {
-                    return Ok(());
+                enum Work<'a> {
+                    Visit {
+                        parent: PathBuf,
+                        entry: &'a Entry,
+                    },
+                    FinishDir {
+                        path: PathBuf,
+                        mtime: std::time::SystemTime,
+                    },
                 }
 
-                match entry {
-                    Entry::File(file) => {
-                        server.log_daemon(compact_str::format_compact!("(restoring): {}", path.display()));
+                let mut stack = vec![Work::Visit {
+                    parent: path.to_path_buf(),
+                    entry,
+                }];
 
-                        if let Some(parent) = path.parent() {
-                            server.filesystem.create_dir_all(parent)?;
+                while let Some(work) = stack.pop() {
+                    let (parent, entry) = match work {
+                        Work::FinishDir { path, mtime } => {
+                            server.filesystem.set_times(&path, mtime, None)?;
+                            continue;
                         }
+                        Work::Visit { parent, entry } => (parent, entry),
+                    };
 
-                        let mut writer = crate::server::filesystem::writer::FileSystemWriter::new(
-                            server.clone(),
-                            &path,
-                            Some(PortablePermissions::from_mode(file.mode.bits())),
-                            Some(cap_std::time::SystemTime::from_std(file.mtime)),
-                        )?;
-                        let reader = repository.entry_reader(Entry::File(file.clone()))?;
-                        let mut reader =
-                            CountingReader::new_with_bytes_read(reader, Arc::clone(progress));
+                    let path = parent.join(entry.name());
 
-                        crate::io::copy(&mut reader, &mut writer)?;
-                        writer.flush()?;
+                    if server
+                        .filesystem
+                        .is_ignored_sync(&path, entry.is_directory())
+                    {
+                        continue;
                     }
-                    Entry::Directory(directory) => {
-                        server.filesystem.create_dir_all(&path)?;
-                        server.filesystem.set_permissions(
-                            &path,
-                            PortablePermissions::from_mode(directory.mode.bits()),
-                        )?;
 
-                        for entry in &directory.entries {
-                            recursive_restore(repository, entry, &path, server, progress)?;
+                    match entry {
+                        Entry::File(file) => {
+                            server.log_daemon(compact_str::format_compact!("(restoring): {}", path.display()));
+
+                            if let Some(parent) = path.parent() {
+                                server.filesystem.create_dir_all(parent)?;
+                            }
+
+                            let mut writer = crate::server::filesystem::writer::FileSystemWriter::new(
+                                server.clone(),
+                                &path,
+                                Some(PortablePermissions::from_mode(file.mode.bits())),
+                                Some(cap_std::time::SystemTime::from_std(file.mtime)),
+                            )?;
+                            let reader = repository.entry_reader(Entry::File(file.clone()))?;
+                            let mut reader =
+                                CountingReader::new_with_bytes_read(reader, Arc::clone(progress));
+
+                            crate::io::copy(&mut reader, &mut writer)?;
+                            writer.flush()?;
                         }
+                        Entry::Directory(directory) => {
+                            server.filesystem.create_dir_all(&path)?;
+                            server.filesystem.set_permissions(
+                                &path,
+                                PortablePermissions::from_mode(directory.mode.bits()),
+                            )?;
 
-                        server.filesystem.set_times(&path, directory.mtime, None)?;
-                    }
-                    Entry::Symlink(symlink) => {
-                        if let Err(err) = server.filesystem.symlink(&symlink.target, &path) {
-                            tracing::debug!(path = %path.display(), "failed to create symlink from backup: {:?}", err);
-                        } else {
-                            server.filesystem.set_times(&path, symlink.mtime, None)?;
+                            stack.push(Work::FinishDir {
+                                path: path.clone(),
+                                mtime: directory.mtime,
+                            });
+
+                            for child in directory.entries.iter().rev() {
+                                stack.push(Work::Visit {
+                                    parent: path.clone(),
+                                    entry: child,
+                                });
+                            }
+                        }
+                        Entry::Symlink(symlink) => {
+                            if let Err(err) = server.filesystem.symlink(&symlink.target, &path) {
+                                tracing::debug!(path = %path.display(), "failed to create symlink from backup: {:?}", err);
+                            } else {
+                                server.filesystem.set_times(&path, symlink.mtime, None)?;
+                            }
                         }
                     }
                 }
@@ -661,7 +713,7 @@ impl BackupExt for DdupBakBackup {
             }
 
             for entry in archive.entries() {
-                recursive_restore(
+                restore_entry(
                     &repository,
                     entry,
                     Path::new("."),

@@ -63,6 +63,72 @@ impl super::ProcessConfigurationFileParser for XmlFileParser {
     }
 }
 
+fn apply_xml_leaf(
+    element: &mut xmltree::Element,
+    tag: &str,
+    value: &str,
+    insert_new: bool,
+    update_existing: bool,
+) {
+    if let Some(attr_assignment) = value.strip_prefix('@') {
+        let Some((attr_name, attr_val)) = attr_assignment.split_once('=') else {
+            return;
+        };
+
+        if let Some(child) = element.get_mut_child(tag) {
+            let exists = child.attributes.contains_key(attr_name);
+            if (exists && update_existing) || (!exists && insert_new) {
+                child
+                    .attributes
+                    .insert(attr_name.to_string(), attr_val.to_string());
+            }
+        } else if insert_new {
+            let mut new_child = xmltree::Element::new(tag);
+            new_child
+                .attributes
+                .insert(attr_name.to_string(), attr_val.to_string());
+            element.children.push(xmltree::XMLNode::Element(new_child));
+        }
+        return;
+    }
+
+    if let Some(child) = element.get_mut_child(tag) {
+        if update_existing {
+            child.children.clear();
+            child
+                .children
+                .push(xmltree::XMLNode::Text(value.to_string()));
+        }
+    } else if insert_new {
+        let mut new_child = xmltree::Element::new(tag);
+        new_child
+            .children
+            .push(xmltree::XMLNode::Text(value.to_string()));
+        element.children.push(xmltree::XMLNode::Element(new_child));
+    }
+}
+
+fn build_xml_chain(
+    path: &[&str],
+    value: &str,
+    insert_new: bool,
+    update_existing: bool,
+) -> Option<xmltree::Element> {
+    let (&last, parents) = path.split_last()?;
+    let (&deepest_tag, ancestors) = parents.split_last()?;
+
+    let mut current = xmltree::Element::new(deepest_tag);
+    apply_xml_leaf(&mut current, last, value, insert_new, update_existing);
+
+    for &tag in ancestors.iter().rev() {
+        let mut parent = xmltree::Element::new(tag);
+        parent.children.push(xmltree::XMLNode::Element(current));
+        current = parent;
+    }
+
+    Some(current)
+}
+
 fn update_xml_element(
     element: &mut xmltree::Element,
     path: &[&str],
@@ -70,62 +136,34 @@ fn update_xml_element(
     insert_new: bool,
     update_existing: bool,
 ) {
-    let Some(&tag) = path.first() else {
-        return;
-    };
+    let mut element = element;
+    let mut path = path;
 
-    if path.len() == 1 {
-        if let Some(attr_assignment) = value.strip_prefix('@') {
-            let Some((attr_name, attr_val)) = attr_assignment.split_once('=') else {
-                return;
-            };
+    loop {
+        let (Some(&tag), Some(path_slice)) = (path.first(), path.get(1..)) else {
+            return;
+        };
 
-            if let Some(child) = element.get_mut_child(tag) {
-                let exists = child.attributes.contains_key(attr_name);
-                if (exists && update_existing) || (!exists && insert_new) {
-                    child
-                        .attributes
-                        .insert(attr_name.to_string(), attr_val.to_string());
-                }
-            } else if insert_new {
-                let mut new_child = xmltree::Element::new(tag);
-                new_child
-                    .attributes
-                    .insert(attr_name.to_string(), attr_val.to_string());
+        if path.len() == 1 {
+            apply_xml_leaf(element, tag, value, insert_new, update_existing);
+            return;
+        }
+
+        if element.get_mut_child(tag).is_none() {
+            if insert_new
+                && let Some(new_child) = build_xml_chain(path, value, insert_new, update_existing)
+            {
                 element.children.push(xmltree::XMLNode::Element(new_child));
             }
             return;
         }
 
-        if let Some(child) = element.get_mut_child(tag) {
-            if update_existing {
-                child.children.clear();
-                child
-                    .children
-                    .push(xmltree::XMLNode::Text(value.to_string()));
-            }
-        } else if insert_new {
-            let mut new_child = xmltree::Element::new(tag);
-            new_child
-                .children
-                .push(xmltree::XMLNode::Text(value.to_string()));
-            element.children.push(xmltree::XMLNode::Element(new_child));
-        }
+        let Some(child) = element.get_mut_child(tag) else {
+            return;
+        };
 
-        return;
-    }
-
-    let subpath = match path.get(1..) {
-        Some(p) if !p.is_empty() => p,
-        _ => return,
-    };
-
-    if let Some(child) = element.get_mut_child(tag) {
-        update_xml_element(child, subpath, value, insert_new, update_existing);
-    } else if insert_new {
-        let mut new_child = xmltree::Element::new(tag);
-        update_xml_element(&mut new_child, subpath, value, insert_new, update_existing);
-        element.children.push(xmltree::XMLNode::Element(new_child));
+        element = child;
+        path = path_slice;
     }
 }
 
@@ -136,53 +174,57 @@ fn update_xml_wildcard(
     insert_new: bool,
     update_existing: bool,
 ) {
-    let Some(&tag) = path.first() else {
-        return;
-    };
+    let mut stack: Vec<(&mut xmltree::Element, &[&str])> = vec![(element, path)];
 
-    let subpath = match path.get(1..) {
-        Some(p) if !p.is_empty() => p,
-        _ => return,
-    };
-
-    let should_check_insertion = tag != "*" && insert_new;
-    let mut found_match = false;
-
-    for child in &mut element.children {
-        let xmltree::XMLNode::Element(child_elem) = child else {
+    while let Some((element, path)) = stack.pop() {
+        let Some(&tag) = path.first() else {
             continue;
         };
 
-        let matches = tag == "*" || child_elem.name == tag;
-        if !matches {
-            continue;
-        }
+        let subpath = match path.get(1..) {
+            Some(p) if !p.is_empty() => p,
+            _ => continue,
+        };
 
-        found_match = true;
+        let should_check_insertion = tag != "*" && insert_new;
 
-        if path.len() == 1 {
-            if update_existing {
-                child_elem.children.clear();
-                child_elem
-                    .children
-                    .push(xmltree::XMLNode::Text(value.to_string()));
+        let found_match = element.children.iter().any(
+            |child| matches!(child, xmltree::XMLNode::Element(e) if tag == "*" || e.name == tag),
+        );
+
+        if !found_match {
+            if should_check_insertion {
+                let mut new_child = xmltree::Element::new(tag);
+                if path.len() == 1 {
+                    new_child
+                        .children
+                        .push(xmltree::XMLNode::Text(value.to_string()));
+                }
+                element.children.push(xmltree::XMLNode::Element(new_child));
+            } else {
+                continue;
             }
-        } else {
-            update_xml_wildcard(child_elem, subpath, value, insert_new, update_existing);
         }
-    }
 
-    if !found_match && should_check_insertion {
-        if path.len() == 1 {
-            let mut new_child = xmltree::Element::new(tag);
-            new_child
-                .children
-                .push(xmltree::XMLNode::Text(value.to_string()));
-            element.children.push(xmltree::XMLNode::Element(new_child));
-        } else {
-            let mut new_child = xmltree::Element::new(tag);
-            update_xml_wildcard(&mut new_child, subpath, value, insert_new, update_existing);
-            element.children.push(xmltree::XMLNode::Element(new_child));
+        for child in &mut element.children {
+            let xmltree::XMLNode::Element(child_elem) = child else {
+                continue;
+            };
+
+            if tag != "*" && child_elem.name != tag {
+                continue;
+            }
+
+            if path.len() == 1 {
+                if update_existing {
+                    child_elem.children.clear();
+                    child_elem
+                        .children
+                        .push(xmltree::XMLNode::Text(value.to_string()));
+                }
+            } else {
+                stack.push((child_elem, subpath));
+            }
         }
     }
 }

@@ -57,18 +57,25 @@ impl EntryReaderExt for Option<Arc<ddup_bak::repository::Repository>> {
 }
 
 fn entry_size_recursive(entry: &Entry) -> (u64, u64) {
-    match entry {
-        Entry::File(file) => (
-            file.size_real,
-            file.size_compressed.unwrap_or(file.size_real),
-        ),
-        Entry::Directory(dir) => dir
-            .entries
-            .iter()
-            .map(entry_size_recursive)
-            .fold((0, 0), |acc, x| (acc.0 + x.0, acc.1 + x.1)),
-        Entry::Symlink(link) => (link.target.len() as u64, link.target.len() as u64),
+    let mut logical = 0;
+    let mut physical = 0;
+    let mut stack = vec![entry];
+
+    while let Some(entry) = stack.pop() {
+        match entry {
+            Entry::File(file) => {
+                logical += file.size_real;
+                physical += file.size_compressed.unwrap_or(file.size_real);
+            }
+            Entry::Directory(dir) => stack.extend(dir.entries.iter()),
+            Entry::Symlink(link) => {
+                logical += link.target.len() as u64;
+                physical += link.target.len() as u64;
+            }
+        }
     }
+
+    (logical, physical)
 }
 
 pub trait CmpSortExt {
@@ -114,6 +121,7 @@ pub struct VirtualDdupBakArchive {
     pub archive_created: chrono::DateTime<chrono::Utc>,
     pub repository: Option<Arc<ddup_bak::repository::Repository>>,
     pub sizes: Arc<crate::server::filesystem::usage::DiskUsage>,
+    pub mime_cache: moka::sync::Cache<u64, MimeCacheValue>,
 }
 
 fn sort_dir_entries_by_size(
@@ -150,7 +158,10 @@ fn populate_disk_usage(
     prefix: &Path,
     sizes: &mut crate::server::filesystem::usage::DiskUsage,
 ) {
-    for entry in entries {
+    let mut stack: Vec<(PathBuf, &Entry)> =
+        entries.iter().map(|e| (prefix.to_path_buf(), e)).collect();
+
+    while let Some((prefix, entry)) = stack.pop() {
         let entry_path = prefix.join(entry.name());
         match entry {
             Entry::File(file) => {
@@ -158,15 +169,17 @@ fn populate_disk_usage(
                     file.size_real as i64,
                     file.size_compressed.unwrap_or(file.size_real) as i64,
                 );
-                sizes.update_size(prefix, delta);
+                sizes.update_size(&prefix, delta);
             }
             Entry::Directory(dir) => {
                 sizes.update_size(&entry_path, SpaceDelta::new(0, 0));
-                populate_disk_usage(&dir.entries, &entry_path, sizes);
+                for child in dir.entries.iter() {
+                    stack.push((entry_path.clone(), child));
+                }
             }
             Entry::Symlink(link) => {
                 let len = link.target.len() as i64;
-                sizes.update_size(prefix, SpaceDelta::new(len, len));
+                sizes.update_size(&prefix, SpaceDelta::new(len, len));
             }
         }
     }
@@ -188,6 +201,7 @@ impl VirtualDdupBakArchive {
             archive_created,
             repository,
             sizes: Arc::new(sizes),
+            mime_cache: moka::sync::Cache::new(10240),
         }
     }
 
@@ -221,15 +235,43 @@ impl VirtualDdupBakArchive {
         archive_created: &chrono::DateTime<chrono::Utc>,
         path: &Path,
         entry: &ddup_bak::archive::entries::Entry,
+        repository: &Option<Arc<ddup_bak::repository::Repository>>,
+        mime_cache: &moka::sync::Cache<u64, MimeCacheValue>,
+        buffer: Option<&[u8]>,
     ) -> DirectoryEntry {
         let (size, size_physical) = entry_size_recursive(entry);
 
-        let detected_mime = if entry.is_directory() {
-            MimeCacheValue::directory()
-        } else if entry.is_symlink() {
-            MimeCacheValue::symlink()
-        } else {
-            crate::utils::detect_mime_type(path, None)
+        let detected_mime = match entry {
+            Entry::Directory(_) => MimeCacheValue::directory(),
+            Entry::Symlink(_) => MimeCacheValue::symlink(),
+            Entry::File(file) => {
+                if let Some(detected_mime) = mime_cache.get(&file.offset) {
+                    detected_mime
+                } else {
+                    let detected_mime = match buffer {
+                        Some(buffer) => crate::utils::detect_mime_type(path, Some(buffer)),
+                        None => {
+                            if let Ok(mut reader) =
+                                repository.entry_reader(Entry::File(file.clone()))
+                            {
+                                let mut buffer = [0; 64];
+                                let buffer = if reader.read(&mut buffer).is_err() {
+                                    None
+                                } else {
+                                    Some(&buffer[..])
+                                };
+
+                                crate::utils::detect_mime_type(path, buffer)
+                            } else {
+                                crate::utils::detect_mime_type(path, None)
+                            }
+                        }
+                    };
+
+                    mime_cache.insert(file.offset, detected_mime);
+                    detected_mime
+                }
+            }
         };
 
         DirectoryEntry {
@@ -269,7 +311,7 @@ impl VirtualDdupBakArchive {
         }
     }
 
-    fn tar_recursive_convert_entries(
+    fn tar_convert_entries(
         entry: &Entry,
         repository: &Option<Arc<ddup_bak::repository::Repository>>,
         archive: &mut tar::Builder<impl Write + 'static>,
@@ -277,65 +319,62 @@ impl VirtualDdupBakArchive {
         bytes_archived: &Option<Arc<AtomicU64>>,
         is_ignored: &IsIgnoredFn,
     ) -> Result<(), anyhow::Error> {
-        let path = parent_path.join(entry.name());
+        let mut stack: Vec<(PathBuf, &Entry)> = vec![(parent_path.to_path_buf(), entry)];
 
-        let Some(path) = (is_ignored)(Self::ddup_bak_entry_to_file_type(entry), path) else {
-            return Ok(());
-        };
+        while let Some((parent_path, entry)) = stack.pop() {
+            let path = parent_path.join(entry.name());
 
-        let mut entry_header = tar::Header::new_gnu();
-        entry_header.set_size(0);
-        entry_header.set_mode(entry.mode().bits());
-        entry_header.set_mtime(
-            entry
-                .mtime()
-                .duration_since(std::time::UNIX_EPOCH)?
-                .as_secs(),
-        );
+            let Some(path) = (is_ignored)(Self::ddup_bak_entry_to_file_type(entry), path) else {
+                continue;
+            };
 
-        match entry {
-            Entry::Directory(dir) => {
-                entry_header.set_entry_type(tar::EntryType::Directory);
+            let mut entry_header = tar::Header::new_gnu();
+            entry_header.set_size(0);
+            entry_header.set_mode(entry.mode().bits());
+            entry_header.set_mtime(
+                entry
+                    .mtime()
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .as_secs(),
+            );
 
-                archive.append_data(&mut entry_header, &path, std::io::empty())?;
+            match entry {
+                Entry::Directory(dir) => {
+                    entry_header.set_entry_type(tar::EntryType::Directory);
 
-                for entry in dir.entries.iter() {
-                    Self::tar_recursive_convert_entries(
-                        entry,
-                        repository,
-                        archive,
-                        &path,
-                        bytes_archived,
-                        is_ignored,
-                    )?;
+                    archive.append_data(&mut entry_header, &path, std::io::empty())?;
+
+                    for child in dir.entries.iter().rev() {
+                        stack.push((path.clone(), child));
+                    }
                 }
-            }
-            Entry::File(file) => {
-                entry_header.set_entry_type(tar::EntryType::Regular);
-                entry_header.set_size(file.size_real);
+                Entry::File(file) => {
+                    entry_header.set_entry_type(tar::EntryType::Regular);
+                    entry_header.set_size(file.size_real);
 
-                let reader: Box<dyn Read> = match &bytes_archived {
-                    Some(bytes_archived) => Box::new(CountingReader::new_with_bytes_read(
-                        repository.entry_reader(Entry::File(file.clone()))?,
-                        Arc::clone(bytes_archived),
-                    )),
-                    None => Box::new(repository.entry_reader(Entry::File(file.clone()))?),
-                };
-                let reader = FixedReader::new_with_fixed_bytes(reader, file.size_real as usize);
+                    let reader: Box<dyn Read> = match &bytes_archived {
+                        Some(bytes_archived) => Box::new(CountingReader::new_with_bytes_read(
+                            repository.entry_reader(Entry::File(file.clone()))?,
+                            Arc::clone(bytes_archived),
+                        )),
+                        None => Box::new(repository.entry_reader(Entry::File(file.clone()))?),
+                    };
+                    let reader = FixedReader::new_with_fixed_bytes(reader, file.size_real as usize);
 
-                archive.append_data(&mut entry_header, &path, reader)?;
-            }
-            Entry::Symlink(link) => {
-                entry_header.set_entry_type(tar::EntryType::Symlink);
+                    archive.append_data(&mut entry_header, &path, reader)?;
+                }
+                Entry::Symlink(link) => {
+                    entry_header.set_entry_type(tar::EntryType::Symlink);
 
-                archive.append_link(&mut entry_header, &path, &link.target)?;
+                    archive.append_link(&mut entry_header, &path, &link.target)?;
+                }
             }
         }
 
         Ok(())
     }
 
-    fn itaf_recursive_convert_entries<W: Write>(
+    fn itaf_convert_entries<W: Write>(
         entry: &Entry,
         repository: &Option<Arc<ddup_bak::repository::Repository>>,
         itaf_enc: &mut ItafEncoder<W>,
@@ -343,62 +382,81 @@ impl VirtualDdupBakArchive {
         bytes_archived: &Option<Arc<AtomicU64>>,
         is_ignored: &IsIgnoredFn,
     ) -> Result<(), anyhow::Error> {
-        let path = parent_path.join(entry.name());
+        enum Work<'a> {
+            Visit {
+                parent_path: PathBuf,
+                entry: &'a Entry,
+            },
+            ExitDir,
+        }
 
-        let Some(path) = (is_ignored)(Self::ddup_bak_entry_to_file_type(entry), path) else {
-            return Ok(());
-        };
+        let mut stack: Vec<Work> = vec![Work::Visit {
+            parent_path: parent_path.to_path_buf(),
+            entry,
+        }];
 
-        let mtime = entry
-            .mtime()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default();
-        let meta = Metadata {
-            uid: 0,
-            gid: 0,
-            mode: entry.mode().bits(),
-            modified: std::time::UNIX_EPOCH + mtime,
-        };
-        let name: compact_str::CompactString = path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into();
-
-        match entry {
-            Entry::Directory(dir) => {
-                if itaf::spec::validate_name(&name).is_ok() {
-                    itaf_enc.enter_dir(&name, &meta)?;
-                    for child in &dir.entries {
-                        Self::itaf_recursive_convert_entries(
-                            child,
-                            repository,
-                            itaf_enc,
-                            &path,
-                            bytes_archived,
-                            is_ignored,
-                        )?;
-                    }
+        while let Some(work) = stack.pop() {
+            let (parent_path, entry) = match work {
+                Work::ExitDir => {
                     itaf_enc.exit_dir()?;
+                    continue;
                 }
-            }
-            Entry::File(file) => {
-                if itaf::spec::validate_name(&name).is_ok() {
-                    let reader: Box<dyn Read> = match bytes_archived {
-                        Some(ba) => Box::new(CountingReader::new_with_bytes_read(
-                            repository.entry_reader(Entry::File(file.clone()))?,
-                            Arc::clone(ba),
-                        )),
-                        None => Box::new(repository.entry_reader(Entry::File(file.clone()))?),
-                    };
-                    let mut reader =
-                        FixedReader::new_with_fixed_bytes(reader, file.size_real as usize);
-                    itaf_enc.add_file(&name, &meta, file.size_real, &mut { reader })?;
+                Work::Visit { parent_path, entry } => (parent_path, entry),
+            };
+
+            let path = parent_path.join(entry.name());
+
+            let Some(path) = (is_ignored)(Self::ddup_bak_entry_to_file_type(entry), path) else {
+                continue;
+            };
+
+            let mtime = entry
+                .mtime()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default();
+            let meta = Metadata {
+                uid: 0,
+                gid: 0,
+                mode: entry.mode().bits(),
+                modified: std::time::UNIX_EPOCH + mtime,
+            };
+            let name: compact_str::CompactString = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into();
+
+            match entry {
+                Entry::Directory(dir) => {
+                    if itaf::spec::validate_name(&name).is_ok() {
+                        itaf_enc.enter_dir(&name, &meta)?;
+                        stack.push(Work::ExitDir);
+                        for child in dir.entries.iter().rev() {
+                            stack.push(Work::Visit {
+                                parent_path: path.clone(),
+                                entry: child,
+                            });
+                        }
+                    }
                 }
-            }
-            Entry::Symlink(link) => {
-                if itaf::spec::validate_name(&name).is_ok() {
-                    itaf_enc.add_symlink(&name, &link.target, false, &meta)?;
+                Entry::File(file) => {
+                    if itaf::spec::validate_name(&name).is_ok() {
+                        let reader: Box<dyn Read> = match bytes_archived {
+                            Some(ba) => Box::new(CountingReader::new_with_bytes_read(
+                                repository.entry_reader(Entry::File(file.clone()))?,
+                                Arc::clone(ba),
+                            )),
+                            None => Box::new(repository.entry_reader(Entry::File(file.clone()))?),
+                        };
+                        let mut reader =
+                            FixedReader::new_with_fixed_bytes(reader, file.size_real as usize);
+                        itaf_enc.add_file(&name, &meta, file.size_real, &mut { reader })?;
+                    }
+                }
+                Entry::Symlink(link) => {
+                    if itaf::spec::validate_name(&name).is_ok() {
+                        itaf_enc.add_symlink(&name, &link.target, false, &meta)?;
+                    }
                 }
             }
         }
@@ -406,7 +464,7 @@ impl VirtualDdupBakArchive {
         Ok(())
     }
 
-    fn zip_recursive_convert_entries(
+    fn zip_convert_entries(
         entry: &Entry,
         repository: &Option<Arc<ddup_bak::repository::Repository>>,
         zip: &mut zip::ZipWriter<
@@ -419,65 +477,62 @@ impl VirtualDdupBakArchive {
         bytes_archived: &Option<Arc<AtomicU64>>,
         is_ignored: &IsIgnoredFn,
     ) -> Result<(), anyhow::Error> {
-        let path = parent_path.join(entry.name());
+        let mut stack: Vec<(PathBuf, &Entry)> = vec![(parent_path.to_path_buf(), entry)];
 
-        let Some(path) = (is_ignored)(Self::ddup_bak_entry_to_file_type(entry), path) else {
-            return Ok(());
-        };
+        while let Some((parent_path, entry)) = stack.pop() {
+            let path = parent_path.join(entry.name());
 
-        let size = match entry {
-            Entry::File(file) => file.size,
-            _ => 0,
-        };
+            let Some(path) = (is_ignored)(Self::ddup_bak_entry_to_file_type(entry), path) else {
+                continue;
+            };
 
-        let mut options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default()
-            .compression_level(Some(compression_level.to_deflate_level() as i64))
-            .unix_permissions(entry.mode().bits())
-            .large_file(size >= u32::MAX as u64);
-        {
-            let mtime: chrono::DateTime<chrono::Utc> = chrono::DateTime::from(entry.mtime());
+            let size = match entry {
+                Entry::File(file) => file.size,
+                _ => 0,
+            };
 
-            options = options.last_modified_time(zip::DateTime::from_date_and_time(
-                mtime.year() as u16,
-                mtime.month() as u8,
-                mtime.day() as u8,
-                mtime.hour() as u8,
-                mtime.minute() as u8,
-                mtime.second() as u8,
-            )?);
-        }
+            let mut options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default()
+                .compression_level(Some(compression_level.to_deflate_level() as i64))
+                .unix_permissions(entry.mode().bits())
+                .large_file(size >= u32::MAX as u64);
+            {
+                let mtime: chrono::DateTime<chrono::Utc> = chrono::DateTime::from(entry.mtime());
 
-        match entry {
-            Entry::Directory(dir) => {
-                zip.add_directory(path.to_string_lossy(), options)?;
+                options = options.last_modified_time(zip::DateTime::from_date_and_time(
+                    mtime.year() as u16,
+                    mtime.month() as u8,
+                    mtime.day() as u8,
+                    mtime.hour() as u8,
+                    mtime.minute() as u8,
+                    mtime.second() as u8,
+                )?);
+            }
 
-                for entry in dir.entries.iter() {
-                    Self::zip_recursive_convert_entries(
-                        entry,
-                        repository,
-                        zip,
-                        compression_level,
-                        &path,
-                        bytes_archived,
-                        is_ignored,
-                    )?;
+            match entry {
+                Entry::Directory(dir) => {
+                    zip.add_directory(path.to_string_lossy(), options)?;
+
+                    for child in dir.entries.iter().rev() {
+                        stack.push((path.clone(), child));
+                    }
                 }
-            }
-            Entry::File(file) => {
-                let reader: Box<dyn Read> = match &bytes_archived {
-                    Some(bytes_archived) => Box::new(CountingReader::new_with_bytes_read(
-                        repository.entry_reader(Entry::File(file.clone()))?,
-                        Arc::clone(bytes_archived),
-                    )),
-                    None => Box::new(repository.entry_reader(Entry::File(file.clone()))?),
-                };
-                let mut reader = FixedReader::new_with_fixed_bytes(reader, file.size_real as usize);
+                Entry::File(file) => {
+                    let reader: Box<dyn Read> = match &bytes_archived {
+                        Some(bytes_archived) => Box::new(CountingReader::new_with_bytes_read(
+                            repository.entry_reader(Entry::File(file.clone()))?,
+                            Arc::clone(bytes_archived),
+                        )),
+                        None => Box::new(repository.entry_reader(Entry::File(file.clone()))?),
+                    };
+                    let mut reader =
+                        FixedReader::new_with_fixed_bytes(reader, file.size_real as usize);
 
-                zip.start_file(path.to_string_lossy(), options)?;
-                crate::io::copy(&mut reader, zip)?;
-            }
-            Entry::Symlink(link) => {
-                zip.add_symlink(&link.name, &link.target, options)?;
+                    zip.start_file(path.to_string_lossy(), options)?;
+                    crate::io::copy(&mut reader, zip)?;
+                }
+                Entry::Symlink(link) => {
+                    zip.add_symlink(&link.name, &link.target, options)?;
+                }
             }
         }
 
@@ -554,28 +609,61 @@ impl VirtualReadableFilesystem for VirtualDdupBakArchive {
         path: &(dyn AsRef<Path> + Send + Sync),
     ) -> Result<DirectoryEntry, anyhow::Error> {
         let archive = self.archive.clone();
+        let archive_created = self.archive_created;
+        let repository = self.repository.clone();
+        let mime_cache = self.mime_cache.clone();
         let path = path.as_ref().to_path_buf();
 
-        let entry = archive.find_archive_entry(&path).ok_or_else(|| {
-            anyhow::anyhow!(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "File not found"
-            ))
-        })?;
+        tokio::task::spawn_blocking(move || -> Result<DirectoryEntry, anyhow::Error> {
+            let entry = archive.find_archive_entry(&path).ok_or_else(|| {
+                anyhow::anyhow!(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "File not found"
+                ))
+            })?;
 
-        Ok(Self::ddup_bak_entry_to_directory_entry(
-            &self.archive_created,
-            &path,
-            entry,
-        ))
+            Ok(Self::ddup_bak_entry_to_directory_entry(
+                &archive_created,
+                &path,
+                entry,
+                &repository,
+                &mime_cache,
+                None,
+            ))
+        })
+        .await?
     }
 
     async fn async_directory_entry_buffer(
         &self,
         path: &(dyn AsRef<Path> + Send + Sync),
-        _buffer: &[u8],
+        buffer: &[u8],
     ) -> Result<DirectoryEntry, anyhow::Error> {
-        self.async_directory_entry(path).await
+        let archive = self.archive.clone();
+        let archive_created = self.archive_created;
+        let repository = self.repository.clone();
+        let mime_cache = self.mime_cache.clone();
+        let path = path.as_ref().to_path_buf();
+        let buffer = buffer.to_owned();
+
+        tokio::task::spawn_blocking(move || -> Result<DirectoryEntry, anyhow::Error> {
+            let entry = archive.find_archive_entry(&path).ok_or_else(|| {
+                anyhow::anyhow!(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "File not found"
+                ))
+            })?;
+
+            Ok(Self::ddup_bak_entry_to_directory_entry(
+                &archive_created,
+                &path,
+                entry,
+                &repository,
+                &mime_cache,
+                Some(&buffer),
+            ))
+        })
+        .await?
     }
 
     async fn async_read_dir(
@@ -588,6 +676,8 @@ impl VirtualReadableFilesystem for VirtualDdupBakArchive {
     ) -> Result<DirectoryListing, anyhow::Error> {
         let archive = self.archive.clone();
         let archive_created = self.archive_created;
+        let repository = self.repository.clone();
+        let mime_cache = self.mime_cache.clone();
         let sizes = self.sizes.clone();
         let path = path.as_ref().to_path_buf();
 
@@ -645,6 +735,9 @@ impl VirtualReadableFilesystem for VirtualDdupBakArchive {
                                     &archive_created,
                                     &path,
                                     entry,
+                                    &repository,
+                                    &mime_cache,
+                                    None,
                                 ));
                             }
                         } else {
@@ -654,6 +747,9 @@ impl VirtualReadableFilesystem for VirtualDdupBakArchive {
                                     &archive_created,
                                     &path,
                                     entry,
+                                    &repository,
+                                    &mime_cache,
+                                    None,
                                 ));
                             }
                         }
@@ -712,6 +808,9 @@ impl VirtualReadableFilesystem for VirtualDdupBakArchive {
                                     &archive_created,
                                     &path,
                                     entry,
+                                    &repository,
+                                    &mime_cache,
+                                    None,
                                 ));
                             }
                         } else {
@@ -721,6 +820,9 @@ impl VirtualReadableFilesystem for VirtualDdupBakArchive {
                                     &archive_created,
                                     &path,
                                     entry,
+                                    &repository,
+                                    &mime_cache,
+                                    None,
                                 ));
                             }
                         }
@@ -876,7 +978,7 @@ impl VirtualReadableFilesystem for VirtualDdupBakArchive {
                             };
 
                             for entry in entry.entries.iter() {
-                                Self::zip_recursive_convert_entries(
+                                Self::zip_convert_entries(
                                     entry,
                                     &repository,
                                     &mut zip,
@@ -890,7 +992,7 @@ impl VirtualReadableFilesystem for VirtualDdupBakArchive {
                         None => {
                             if path.components().count() == 0 {
                                 for entry in archive.entries() {
-                                    Self::zip_recursive_convert_entries(
+                                    Self::zip_convert_entries(
                                         entry,
                                         &repository,
                                         &mut zip,
@@ -941,7 +1043,7 @@ impl VirtualReadableFilesystem for VirtualDdupBakArchive {
                             };
 
                             for entry in entry.entries.iter() {
-                                Self::tar_recursive_convert_entries(
+                                Self::tar_convert_entries(
                                     entry,
                                     &repository,
                                     &mut tar,
@@ -954,7 +1056,7 @@ impl VirtualReadableFilesystem for VirtualDdupBakArchive {
                         None => {
                             if path.components().count() == 0 {
                                 for entry in archive.entries() {
-                                    Self::tar_recursive_convert_entries(
+                                    Self::tar_convert_entries(
                                         entry,
                                         &repository,
                                         &mut tar,
@@ -1010,7 +1112,7 @@ impl VirtualReadableFilesystem for VirtualDdupBakArchive {
                             };
 
                             for entry in entry.entries.iter() {
-                                Self::itaf_recursive_convert_entries(
+                                Self::itaf_convert_entries(
                                     entry,
                                     &repository,
                                     &mut itaf_enc,
@@ -1023,7 +1125,7 @@ impl VirtualReadableFilesystem for VirtualDdupBakArchive {
                         None => {
                             if path.components().count() == 0 {
                                 for entry in archive.entries() {
-                                    Self::itaf_recursive_convert_entries(
+                                    Self::itaf_convert_entries(
                                         entry,
                                         &repository,
                                         &mut itaf_enc,
