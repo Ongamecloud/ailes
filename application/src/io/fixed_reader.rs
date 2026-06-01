@@ -23,7 +23,7 @@ impl<R: Read> FixedReader<R> {
 }
 
 impl<R: Read> Read for FixedReader<R> {
-    fn read(&mut self, mut buf: &mut [u8]) -> std::io::Result<usize> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         if self.bytes_read >= self.size {
             return Ok(0);
         }
@@ -78,7 +78,7 @@ impl<R: AsyncRead + Unpin> AsyncRead for AsyncFixedReader<R> {
             return Poll::Ready(Ok(()));
         }
 
-        let mut unfilled = buf.initialize_unfilled_to(to_read);
+        let unfilled = buf.initialize_unfilled_to(to_read);
         let mut tmp = ReadBuf::new(unfilled.get_slice_mut(..to_read)?);
 
         match Pin::new(&mut self.inner).poll_read(cx, &mut tmp) {

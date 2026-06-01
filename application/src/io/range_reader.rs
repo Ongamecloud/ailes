@@ -64,7 +64,7 @@ impl<R: Read + Seek> RangeReader<R> {
 }
 
 impl<R: Read + Seek> Read for RangeReader<R> {
-    fn read(&mut self, mut buf: &mut [u8]) -> io::Result<usize> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if let Some(end) = self.end {
             if self.pos > end {
                 return Ok(0);
@@ -155,7 +155,7 @@ impl<R: AsyncRead + AsyncSeek + Unpin> AsyncRead for AsyncRangeReader<R> {
             }
 
             let remaining = (end - me.pos + 1) as usize;
-            let mut unfilled = buf.initialize_unfilled();
+            let unfilled = buf.initialize_unfilled();
 
             let to_read = unfilled.len().min(remaining);
             let limited_buf = unfilled.get_slice_mut(..to_read)?;

@@ -1,6 +1,6 @@
 use crate::{
     io::{
-        SafeAsyncWrite,
+        SafeAsyncWrite, UninterruptedRead,
         compression::{CompressionLevel, writer::CompressionWriter},
         counting_reader::CountingReader,
         fixed_reader::FixedReader,
@@ -255,7 +255,7 @@ impl VirtualDdupBakArchive {
                                 repository.entry_reader(Entry::File(file.clone()))
                             {
                                 let mut buffer = [0; 64];
-                                let buffer = if reader.read(&mut buffer).is_err() {
+                                let buffer = if reader.read_uninterrupted(&mut buffer).is_err() {
                                     None
                                 } else {
                                     Some(&buffer[..])
@@ -896,7 +896,7 @@ impl VirtualReadableFilesystem for VirtualDdupBakArchive {
             let runtime = tokio::runtime::Handle::current();
             let mut buffer = vec![0; crate::BUFFER_SIZE];
             loop {
-                match entry_reader.read(&mut buffer) {
+                match entry_reader.read_uninterrupted(&mut buffer) {
                     Ok(0) => break,
                     Ok(bytes_read) => {
                         if runtime
@@ -1255,7 +1255,7 @@ impl VirtualReadableFilesystem for VirtualDdupBakArchive {
                                     let runtime = tokio::runtime::Handle::current();
                                     let mut buffer = vec![0; crate::BUFFER_SIZE];
                                     loop {
-                                        match entry_reader.read(&mut buffer) {
+                                        match entry_reader.read_uninterrupted(&mut buffer) {
                                             Ok(0) => break,
                                             Ok(bytes_read) => {
                                                 if runtime

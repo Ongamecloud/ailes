@@ -27,7 +27,7 @@ pub fn copy(
 pub fn copy_shared(
     buffer: &mut [u8],
     reader: &mut (impl ?Sized + Read),
-    mut writer: &mut (impl ?Sized + Write),
+    writer: &mut (impl ?Sized + Write),
 ) -> std::io::Result<()> {
     loop {
         let bytes_read = reader.read(buffer)?;
@@ -45,7 +45,7 @@ pub fn copy_shared(
 #[cfg(unix)]
 pub fn copy_file_progress(
     reader: &mut (impl std::os::fd::AsFd + Read + ?Sized),
-    mut writer: &mut (impl std::os::fd::AsFd + Write + ?Sized),
+    writer: &mut (impl std::os::fd::AsFd + Write + ?Sized),
     mut progress: impl FnMut(usize) -> Result<(), std::io::Error>,
     listener: abort::AbortListener,
 ) -> Result<u64, std::io::Error> {
@@ -86,7 +86,7 @@ pub fn copy_file_progress(
                             return Err(std::io::Error::other("Operation aborted"));
                         }
 
-                        let bytes_read = reader.read(&mut buffer)?;
+                        let bytes_read = reader.read_uninterrupted(&mut buffer)?;
                         if crate::unlikely(bytes_read == 0) {
                             break;
                         }
@@ -110,7 +110,7 @@ pub fn copy_file_progress(
 #[cfg(not(unix))]
 pub fn copy_file_progress(
     reader: &mut (impl Read + ?Sized),
-    mut writer: &mut (impl Write + ?Sized),
+    writer: &mut (impl Write + ?Sized),
     mut progress: impl FnMut(usize) -> Result<(), std::io::Error>,
     listener: abort::AbortListener,
 ) -> Result<u64, std::io::Error> {
@@ -122,7 +122,7 @@ pub fn copy_file_progress(
             return Err(std::io::Error::other("Operation aborted"));
         }
 
-        let bytes_read = reader.read(&mut buffer)?;
+        let bytes_read = reader.read_uninterrupted(&mut buffer)?;
         if crate::unlikely(bytes_read == 0) {
             break;
         }
@@ -166,7 +166,7 @@ pub trait SafeWrite: Write {
         unsafe { self.write_all(buf.get_unchecked(..start_bytes)) }
     }
 }
-impl<T: Write> SafeWrite for T {}
+impl<T: Write + ?Sized> SafeWrite for T {}
 pub trait SafeAsyncWrite: tokio::io::AsyncWrite + Unpin {
     async fn safe_write_all(&mut self, buf: &[u8], start_bytes: usize) -> std::io::Result<()> {
         if crate::unlikely(start_bytes > buf.len()) {
@@ -180,7 +180,7 @@ pub trait SafeAsyncWrite: tokio::io::AsyncWrite + Unpin {
         unsafe { self.write_all(buf.get_unchecked(..start_bytes)).await }
     }
 }
-impl<T: tokio::io::AsyncWrite + Unpin> SafeAsyncWrite for T {}
+impl<T: tokio::io::AsyncWrite + Unpin + ?Sized> SafeAsyncWrite for T {}
 
 pub trait SafeDigest: sha2::Digest {
     fn safe_update(&mut self, buf: &[u8], start_bytes: usize) -> std::io::Result<()> {
@@ -197,27 +197,17 @@ pub trait SafeDigest: sha2::Digest {
         Ok(())
     }
 }
-impl<T: sha2::Digest> SafeDigest for T {}
+impl<T: sha2::Digest + ?Sized> SafeDigest for T {}
 
 fn resolve_range(range: impl RangeBounds<usize>, len: usize) -> std::io::Result<(usize, usize)> {
     let start = match range.start_bound() {
         Bound::Included(&n) => n,
-        Bound::Excluded(&n) => n.checked_add(1).ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "range start overflows usize",
-            )
-        })?,
+        Bound::Excluded(&n) => n.saturating_add(1),
         Bound::Unbounded => 0,
     };
 
     let end = match range.end_bound() {
-        Bound::Included(&n) => n.checked_add(1).ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "range end overflows usize",
-            )
-        })?,
+        Bound::Included(&n) => n.saturating_add(1),
         Bound::Excluded(&n) => n,
         Bound::Unbounded => len,
     };
@@ -248,7 +238,7 @@ pub trait SafeSlice<T>: AsRef<[T]> {
         Ok(unsafe { slice.get_unchecked(start..end) })
     }
 }
-impl<T, Tr: AsRef<[T]>> SafeSlice<T> for Tr {}
+impl<T, Tr: AsRef<[T]> + ?Sized> SafeSlice<T> for Tr {}
 
 pub trait SafeSliceMut<T>: AsMut<[T]> {
     fn get_slice_mut(&mut self, range: impl RangeBounds<usize>) -> std::io::Result<&mut [T]> {
@@ -259,4 +249,17 @@ pub trait SafeSliceMut<T>: AsMut<[T]> {
         Ok(unsafe { slice.get_unchecked_mut(start..end) })
     }
 }
-impl<T, Tr: AsMut<[T]>> SafeSliceMut<T> for Tr {}
+impl<T, Tr: AsMut<[T]> + ?Sized> SafeSliceMut<T> for Tr {}
+
+pub trait UninterruptedRead: Read {
+    fn read_uninterrupted(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            match self.read(buf) {
+                Ok(bytes_read) => return Ok(bytes_read),
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(err) => return Err(err),
+            }
+        }
+    }
+}
+impl<T: Read + ?Sized> UninterruptedRead for T {}

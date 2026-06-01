@@ -1,6 +1,6 @@
 use crate::{
     io::{
-        SafeSlice, SafeWrite,
+        SafeSlice, SafeWrite, UninterruptedRead,
         compression::{CompressionLevel, writer::CompressionWriter},
         counting_reader::CountingReader,
     },
@@ -1872,7 +1872,7 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
                                 zip.start_file(relative.to_string_lossy(), options)?;
 
                                 loop {
-                                    let bytes_read = entry.read(&mut read_buffer)?;
+                                    let bytes_read = entry.read_uninterrupted(&mut read_buffer)?;
                                     if crate::unlikely(bytes_read == 0) {
                                         break;
                                     }
@@ -2246,7 +2246,8 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
                                             zip.start_file(relative.to_string_lossy(), options)?;
 
                                             loop {
-                                                let bytes_read = entry.read(&mut read_buffer)?;
+                                                let bytes_read =
+                                                    entry.read_uninterrupted(&mut read_buffer)?;
                                                 if crate::unlikely(bytes_read == 0) {
                                                     break;
                                                 }
@@ -2293,7 +2294,8 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
                                 let mut restic_file = child.take_stdout()?;
 
                                 loop {
-                                    let bytes_read = restic_file.read(&mut read_buffer)?;
+                                    let bytes_read =
+                                        restic_file.read_uninterrupted(&mut read_buffer)?;
                                     if crate::unlikely(bytes_read == 0) {
                                         break;
                                     }

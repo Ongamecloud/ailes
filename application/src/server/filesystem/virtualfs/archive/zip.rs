@@ -1,6 +1,6 @@
 use crate::{
     io::{
-        SafeAsyncWrite, SafeSlice,
+        SafeAsyncWrite, SafeSlice, UninterruptedRead,
         compression::{CompressionLevel, writer::CompressionWriter},
         counting_reader::CountingReader,
     },
@@ -251,7 +251,7 @@ impl VirtualZipArchive {
             detected_mime
         } else {
             let mut buffer = [0; 64];
-            let buffer = if entry.read(&mut buffer).is_err() {
+            let buffer = if entry.read_uninterrupted(&mut buffer).is_err() {
                 None
             } else {
                 Some(&buffer[..])
@@ -716,7 +716,7 @@ impl VirtualReadableFilesystem for VirtualZipArchive {
 
                                     let mut buffer = vec![0; crate::BUFFER_SIZE];
                                     loop {
-                                        match entry.read(&mut buffer) {
+                                        match entry.read_uninterrupted(&mut buffer) {
                                             Ok(0) => break,
                                             Ok(bytes_read) => {
                                                 if runtime
@@ -811,7 +811,7 @@ impl VirtualReadableFilesystem for VirtualZipArchive {
 
             let mut buffer = vec![0; crate::BUFFER_SIZE];
             loop {
-                match entry.read(&mut buffer) {
+                match entry.read_uninterrupted(&mut buffer) {
                     Ok(0) => break,
                     Ok(bytes_read) => {
                         if runtime
