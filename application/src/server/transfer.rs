@@ -1,6 +1,6 @@
 use crate::{
     io::{
-        SafeAsyncWrite, SafeDigest,
+        SafeAsyncWriteExt, SafeDigestExt,
         compression::{CompressionLevel, CompressionType},
         counting_reader::AsyncCountingReader,
         hash_reader::AsyncHashReader,

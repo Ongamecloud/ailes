@@ -13,7 +13,7 @@ use tokio::{
     sync::RwLock,
 };
 
-use crate::io::SafeSlice;
+use crate::io::SafeSliceExt;
 
 #[inline]
 pub fn string_to_option(s: &str) -> Option<String> {

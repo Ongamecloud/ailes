@@ -3,7 +3,7 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 
 mod post {
     use crate::{
-        io::{SafeSlice, SafeSliceMut},
+        io::{SafeSliceExt, SafeSliceMutExt},
         response::{ApiResponse, ApiResponseResult},
         routes::{ApiError, GetState, api::servers::_server_::GetServer},
         server::filesystem::{cap::FileType, virtualfs::DirectoryWalkFn},

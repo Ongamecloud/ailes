@@ -1,6 +1,6 @@
 use super::ServerHandle;
 use crate::{
-    io::{SafeDigest, SafeSlice, SafeWrite},
+    io::{SafeDigestExt, SafeSliceExt, SafeWriteExt},
     server::{
         activity::{Activity, ActivityEvent},
         permissions::Permission,
@@ -474,7 +474,15 @@ pub async fn handle_extended(
                         max_packet_length: 32 * 1024,
                         max_read_length: 128 * 1024,
                         max_write_length: 128 * 1024,
-                        max_handle_count: super::HANDLE_LIMIT as u64,
+                        max_handle_count: sftp_session
+                            .state
+                            .config
+                            .load()
+                            .system
+                            .sftp
+                            .limits
+                            .max_handles_per_channel
+                            as u64,
                     })
                     .map_err(map_ser_err)?
                     .into(),

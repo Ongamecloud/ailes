@@ -1,6 +1,6 @@
 use crate::{
     io::{
-        SafeSlice,
+        SafeSliceExt,
         abort::{AbortGuard, AbortWriter},
         compression::{CompressionLevel, CompressionType, writer::CompressionWriter},
         counting_reader::CountingReader,

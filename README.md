@@ -93,6 +93,14 @@ system:
       # how long in seconds to cooldown after reaching max authentication attempts (if 0, no cooldown is applied)
       # the cooldown is a sliding window, so if you make 3 failed attempts in 1 minute, you will have to wait 60 seconds from the last attempt
       authentication_cooldown: 60
+      # how many concurrent connections a single user can have
+      max_connections_per_user: 10
+      # how many concurrent channels a single connection can have
+      max_channels_per_connection: 10
+      # how many concurrent open handles a single channel can have
+      max_handles_per_channel: 32
+      # how many concurrent open handles a single server can have
+      max_handles_total: 1024
 
     shell:
       # whether to enable the wings remote shell (allows server management over ssh)

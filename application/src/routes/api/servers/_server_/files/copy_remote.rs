@@ -4,7 +4,7 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 mod post {
     use crate::{
         io::{
-            SafeAsyncWrite, SafeDigest, compression::CompressionLevel,
+            SafeAsyncWriteExt, SafeDigestExt, compression::CompressionLevel,
             counting_reader::AsyncCountingReader,
         },
         response::{ApiResponse, ApiResponseResult},

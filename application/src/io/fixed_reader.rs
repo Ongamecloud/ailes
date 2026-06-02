@@ -1,4 +1,4 @@
-use crate::io::SafeSliceMut;
+use crate::io::SafeSliceMutExt;
 use std::{
     io::Read,
     pin::Pin,

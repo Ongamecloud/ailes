@@ -22,16 +22,23 @@ use std::{
 mod extended;
 
 pub struct FileHandle {
+    _guard: super::limiter::SshLimiterHandleGuard,
     path: PathBuf,
     path_components: Vec<String>,
 
     file: Arc<Mutex<std::fs::File>>,
+
+    diff_track: bool,
+    diff_before: Option<Vec<u8>>,
+    diff_dirty: bool,
 }
 
 pub struct DirHandle {
+    _guard: super::limiter::SshLimiterHandleGuard,
     path: PathBuf,
 
     dir: crate::server::filesystem::cap::AsyncReadDir,
+
     consumed: u64,
 }
 
@@ -50,9 +57,8 @@ impl ServerHandle {
     }
 }
 
-const HANDLE_LIMIT: usize = 32;
-
 pub struct SftpSession {
+    pub limiter: Arc<super::limiter::SshLimiter>,
     pub state: State,
     pub server: crate::server::Server,
 
@@ -221,7 +227,49 @@ impl russh_sftp::server::Handler for SftpSession {
     }
 
     async fn close(&mut self, id: u32, handle: String) -> Result<Status, Self::Error> {
-        self.handles.remove(handle.as_str());
+        if let Some(ServerHandle::File(handle)) = self.handles.remove(handle.as_str())
+            && handle.diff_track
+            && handle.diff_dirty
+        {
+            let file_size_cap = self.state.config.load().system.file_history.file_size_cap;
+            let diff_key = handle.path.to_string_lossy().to_string();
+
+            match self
+                .server
+                .filesystem
+                .async_read_to_vec(&handle.path, file_size_cap.saturating_add(1) as usize)
+                .await
+            {
+                Ok(after) if after.len() as u64 <= file_size_cap => {
+                    if let Err(err) = self
+                        .server
+                        .diff
+                        .record_edit(&diff_key, handle.diff_before, after, Some(self.user_uuid))
+                        .await
+                    {
+                        tracing::warn!(
+                            server = %self.server.uuid,
+                            path = %diff_key,
+                            "diff: sftp record_edit failed: {err:#}"
+                        );
+                    }
+                }
+                Ok(_) => {
+                    tracing::debug!(
+                        server = %self.server.uuid,
+                        path = %diff_key,
+                        "diff: sftp post-write content exceeds file_size_cap; not recorded"
+                    );
+                }
+                Err(err) => {
+                    tracing::debug!(
+                        server = %self.server.uuid,
+                        path = %diff_key,
+                        "diff: sftp failed to read post-edit content: {err}"
+                    );
+                }
+            }
+        }
 
         Ok(Status {
             id,
@@ -263,7 +311,16 @@ impl russh_sftp::server::Handler for SftpSession {
             return Err(StatusCode::PermissionDenied);
         }
 
-        if self.handles.len() >= HANDLE_LIMIT {
+        if self.handles.len()
+            >= self
+                .state
+                .config
+                .load()
+                .system
+                .sftp
+                .limits
+                .max_handles_per_channel
+        {
             return Err(StatusCode::Failure);
         }
 
@@ -290,6 +347,10 @@ impl russh_sftp::server::Handler for SftpSession {
         self.handles.insert(
             handle.clone(),
             ServerHandle::Dir(DirHandle {
+                _guard: self
+                    .limiter
+                    .open_handle()
+                    .map_err(|_| StatusCode::Failure)?,
                 path,
                 dir,
                 consumed: 0,
@@ -400,11 +461,37 @@ impl russh_sftp::server::Handler for SftpSession {
                 return Err(StatusCode::NoSuchFile);
             }
 
+            let before = {
+                let config = self.state.config.load();
+                let history = &config.system.file_history;
+                let cap = history.file_size_cap;
+
+                if history.enabled && metadata.len() > 0 && metadata.len() <= cap {
+                    drop(config);
+                    match self
+                        .server
+                        .filesystem
+                        .async_read_to_vec(&path, cap.saturating_add(1) as usize)
+                        .await
+                    {
+                        Ok(content) if content.len() as u64 <= cap => Some(content),
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
+            };
+
             if self.server.filesystem.truncate_path(&path).await.is_err() {
                 return Err(StatusCode::NoSuchFile);
             }
 
-            if let Err(err) = self.server.diff.forget_file(&path.to_string_lossy()).await {
+            if let Err(err) = self
+                .server
+                .diff
+                .forget_file(&path.to_string_lossy(), before)
+                .await
+            {
                 tracing::error!("failed to forget file from diff storage: {:?}", err);
             }
 
@@ -644,13 +731,58 @@ impl russh_sftp::server::Handler for SftpSession {
         }
 
         let new_path = self.server.filesystem.relative_path(&new_path);
-        if let Err(err) = self
+        let new_key = new_path.to_string_lossy().to_string();
+        let replaced = match self
             .server
             .diff
-            .rename_file(&old_path.to_string_lossy(), &new_path.to_string_lossy())
+            .rename_file(&old_path.to_string_lossy(), &new_key)
             .await
         {
-            tracing::error!("failed to rename file in diff storage: {:?}", err);
+            Ok(replaced) => replaced,
+            Err(err) => {
+                tracing::error!("failed to rename file in diff storage: {:?}", err);
+                None
+            }
+        };
+
+        if let Some(before) = replaced {
+            let file_size_cap = self.state.config.load().system.file_history.file_size_cap;
+
+            match self
+                .server
+                .filesystem
+                .async_read_to_vec(&new_path, file_size_cap.saturating_add(1) as usize)
+                .await
+            {
+                Ok(after) if after.len() as u64 <= file_size_cap => {
+                    if let Err(err) = self
+                        .server
+                        .diff
+                        .record_edit(&new_key, before, after, Some(self.user_uuid))
+                        .await
+                    {
+                        tracing::warn!(
+                            server = %self.server.uuid,
+                            path = %new_key,
+                            "diff: sftp record_edit on replace failed: {err:#}"
+                        );
+                    }
+                }
+                Ok(_) => {
+                    tracing::debug!(
+                        server = %self.server.uuid,
+                        path = %new_key,
+                        "diff: sftp replace content exceeds file_size_cap; not recorded"
+                    );
+                }
+                Err(err) => {
+                    tracing::debug!(
+                        server = %self.server.uuid,
+                        path = %new_key,
+                        "diff: sftp failed to read replaced content: {err}"
+                    );
+                }
+            }
         }
 
         self.server.activity.log_activity(activity).await;
@@ -950,7 +1082,16 @@ impl russh_sftp::server::Handler for SftpSession {
             return Err(StatusCode::PermissionDenied);
         }
 
-        if self.handles.len() >= HANDLE_LIMIT {
+        if self.handles.len()
+            >= self
+                .state
+                .config
+                .load()
+                .system
+                .sftp
+                .limits
+                .max_handles_per_channel
+        {
             return Err(StatusCode::Failure);
         }
 
@@ -979,22 +1120,69 @@ impl russh_sftp::server::Handler for SftpSession {
             Err(_) => PathBuf::from(filename.strip_prefix("/").unwrap_or(&filename)),
         };
 
-        match self.server.filesystem.async_symlink_metadata(&path).await {
+        let pre_size = match self.server.filesystem.async_symlink_metadata(&path).await {
             Ok(metadata) => {
                 if !metadata.is_file() {
                     return Err(StatusCode::NoSuchFile);
                 }
+
+                Some(metadata.len())
             }
             Err(_) => {
                 if !pflags.contains(OpenFlags::CREATE) {
                     return Err(StatusCode::NoSuchFile);
                 }
+
+                None
             }
-        }
+        };
 
         if self.is_ignored(&path, false).await {
             return Err(StatusCode::NoSuchFile);
         }
+
+        let is_write = pflags.contains(OpenFlags::WRITE)
+            || pflags.contains(OpenFlags::APPEND)
+            || pflags.contains(OpenFlags::CREATE)
+            || pflags.contains(OpenFlags::TRUNCATE);
+
+        let (history_enabled, file_size_cap) = {
+            let config = self.state.config.load();
+            (
+                config.system.file_history.enabled,
+                config.system.file_history.file_size_cap,
+            )
+        };
+
+        let mut diff_track = is_write
+            && history_enabled
+            && matches!(pre_size, Some(size) if size > 0 && size <= file_size_cap);
+
+        let diff_before = if diff_track {
+            match self
+                .server
+                .filesystem
+                .async_read_to_vec(&path, (file_size_cap + 1) as usize)
+                .await
+            {
+                Ok(before) if before.len() as u64 <= file_size_cap => Some(before),
+                Ok(_) => {
+                    diff_track = false;
+                    None
+                }
+                Err(err) => {
+                    tracing::debug!(
+                        server = %self.server.uuid,
+                        path = %path.display(),
+                        "diff: sftp failed to read pre-edit content: {err}"
+                    );
+                    diff_track = false;
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
         let mut activity_event = None;
         if pflags.contains(OpenFlags::TRUNCATE) || pflags.contains(OpenFlags::CREATE) {
@@ -1063,9 +1251,16 @@ impl russh_sftp::server::Handler for SftpSession {
         self.handles.insert(
             handle.clone(),
             ServerHandle::File(FileHandle {
+                _guard: self
+                    .limiter
+                    .open_handle()
+                    .map_err(|_| StatusCode::Failure)?,
                 path,
                 path_components,
                 file: Arc::new(Mutex::new(file)),
+                diff_track,
+                diff_before,
+                diff_dirty: false,
             }),
         );
 
@@ -1158,6 +1353,8 @@ impl russh_sftp::server::Handler for SftpSession {
         .await
         .map_err(|_| StatusCode::Failure)?
         .map_err(|_| StatusCode::Failure)?;
+
+        handle.diff_dirty = true;
 
         Ok(Status {
             id,

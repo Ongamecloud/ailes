@@ -153,7 +153,7 @@ impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + tokio::io::AsyncSeek + Un
 {
 }
 
-pub trait SafeWrite: Write {
+pub trait SafeWriteExt: Write {
     fn safe_write_all(&mut self, buf: &[u8], start_bytes: usize) -> std::io::Result<()> {
         if crate::unlikely(start_bytes > buf.len()) {
             return Err(std::io::Error::new(
@@ -166,8 +166,8 @@ pub trait SafeWrite: Write {
         unsafe { self.write_all(buf.get_unchecked(..start_bytes)) }
     }
 }
-impl<T: Write + ?Sized> SafeWrite for T {}
-pub trait SafeAsyncWrite: tokio::io::AsyncWrite + Unpin {
+impl<T: Write + ?Sized> SafeWriteExt for T {}
+pub trait SafeAsyncWriteExt: tokio::io::AsyncWrite + Unpin {
     async fn safe_write_all(&mut self, buf: &[u8], start_bytes: usize) -> std::io::Result<()> {
         if crate::unlikely(start_bytes > buf.len()) {
             return Err(std::io::Error::new(
@@ -180,9 +180,9 @@ pub trait SafeAsyncWrite: tokio::io::AsyncWrite + Unpin {
         unsafe { self.write_all(buf.get_unchecked(..start_bytes)).await }
     }
 }
-impl<T: tokio::io::AsyncWrite + Unpin + ?Sized> SafeAsyncWrite for T {}
+impl<T: tokio::io::AsyncWrite + Unpin + ?Sized> SafeAsyncWriteExt for T {}
 
-pub trait SafeDigest: sha2::Digest {
+pub trait SafeDigestExt: sha2::Digest {
     fn safe_update(&mut self, buf: &[u8], start_bytes: usize) -> std::io::Result<()> {
         if crate::unlikely(start_bytes > buf.len()) {
             return Err(std::io::Error::new(
@@ -197,7 +197,7 @@ pub trait SafeDigest: sha2::Digest {
         Ok(())
     }
 }
-impl<T: sha2::Digest + ?Sized> SafeDigest for T {}
+impl<T: sha2::Digest + ?Sized> SafeDigestExt for T {}
 
 fn resolve_range(range: impl RangeBounds<usize>, len: usize) -> std::io::Result<(usize, usize)> {
     let start = match range.start_bound() {
@@ -229,7 +229,7 @@ fn resolve_range(range: impl RangeBounds<usize>, len: usize) -> std::io::Result<
     Ok((start, end))
 }
 
-pub trait SafeSlice<T>: AsRef<[T]> {
+pub trait SafeSliceExt<T>: AsRef<[T]> {
     fn get_slice(&self, range: impl RangeBounds<usize>) -> std::io::Result<&[T]> {
         let slice = self.as_ref();
         let (start, end) = resolve_range(range, slice.len())?;
@@ -238,9 +238,9 @@ pub trait SafeSlice<T>: AsRef<[T]> {
         Ok(unsafe { slice.get_unchecked(start..end) })
     }
 }
-impl<T, Tr: AsRef<[T]> + ?Sized> SafeSlice<T> for Tr {}
+impl<T, Tr: AsRef<[T]> + ?Sized> SafeSliceExt<T> for Tr {}
 
-pub trait SafeSliceMut<T>: AsMut<[T]> {
+pub trait SafeSliceMutExt<T>: AsMut<[T]> {
     fn get_slice_mut(&mut self, range: impl RangeBounds<usize>) -> std::io::Result<&mut [T]> {
         let slice = self.as_mut();
         let (start, end) = resolve_range(range, slice.len())?;
@@ -249,9 +249,9 @@ pub trait SafeSliceMut<T>: AsMut<[T]> {
         Ok(unsafe { slice.get_unchecked_mut(start..end) })
     }
 }
-impl<T, Tr: AsMut<[T]> + ?Sized> SafeSliceMut<T> for Tr {}
+impl<T, Tr: AsMut<[T]> + ?Sized> SafeSliceMutExt<T> for Tr {}
 
-pub trait UninterruptedRead: Read {
+pub trait UninterruptedReadExt: Read {
     fn read_uninterrupted(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         loop {
             match self.read(buf) {
@@ -262,4 +262,4 @@ pub trait UninterruptedRead: Read {
         }
     }
 }
-impl<T: Read + ?Sized> UninterruptedRead for T {}
+impl<T: Read + ?Sized> UninterruptedReadExt for T {}

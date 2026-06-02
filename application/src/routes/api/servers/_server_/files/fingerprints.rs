@@ -3,7 +3,7 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 
 mod get {
     use crate::{
-        io::{SafeDigest, SafeSlice, SafeWrite},
+        io::{SafeDigestExt, SafeSliceExt, SafeWriteExt},
         response::{ApiResponse, ApiResponseResult},
         routes::api::servers::_server_::GetServer,
     };

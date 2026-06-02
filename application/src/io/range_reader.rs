@@ -1,4 +1,4 @@
-use crate::io::SafeSliceMut;
+use crate::io::SafeSliceMutExt;
 use futures::ready;
 use std::{
     io::{self, Read, Seek, SeekFrom},

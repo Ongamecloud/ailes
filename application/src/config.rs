@@ -232,6 +232,18 @@ fn system_sftp_limits_authentication_pubkey_attempts() -> usize {
 fn system_sftp_limits_authentication_cooldown() -> u64 {
     60
 }
+fn system_sftp_limits_max_connections_per_user() -> usize {
+    10
+}
+fn system_sftp_limits_max_channels_per_connection() -> usize {
+    10
+}
+fn system_sftp_limits_max_handles_per_channel() -> usize {
+    32
+}
+fn system_sftp_limits_max_handles_total() -> usize {
+    1024
+}
 
 fn system_sftp_shell_enabled() -> bool {
     true
@@ -678,6 +690,15 @@ nestify::nest! {
                     pub authentication_pubkey_attempts: usize,
                     #[serde(default = "system_sftp_limits_authentication_cooldown")]
                     pub authentication_cooldown: u64,
+
+                    #[serde(default = "system_sftp_limits_max_connections_per_user")]
+                    pub max_connections_per_user: usize,
+                    #[serde(default = "system_sftp_limits_max_channels_per_connection")]
+                    pub max_channels_per_connection: usize,
+                    #[serde(default = "system_sftp_limits_max_handles_per_channel")]
+                    pub max_handles_per_channel: usize,
+                    #[serde(default = "system_sftp_limits_max_handles_total")]
+                    pub max_handles_total: usize,
                 },
 
                 #[serde(default)]

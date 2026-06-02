@@ -70,7 +70,7 @@ mod post {
                         .await
                         .unwrap_or_else(|_| server.filesystem.relative_path(&source));
 
-                    if let Err(err) = server.diff.forget_file(&path.to_string_lossy()).await {
+                    if let Err(err) = server.diff.forget_file(&path.to_string_lossy(), None).await {
                         tracing::error!("failed to forget file from diff storage: {:?}", err);
                     }
                 }

@@ -1,13 +1,33 @@
 use super::{RevisionInfo, storage::Storage};
-use std::{path::PathBuf, sync::Arc};
+use compact_str::ToCompactString;
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 use tokio::sync::Mutex;
+
+const FORGET_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
+
+struct PendingForget {
+    id: u64,
+    handle: tokio::task::AbortHandle,
+    before: Option<Vec<u8>>,
+}
 
 pub struct DiffManager {
     server: uuid::Uuid,
     config: Arc<crate::config::Config>,
     storage: Arc<Mutex<Option<Storage>>>,
     db_path: PathBuf,
-    maintenance_task: tokio::task::JoinHandle<()>,
+
+    pending_forgets: Arc<Mutex<HashMap<compact_str::CompactString, PendingForget>>>,
+    forget_seq: AtomicU64,
+
+    task: tokio::task::JoinHandle<()>,
 }
 
 impl DiffManager {
@@ -26,19 +46,25 @@ impl DiffManager {
         }
 
         let storage: Arc<Mutex<Option<Storage>>> = Arc::new(Mutex::new(None));
-        let maintenance_task = tokio::spawn({
+        let pending_forgets: Arc<Mutex<HashMap<compact_str::CompactString, PendingForget>>> =
+            Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+
+        let task = tokio::spawn({
             let config = Arc::clone(config);
             let storage = Arc::clone(&storage);
+            let pending_forgets = Arc::clone(&pending_forgets);
 
             async move {
-                let initial_delay = std::time::Duration::from_secs(60);
-                tokio::time::sleep(initial_delay).await;
-
                 loop {
                     let interval = std::time::Duration::from_secs(
                         config.load().system.file_history.maintenance_interval,
                     );
                     tokio::time::sleep(interval).await;
+
+                    pending_forgets
+                        .lock()
+                        .await
+                        .retain(|_, p| !p.handle.is_finished());
 
                     let storage = Arc::clone(&storage);
                     match tokio::task::spawn_blocking(move || {
@@ -70,7 +96,9 @@ impl DiffManager {
             config: Arc::clone(config),
             storage,
             db_path,
-            maintenance_task,
+            task,
+            pending_forgets,
+            forget_seq: AtomicU64::new(0),
         }
     }
 
@@ -265,26 +293,91 @@ impl DiffManager {
         .await?
     }
 
-    pub async fn forget_file(&self, path: &str) -> Result<(), anyhow::Error> {
+    pub async fn forget_file(
+        &self,
+        path: &str,
+        before: Option<Vec<u8>>,
+    ) -> Result<(), anyhow::Error> {
         if !self.ensure_open().await {
             return Ok(());
         }
-        let path = path.to_string();
-        let storage = Arc::clone(&self.storage);
 
-        tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
-            let mut guard = storage.blocking_lock();
-            if let Some(s) = guard.as_mut() {
-                s.delete_file(&path)?;
+        let path = path.to_compact_string();
+        let id = self.forget_seq.fetch_add(1, Ordering::Relaxed);
+        let storage = Arc::clone(&self.storage);
+        let pending_forgets = Arc::clone(&self.pending_forgets);
+        let server = self.server;
+
+        let task = tokio::spawn({
+            let path = path.clone();
+            let pending_forgets = Arc::clone(&pending_forgets);
+
+            async move {
+                tokio::time::sleep(FORGET_GRACE).await;
+
+                let result = tokio::task::spawn_blocking({
+                    let storage = Arc::clone(&storage);
+                    let path = path.clone();
+
+                    move || -> Result<(), anyhow::Error> {
+                        let mut guard = storage.blocking_lock();
+                        if let Some(s) = guard.as_mut() {
+                            s.delete_file(&path)?;
+                        }
+                        Ok(())
+                    }
+                })
+                .await;
+
+                match result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(err)) => {
+                        tracing::error!(server = %server, path = %path, "failed to forget file from diff storage: {err:#}");
+                    }
+                    Err(err) => {
+                        tracing::error!(server = %server, path = %path, "diff forget join error: {err}");
+                    }
+                }
+
+                let mut map = pending_forgets.lock().await;
+                if map.get(&*path).is_some_and(|p| p.id == id) {
+                    map.remove(&*path);
+                }
             }
-            Ok(())
-        })
-        .await?
+        });
+
+        let mut map = pending_forgets.lock().await;
+        if let Some(old) = map.insert(
+            path,
+            PendingForget {
+                id,
+                handle: task.abort_handle(),
+                before,
+            },
+        ) {
+            old.handle.abort();
+        }
+
+        Ok(())
     }
 
-    pub async fn rename_file(&self, old: &str, new: &str) -> Result<(), anyhow::Error> {
+    pub async fn cancel_pending_forget(&self, path: &str) -> Option<Option<Vec<u8>>> {
+        let mut map = self.pending_forgets.lock().await;
+        map.remove(path).map(|p| {
+            p.handle.abort();
+            p.before
+        })
+    }
+
+    pub async fn rename_file(
+        &self,
+        old: &str,
+        new: &str,
+    ) -> Result<Option<Option<Vec<u8>>>, anyhow::Error> {
+        let replaced = self.cancel_pending_forget(new).await;
+
         if !self.ensure_open().await {
-            return Ok(());
+            return Ok(replaced);
         }
 
         let old = old.to_string();
@@ -298,7 +391,9 @@ impl DiffManager {
             }
             Ok(())
         })
-        .await?
+        .await??;
+
+        Ok(replaced)
     }
 
     pub async fn clear(&self) -> Result<(), anyhow::Error> {
@@ -348,6 +443,11 @@ impl DiffManager {
 
 impl Drop for DiffManager {
     fn drop(&mut self) {
-        self.maintenance_task.abort();
+        self.task.abort();
+
+        let mut map = self.pending_forgets.blocking_lock();
+        for (_, pending) in map.drain() {
+            pending.handle.abort();
+        }
     }
 }

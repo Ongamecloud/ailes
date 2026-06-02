@@ -1,6 +1,6 @@
 use crate::{
     io::{
-        SafeSlice,
+        SafeSliceExt,
         abort::{AbortGuard, AbortListener},
     },
     utils::{PortablePermissions, PortablePermissionsApplier},

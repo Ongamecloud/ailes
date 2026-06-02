@@ -1,4 +1,4 @@
-use crate::io::{SafeDigest, SafeSlice};
+use crate::io::{SafeDigestExt, SafeSliceExt};
 use sha1::{Digest, digest::Output};
 use std::{
     io::Read,
