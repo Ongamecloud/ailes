@@ -338,11 +338,7 @@ impl Client {
     ) -> Result<super::backups::ResticBackupConfiguration, anyhow::Error> {
         tracing::info!("getting restic backup configuration");
 
-        self.retry(
-            || super::backups::backup_restic_configuration(self, uuid),
-            Self::skip_client_errors,
-        )
-        .await
+        super::backups::backup_restic_configuration(self, uuid).await
     }
 
     #[tracing::instrument(skip(self))]
