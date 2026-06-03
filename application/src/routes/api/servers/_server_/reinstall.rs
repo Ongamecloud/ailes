@@ -56,7 +56,7 @@ mod post {
         server
             .stop_with_kill_timeout(std::time::Duration::from_secs(30), false)
             .await?;
-        server.sync_configuration().await;
+        server.sync_configuration(true).await;
 
         if data.truncate_directory
             && let Err(err) = server.filesystem.truncate_root().await

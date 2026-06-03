@@ -599,6 +599,7 @@ impl Server {
         &self,
         configuration: configuration::ServerConfiguration,
         process_configuration: configuration::process::ProcessConfiguration,
+        skip_pending_restart_check: bool,
     ) {
         self.filesystem
             .update_ignored(&configuration.egg.file_denylist)
@@ -609,7 +610,8 @@ impl Server {
             let mut configuration_lock = self.configuration.write().await;
             let old_configuration = std::mem::replace(&mut *configuration_lock, configuration);
 
-            if !self.state.get_pending_restart()
+            if !skip_pending_restart_check
+                && !self.state.get_pending_restart()
                 && (old_configuration.invocation != configuration_lock.invocation
                     || old_configuration.entrypoint != configuration_lock.entrypoint
                     || old_configuration.environment != configuration_lock.environment
@@ -635,12 +637,13 @@ impl Server {
         }
     }
 
-    pub async fn sync_configuration(&self) {
+    pub async fn sync_configuration(&self, skip_pending_restart_check: bool) {
         match self.app_state.config.client.server(self.uuid).await {
             Ok(configuration) => {
                 self.update_configuration(
                     configuration.settings,
                     configuration.process_configuration,
+                    skip_pending_restart_check,
                 )
                 .await;
             }
@@ -976,7 +979,7 @@ impl Server {
 
                         server.destroy_container().await;
 
-                        server.sync_configuration().await;
+                        server.sync_configuration(true).await;
 
                         if !server.filesystem.disk_checker_state_dirty.load(std::sync::atomic::Ordering::Relaxed) {
                             let now = std::time::SystemTime::now()

@@ -43,7 +43,11 @@ mod post {
             let suspended = configuration.settings.suspended;
 
             server
-                .update_configuration(configuration.settings, configuration.process_configuration)
+                .update_configuration(
+                    configuration.settings,
+                    configuration.process_configuration,
+                    false,
+                )
                 .await;
 
             if suspended && server.state.get_state() != ServerState::Offline {
@@ -60,7 +64,11 @@ mod post {
             let suspended = configuration.settings.suspended;
 
             server
-                .update_configuration(configuration.settings, configuration.process_configuration)
+                .update_configuration(
+                    configuration.settings,
+                    configuration.process_configuration,
+                    false,
+                )
                 .await;
 
             if suspended && server.state.get_state() != ServerState::Offline {
