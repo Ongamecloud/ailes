@@ -5,6 +5,7 @@ use std::{collections::HashMap, pin::Pin, sync::Arc};
 
 mod configure;
 mod diagnostics;
+mod migrate_disk_limiter;
 mod service_install;
 mod version;
 
@@ -159,5 +160,10 @@ pub fn commands(cli: CliCommandGroupBuilder) -> CliCommandGroupBuilder {
         "configure",
         "Use a token to configure wings automatically.",
         configure::ConfigureCommand,
+    )
+    .add_command(
+        "migrate-disk-limiter",
+        "Migrates existing server volumes to a btrfs/zfs disk limiter.",
+        migrate_disk_limiter::MigrateDiskLimiterCommand,
     )
 }

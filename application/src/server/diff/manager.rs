@@ -445,9 +445,14 @@ impl Drop for DiffManager {
     fn drop(&mut self) {
         self.task.abort();
 
-        let mut map = self.pending_forgets.blocking_lock();
-        for (_, pending) in map.drain() {
-            pending.handle.abort();
-        }
+        tokio::spawn({
+            let pending_forgets = Arc::clone(&self.pending_forgets);
+            async move {
+                let mut map = pending_forgets.lock().await;
+                for (_, pending) in map.drain() {
+                    pending.handle.abort();
+                }
+            }
+        });
     }
 }

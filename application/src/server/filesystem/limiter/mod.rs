@@ -2,14 +2,14 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 #[cfg(unix)]
-mod btrfs_subvolume;
+pub(crate) mod btrfs_subvolume;
 #[cfg(unix)]
-mod fuse_quota;
-mod none;
+pub(crate) mod fuse_quota;
+pub(crate) mod none;
 #[cfg(unix)]
-mod xfs_quota;
+pub(crate) mod xfs_quota;
 #[cfg(unix)]
-mod zfs_dataset;
+pub(crate) mod zfs_dataset;
 
 #[async_trait::async_trait]
 pub trait DiskLimiterExt: Send + Sync {
