@@ -88,8 +88,8 @@ mod get {
         } else {
             let mut ignore_builder = ignore::gitignore::GitignoreBuilder::new("/");
 
-            for file in data.ignored {
-                ignore_builder.add_line(None, &file).ok();
+            for line in data.ignored {
+                ignore_builder.add_line(None, &line).ok();
             }
 
             ignore_builder.build().ok()
@@ -104,7 +104,10 @@ mod get {
         if let Ok(metadata) = metadata {
             if !metadata.file_type.is_dir()
                 || (filesystem.is_primary_server_fs()
-                    && server.filesystem.is_ignored(&root, true).await)
+                    && (root == Path::new("/")
+                        || root == Path::new(".")
+                        || root == Path::new("")
+                        || server.filesystem.is_ignored(&root, true).await))
             {
                 return ApiResponse::error("path not a directory")
                     .with_status(StatusCode::EXPECTATION_FAILED)
