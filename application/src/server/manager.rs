@@ -131,7 +131,7 @@ impl ServerManager {
                             state
                         );
 
-                        let mut installer = Arc::new(
+                        let installer = Arc::new(
                             super::installation::ServerInstaller::new(
                                 &server,
                                 reinstall,
@@ -212,7 +212,7 @@ impl ServerManager {
                         Ok(_) => {}
                         Err(err) => {
                             tracing::error!("failed to write states.json file: {:?}", err);
-                            return;
+                            continue;
                         }
                     }
                 }
@@ -262,7 +262,7 @@ impl ServerManager {
                         Ok(_) => {}
                         Err(err) => {
                             tracing::error!("failed to write installing.json file: {:?}", err);
-                            return;
+                            continue;
                         }
                     }
                 }

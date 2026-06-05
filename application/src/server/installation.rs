@@ -83,7 +83,6 @@ impl ServerInstaller {
         tokio::fs::remove_file(&log_path).await.ok();
 
         if let Some(parent) = log_path.parent() {
-            // Remove the parent directory if it's empty
             tokio::fs::remove_dir(parent).await.ok();
         }
     }
@@ -236,7 +235,7 @@ impl ServerInstaller {
             }
         };
 
-        if container_script.script.is_empty() {
+        if container_script.script.trim().is_empty() {
             tracing::info!(
                 server = %self.server.uuid,
                 "no installation script provided, marking server as installed"
@@ -397,7 +396,7 @@ impl ServerInstaller {
         Ok(())
     }
 
-    pub async fn attach(self: &mut Arc<Self>) -> Result<(), anyhow::Error> {
+    pub async fn attach(self: &Arc<Self>) -> Result<(), anyhow::Error> {
         self.server.installing.store(true, Ordering::SeqCst);
         self.server.websocket.send(
             super::websocket::WebsocketMessage::builder(
@@ -406,40 +405,40 @@ impl ServerInstaller {
             .build(),
         )?;
 
+        let (handle, mut status_rx) = match self
+            .server
+            .app_state
+            .executor
+            .attach_installation_process(&self.server)
+            .await
+            .context("Failed to attach to installation process")
+        {
+            Ok(r) => r,
+            Err(err) => {
+                self.unset_installing(true).await?;
+                return Err(err);
+            }
+        };
+
+        *self.process_handle.lock().await = Some(Arc::clone(&handle));
+
+        let mut stdout_rx = match handle
+            .subscribe_stdout_lines_ratelimited()
+            .await
+            .context("Failed to subscribe to stdout")
+        {
+            Ok(rx) => rx,
+            Err(err) => {
+                self.unset_installing(false).await?;
+                return Err(err);
+            }
+        };
+
         tokio::spawn({
             let installer = Arc::clone(self);
 
             async move {
                 let run = async || {
-                    let (handle, mut status_rx) = match installer
-                        .server
-                        .app_state
-                        .executor
-                        .attach_installation_process(&installer.server)
-                        .await
-                        .context("Failed to attach to installation process")
-                    {
-                        Ok(r) => r,
-                        Err(err) => {
-                            installer.unset_installing(false).await?;
-                            return Err(err);
-                        }
-                    };
-
-                    *installer.process_handle.lock().await = Some(Arc::clone(&handle));
-
-                    let mut stdout_rx = match handle
-                        .subscribe_stdout_lines_ratelimited()
-                        .await
-                        .context("Failed to subscribe to stdout")
-                    {
-                        Ok(rx) => rx,
-                        Err(err) => {
-                            installer.unset_installing(false).await?;
-                            return Err(err);
-                        }
-                    };
-
                     tokio::select! {
                         result = tokio::time::timeout(
                             if installer
