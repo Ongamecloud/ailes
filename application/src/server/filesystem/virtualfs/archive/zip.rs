@@ -19,7 +19,7 @@ use crate::{
             VirtualReadableFilesystem,
         },
     },
-    utils::PortablePermissions,
+    utils::{CmpExt, PortablePermissions},
 };
 use compact_str::ToCompactString;
 use itaf::encoder::{EncoderOptions, ItafEncoder, Metadata};
@@ -95,8 +95,8 @@ impl SortableZipEntry {
         use crate::models::DirectorySortingMode::*;
 
         match sort {
-            NameAsc => self.name.cmp(&other.name),
-            NameDesc => other.name.cmp(&self.name),
+            NameAsc => self.name.cmp_ascii_case_insensitive(&other.name),
+            NameDesc => other.name.cmp_ascii_case_insensitive(&self.name),
             SizeAsc => self.size.cmp(&other.size),
             SizeDesc => other.size.cmp(&self.size),
             PhysicalSizeAsc => self.size_compressed.cmp(&other.size_compressed),

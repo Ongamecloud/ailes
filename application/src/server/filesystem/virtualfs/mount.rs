@@ -7,7 +7,7 @@ use crate::{
     models::{DirectoryEntry, DirectorySortingMode},
     routes::MimeCacheValue,
     server::filesystem::{archive::StreamableArchiveFormat, cap::FileType, encode_mode},
-    utils::PortablePermissions,
+    utils::{CmpExt, PortablePermissions},
 };
 use std::{
     collections::HashSet,
@@ -219,7 +219,7 @@ impl VirtualReadableFilesystem for VirtualMountFilesystem {
         let (mut inner_dirs, inner_non_dirs): (Vec<_>, Vec<_>) =
             inner_listing.into_iter().partition(|e| e.directory);
 
-        virtual_dirs.sort_unstable_by(|a, b| a.name.cmp(&b.name));
+        virtual_dirs.sort_unstable_by(|a, b| a.name.cmp_ascii_case_insensitive(&b.name));
         if matches!(sort, DirectorySortingMode::NameDesc) {
             virtual_dirs.reverse();
         }

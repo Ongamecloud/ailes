@@ -21,7 +21,7 @@ use crate::{
             },
         },
     },
-    utils::{PortablePermissions, StdoutTakeExt, TokioStdoutTakeExt},
+    utils::{CmpExt, PortablePermissions, StdoutTakeExt, TokioStdoutTakeExt},
 };
 use chrono::{Datelike, Timelike};
 use compact_str::{CompactString, ToCompactString};
@@ -1415,8 +1415,8 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
             };
 
             match sort {
-                NameAsc => a_path.cmp(b_path),
-                NameDesc => b_path.cmp(a_path),
+                NameAsc => a_path.cmp_ascii_case_insensitive(b_path),
+                NameDesc => b_path.cmp_ascii_case_insensitive(a_path),
                 SizeAsc | PhysicalSizeAsc => a_size.cmp(&b_size),
                 SizeDesc | PhysicalSizeDesc => b_size.cmp(&a_size),
                 ModifiedAsc | CreatedAsc => a_mtime.cmp(&b_mtime),

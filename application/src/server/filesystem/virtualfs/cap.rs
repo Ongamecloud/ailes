@@ -10,7 +10,7 @@ use crate::{
         archive::StreamableArchiveFormat,
         virtualfs::{AsyncReadableWritableSeekableFileStream, ReadableWritableSeekableFileStream},
     },
-    utils::PortablePermissions,
+    utils::{CmpExt, PortablePermissions},
 };
 use std::{
     path::{Path, PathBuf},
@@ -200,8 +200,8 @@ impl super::VirtualReadableFilesystem for VirtualCapFilesystem {
         let name_sort = matches!(sort, NameAsc | NameDesc);
 
         if name_sort {
-            directory_entries.sort_unstable();
-            other_entries.sort_unstable();
+            directory_entries.sort_unstable_by(|a, b| a.cmp_ascii_case_insensitive(b));
+            other_entries.sort_unstable_by(|a, b| a.cmp_ascii_case_insensitive(b));
 
             let total_entries = directory_entries.len() + other_entries.len();
             let mut entries = Vec::new();

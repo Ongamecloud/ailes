@@ -17,7 +17,7 @@ use crate::{
             VirtualReadableFilesystem,
         },
     },
-    utils::PortablePermissions,
+    utils::{CmpExt, PortablePermissions},
 };
 use chrono::{Datelike, Timelike};
 use compact_str::ToCompactString;
@@ -50,8 +50,8 @@ impl CmpSortExt for sevenz_rust2::ArchiveEntry {
         use crate::models::DirectorySortingMode::*;
 
         match sort {
-            NameAsc => self.name().cmp(other.name()),
-            NameDesc => other.name().cmp(self.name()),
+            NameAsc => self.name().cmp_ascii_case_insensitive(other.name()),
+            NameDesc => other.name().cmp_ascii_case_insensitive(self.name()),
             SizeAsc => self.size.cmp(&other.size),
             SizeDesc => other.size.cmp(&self.size),
             PhysicalSizeAsc => self.compressed_size.cmp(&other.compressed_size),

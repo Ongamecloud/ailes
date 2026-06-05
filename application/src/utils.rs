@@ -359,3 +359,31 @@ impl TokioStdoutTakeExt for tokio::process::Child {
             .ok_or_else(|| std::io::Error::other("No stdout available"))
     }
 }
+
+pub trait CmpExt {
+    fn cmp_ascii_case_insensitive(&self, other: &Self) -> std::cmp::Ordering;
+}
+
+impl CmpExt for str {
+    fn cmp_ascii_case_insensitive(&self, other: &Self) -> std::cmp::Ordering {
+        self.bytes()
+            .map(|b| b.to_ascii_lowercase())
+            .cmp(other.bytes().map(|b| b.to_ascii_lowercase()))
+    }
+}
+
+impl CmpExt for Path {
+    fn cmp_ascii_case_insensitive(&self, other: &Self) -> std::cmp::Ordering {
+        self.as_os_str()
+            .as_encoded_bytes()
+            .iter()
+            .map(|b| b.to_ascii_lowercase())
+            .cmp(
+                other
+                    .as_os_str()
+                    .as_encoded_bytes()
+                    .iter()
+                    .map(|b| b.to_ascii_lowercase()),
+            )
+    }
+}

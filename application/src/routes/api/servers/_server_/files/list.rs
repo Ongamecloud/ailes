@@ -104,10 +104,10 @@ mod get {
         if let Ok(metadata) = metadata {
             if !metadata.file_type.is_dir()
                 || (filesystem.is_primary_server_fs()
-                    && (root == Path::new("/")
-                        || root == Path::new(".")
-                        || root == Path::new("")
-                        || server.filesystem.is_ignored(&root, true).await))
+                    && root != Path::new("/")
+                    && root != Path::new(".")
+                    && root != Path::new("")
+                    && (server.filesystem.is_ignored(&root, true).await))
             {
                 return ApiResponse::error("path not a directory")
                     .with_status(StatusCode::EXPECTATION_FAILED)

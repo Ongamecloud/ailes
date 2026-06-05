@@ -18,7 +18,7 @@ use crate::{
             ReadableFileStream, VirtualReadableFilesystem,
         },
     },
-    utils::PortablePermissions,
+    utils::{CmpExt, PortablePermissions},
 };
 use chrono::{Datelike, Timelike};
 use ddup_bak::archive::entries::Entry;
@@ -95,8 +95,8 @@ impl CmpSortExt for Entry {
         use crate::models::DirectorySortingMode::*;
 
         match sort {
-            NameAsc => self.name().cmp(other.name()),
-            NameDesc => other.name().cmp(self.name()),
+            NameAsc => self.name().cmp_ascii_case_insensitive(other.name()),
+            NameDesc => other.name().cmp_ascii_case_insensitive(self.name()),
             SizeAsc | SizeDesc | PhysicalSizeAsc | PhysicalSizeDesc => {
                 let (a_log, a_phy) = entry_size_recursive(self);
                 let (b_log, b_phy) = entry_size_recursive(other);
