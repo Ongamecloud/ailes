@@ -222,6 +222,7 @@ impl russh_sftp::server::Handler for SftpSession {
                     "users-groups-by-id@openssh.com".to_string(),
                     "1".to_string(),
                 ),
+                ("posix-rename@openssh.com".to_string(), "1".to_string()),
             ]),
         })
     }

@@ -203,7 +203,7 @@ pub async fn run(ctx: DiskCheckerContext) {
 
                 let metadata = match cap_filesystem.async_symlink_metadata(&path).await {
                     Ok(metadata) => metadata,
-                    Err(_) => return Ok(()),
+                    Err(_) => continue,
                 };
                 let delta = SpaceDelta::new(
                     metadata.size_logical() as i64,

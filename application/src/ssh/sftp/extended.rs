@@ -801,6 +801,153 @@ pub async fn handle_extended(
                 },
             ))
         }
+        "posix-rename@openssh.com" => {
+            #[derive(Deserialize)]
+            struct PosixRenameRequest {
+                oldpath: String,
+                newpath: String,
+            }
+
+            let request: PosixRenameRequest = match russh_sftp::de::from_bytes(&mut data.into()) {
+                Ok(request) => request,
+                Err(_) => return Err(StatusCode::BadMessage),
+            };
+
+            if sftp_session.state.config.load().system.sftp.read_only {
+                return Err(StatusCode::PermissionDenied);
+            }
+
+            if !sftp_session.has_permission(Permission::FileUpdate).await {
+                return Err(StatusCode::PermissionDenied);
+            }
+
+            let old_path = match sftp_session
+                .server
+                .filesystem
+                .async_canonicalize(&request.oldpath)
+                .await
+            {
+                Ok(path) => path,
+                Err(_) => return Err(StatusCode::NoSuchFile),
+            };
+            let new_path = PathBuf::from(request.newpath);
+
+            let old_metadata = match sftp_session
+                .server
+                .filesystem
+                .async_symlink_metadata(&old_path)
+                .await
+            {
+                Ok(metadata) => metadata,
+                Err(_) => return Err(StatusCode::NoSuchFile),
+            };
+
+            if sftp_session
+                .is_ignored(&old_path, old_metadata.is_dir())
+                .await
+                || sftp_session
+                    .is_ignored(&new_path, old_metadata.is_dir())
+                    .await
+            {
+                return Err(StatusCode::Failure);
+            }
+
+            let activity = Activity {
+                event: ActivityEvent::SftpRename,
+                user: Some(sftp_session.user_uuid),
+                ip: Some(sftp_session.user_ip),
+                metadata: Some(serde_json::json!({
+                    "files": [
+                        {
+                            "from": sftp_session.server.filesystem.relative_path(&old_path),
+                            "to": sftp_session.server.filesystem.relative_path(&new_path),
+                        }
+                    ],
+                })),
+                schedule: None,
+                timestamp: chrono::Utc::now(),
+            };
+
+            if sftp_session
+                .server
+                .filesystem
+                .rename_path(&old_path, &new_path)
+                .await
+                .is_err()
+            {
+                return Err(StatusCode::NoSuchFile);
+            }
+
+            let new_path = sftp_session.server.filesystem.relative_path(&new_path);
+            let new_key = new_path.to_string_lossy().to_string();
+            let replaced = match sftp_session
+                .server
+                .diff
+                .rename_file(&old_path.to_string_lossy(), &new_key)
+                .await
+            {
+                Ok(replaced) => replaced,
+                Err(err) => {
+                    tracing::error!("failed to rename file in diff storage: {:?}", err);
+                    None
+                }
+            };
+
+            if let Some(before) = replaced {
+                let file_size_cap = sftp_session
+                    .state
+                    .config
+                    .load()
+                    .system
+                    .file_history
+                    .file_size_cap;
+
+                match sftp_session
+                    .server
+                    .filesystem
+                    .async_read_to_vec(&new_path, file_size_cap.saturating_add(1) as usize)
+                    .await
+                {
+                    Ok(after) if after.len() as u64 <= file_size_cap => {
+                        if let Err(err) = sftp_session
+                            .server
+                            .diff
+                            .record_edit(&new_key, before, after, Some(sftp_session.user_uuid))
+                            .await
+                        {
+                            tracing::warn!(
+                                server = %sftp_session.server.uuid,
+                                path = %new_key,
+                                "diff: sftp record_edit on replace failed: {err:#}"
+                            );
+                        }
+                    }
+                    Ok(_) => {
+                        tracing::debug!(
+                            server = %sftp_session.server.uuid,
+                            path = %new_key,
+                            "diff: sftp replace content exceeds file_size_cap; not recorded"
+                        );
+                    }
+                    Err(err) => {
+                        tracing::debug!(
+                            server = %sftp_session.server.uuid,
+                            path = %new_key,
+                            "diff: sftp failed to read replaced content: {err}"
+                        );
+                    }
+                }
+            }
+
+            sftp_session.server.activity.log_activity(activity).await;
+
+            Ok(russh_sftp::protocol::Packet::Status(Status {
+                id,
+                status_code: StatusCode::Ok,
+                error_message: "Ok".to_string(),
+                language_tag: "en-US".to_string(),
+            }))
+        }
         _ => Err(StatusCode::OpUnsupported),
     }
 }

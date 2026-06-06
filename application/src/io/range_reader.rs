@@ -6,14 +6,37 @@ use std::{
     pin::Pin,
     task::{Context, Poll},
 };
-use tokio::io::{AsyncRead, AsyncSeek, AsyncSeekExt};
+use tokio::io::{AsyncRead, AsyncSeek, AsyncSeekExt, ReadBuf};
+
+fn resolve_range(range: (Bound<u64>, Bound<u64>), len: u64) -> io::Result<(u64, u64)> {
+    let invalid = || io::Error::new(io::ErrorKind::InvalidInput, "invalid range specified");
+
+    let last = len.checked_sub(1).ok_or_else(invalid)?;
+
+    let start = match range.0 {
+        Bound::Included(start) => start,
+        Bound::Excluded(start) => start.checked_add(1).ok_or_else(invalid)?,
+        Bound::Unbounded => 0,
+    };
+
+    let end = match range.1 {
+        Bound::Included(end) => end.min(last),
+        Bound::Excluded(end) => end.checked_sub(1).ok_or_else(invalid)?.min(last),
+        Bound::Unbounded => last,
+    };
+
+    if start > end {
+        return Err(invalid());
+    }
+
+    Ok((start, end))
+}
 
 pub struct RangeReader<R> {
     inner: R,
     start: u64,
-    end: Option<u64>,
+    end: u64,
     pos: u64,
-    len: u64,
 }
 
 impl<R: Read + Seek> RangeReader<R> {
@@ -22,27 +45,7 @@ impl<R: Read + Seek> RangeReader<R> {
         range: impl Into<(Bound<u64>, Bound<u64>)>,
         len: u64,
     ) -> io::Result<Self> {
-        let range = range.into();
-        let start = match range.0 {
-            Bound::Included(start) => start,
-            Bound::Excluded(start) => start + 1,
-            Bound::Unbounded => 0,
-        };
-
-        let end = match range.1 {
-            Bound::Included(end) => Some(end.min(len - 1)),
-            Bound::Excluded(end) => Some((end - 1).min(len - 1)),
-            Bound::Unbounded => Some(len - 1),
-        };
-
-        if let Some(end) = end
-            && (start > end || start >= len)
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "invalid range specified",
-            ));
-        }
+        let (start, end) = resolve_range(range.into(), len)?;
 
         inner.seek(SeekFrom::Start(start))?;
 
@@ -51,47 +54,35 @@ impl<R: Read + Seek> RangeReader<R> {
             start,
             end,
             pos: start,
-            len,
         })
     }
 
     pub fn len(&self) -> u64 {
-        match self.end {
-            Some(end) => end - self.start + 1,
-            None => self.len - self.start,
-        }
+        self.end - self.start + 1
     }
 }
 
 impl<R: Read + Seek> Read for RangeReader<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if let Some(end) = self.end {
-            if self.pos > end {
-                return Ok(0);
-            }
-
-            let remaining = (end - self.pos + 1) as usize;
-            let to_read = buf.len().min(remaining);
-
-            let bytes_read = self.inner.read(buf.get_slice_mut(..to_read)?)?;
-            self.pos += bytes_read as u64;
-
-            Ok(bytes_read)
-        } else {
-            let bytes_read = self.inner.read(buf)?;
-            self.pos += bytes_read as u64;
-
-            Ok(bytes_read)
+        if crate::unlikely(self.pos > self.end) {
+            return Ok(0);
         }
+
+        let remaining = self.end - self.pos + 1;
+        let to_read = remaining.min(buf.len() as u64) as usize;
+
+        let bytes_read = self.inner.read(buf.get_slice_mut(..to_read)?)?;
+        self.pos += bytes_read as u64;
+
+        Ok(bytes_read)
     }
 }
 
 pub struct AsyncRangeReader<R> {
     inner: R,
     start: u64,
-    end: Option<u64>,
+    end: u64,
     pos: u64,
-    len: u64,
 }
 
 impl<R: AsyncRead + AsyncSeek + Unpin> AsyncRangeReader<R> {
@@ -100,27 +91,7 @@ impl<R: AsyncRead + AsyncSeek + Unpin> AsyncRangeReader<R> {
         range: impl Into<(Bound<u64>, Bound<u64>)>,
         len: u64,
     ) -> io::Result<Self> {
-        let range = range.into();
-        let start = match range.0 {
-            Bound::Included(start) => start,
-            Bound::Excluded(start) => start + 1,
-            Bound::Unbounded => 0,
-        };
-
-        let end = match range.1 {
-            Bound::Included(end) => Some(end.min(len - 1)),
-            Bound::Excluded(end) => Some((end - 1).min(len - 1)),
-            Bound::Unbounded => Some(len - 1),
-        };
-
-        if let Some(end) = end
-            && (start > end || start >= len)
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "invalid range specified",
-            ));
-        }
+        let (start, end) = resolve_range(range.into(), len)?;
 
         inner.seek(SeekFrom::Start(start)).await?;
 
@@ -129,15 +100,11 @@ impl<R: AsyncRead + AsyncSeek + Unpin> AsyncRangeReader<R> {
             start,
             end,
             pos: start,
-            len,
         })
     }
 
     pub fn len(&self) -> u64 {
-        match self.end {
-            Some(end) => end - self.start + 1,
-            None => self.len - self.start,
-        }
+        self.end - self.start + 1
     }
 }
 
@@ -145,44 +112,30 @@ impl<R: AsyncRead + AsyncSeek + Unpin> AsyncRead for AsyncRangeReader<R> {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-        buf: &mut tokio::io::ReadBuf<'_>,
+        buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let me = &mut *self;
 
-        if let Some(end) = me.end {
-            if me.pos > end {
-                return Poll::Ready(Ok(()));
-            }
-
-            let remaining = (end - me.pos + 1) as usize;
-            let unfilled = buf.initialize_unfilled();
-
-            let to_read = unfilled.len().min(remaining);
-            let limited_buf = unfilled.get_slice_mut(..to_read)?;
-
-            let mut limited_read_buf = tokio::io::ReadBuf::new(limited_buf);
-
-            ready!(Pin::new(&mut me.inner).poll_read(cx, &mut limited_read_buf))?;
-
-            let filled_after = limited_read_buf.filled().len();
-            let bytes_read = filled_after;
-
-            buf.advance(bytes_read);
-
-            me.pos += bytes_read as u64;
-
-            Poll::Ready(Ok(()))
-        } else {
-            let filled_before = buf.filled().len();
-
-            let result = ready!(Pin::new(&mut me.inner).poll_read(cx, buf));
-
-            let filled_after = buf.filled().len();
-            let bytes_read = filled_after - filled_before;
-
-            me.pos += bytes_read as u64;
-
-            Poll::Ready(result)
+        if crate::unlikely(me.pos > me.end) {
+            return Poll::Ready(Ok(()));
         }
+
+        let remaining = me.end - me.pos + 1;
+        let to_read = remaining.min(buf.remaining() as u64) as usize;
+
+        if crate::unlikely(to_read == 0) {
+            return Poll::Ready(Ok(()));
+        }
+
+        let mut tmp = ReadBuf::new(buf.initialize_unfilled_to(to_read));
+
+        ready!(Pin::new(&mut me.inner).poll_read(cx, &mut tmp))?;
+
+        let bytes_read = tmp.filled().len();
+
+        buf.advance(bytes_read);
+        me.pos += bytes_read as u64;
+
+        Poll::Ready(Ok(()))
     }
 }
