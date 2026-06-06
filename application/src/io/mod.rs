@@ -52,7 +52,7 @@ pub fn copy_file_progress(
     let mut total_copied = 0;
 
     loop {
-        if crate::unlikely(listener.is_aborted()) {
+        if listener.is_aborted() {
             return Err(std::io::Error::other("Operation aborted"));
         }
 
@@ -82,7 +82,7 @@ pub fn copy_file_progress(
                     let mut buffer = vec![0; crate::BUFFER_SIZE];
 
                     loop {
-                        if crate::unlikely(listener.is_aborted()) {
+                        if listener.is_aborted() {
                             return Err(std::io::Error::other("Operation aborted"));
                         }
 
@@ -118,7 +118,7 @@ pub fn copy_file_progress(
     let mut buffer = vec![0; crate::BUFFER_SIZE];
 
     loop {
-        if crate::unlikely(listener.is_aborted()) {
+        if listener.is_aborted() {
             return Err(std::io::Error::other("Operation aborted"));
         }
 

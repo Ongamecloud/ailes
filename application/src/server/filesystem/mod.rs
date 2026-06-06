@@ -75,7 +75,7 @@ pub struct Filesystem {
 
     disk_checker_rescan: Arc<tokio::sync::Notify>,
     pub disk_checker_state_dirty: Arc<AtomicBool>,
-    disk_checker: tokio::task::JoinHandle<()>,
+    pub disk_checker: tokio::task::JoinHandle<()>,
     config: Arc<crate::config::Config>,
 
     pub base_path: PathBuf,

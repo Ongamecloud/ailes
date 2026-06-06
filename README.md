@@ -8,7 +8,7 @@
 [![GitHub stars](https://img.shields.io/github/stars/calagopus/wings)](https://github.com/calagopus/wings/stargazers)
 [![Discord](https://img.shields.io/discord/1429911351777824892?label=discord&logo=discord&color=5865F2)](https://discord.gg/uSM8tvTxBV)
 
-A rewrite of [Pterodactyl Wings](https://github.com/pterodactyl/wings) in the Rust programming language. This rewrite aims to be 100% API compatible while implementing new features and better performance.
+A rewrite of [Pterodactyl Wings](https://github.com/pterodactyl/wings) in the Rust programming language. This rewrite aims to be 100% API compatible while implementing new features, better performance and more stability.
 
 [Todo](https://notes.rjns.dev/workspace/cb7ccae8-0508-4f90-9161-d1e69b0ca8f0/uAVAL7iHSQpDk1SiSUPL1)
 
@@ -277,6 +277,7 @@ ignore_panel_wings_upgrades: false
 ### CLI
 
 - add `service-install` command to automatically setup a service for wings
+- add `migrate-disk-limiter` command to migrate to btrfs/zfs disk limiter without needing to do a transfer for each server
 
 ## Star History
 

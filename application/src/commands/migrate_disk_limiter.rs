@@ -193,6 +193,8 @@ impl crate::commands::CliCommand<MigrateDiskLimiterArgs> for MigrateDiskLimiterC
                         app_state.clone(),
                     );
 
+                    server.filesystem.disk_checker.abort();
+
                     print!("{} {} ... ", "migrating".cyan(), uuid);
 
                     match migrate_server(mode, &server.filesystem, &base_path, disk_limit).await {
