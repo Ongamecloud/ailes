@@ -432,7 +432,7 @@ impl DockerExecutor {
                                                 super::super::websocket::WebsocketEvent::ServerImagePullProgress,
                                             )
                                             .arg(id.clone())
-                                            .json_arg(crate::models::PullProgress {
+                                            .structured_arg(crate::models::PullProgress {
                                                 status: crate::models::PullProgressStatus::Pulling,
                                                 progress: detail.current.unwrap_or_default(),
                                                 total: detail.total.unwrap_or_default(),
@@ -451,7 +451,7 @@ impl DockerExecutor {
                                                 super::super::websocket::WebsocketEvent::ServerImagePullProgress,
                                             )
                                             .arg(id.clone())
-                                            .json_arg(crate::models::PullProgress {
+                                            .structured_arg(crate::models::PullProgress {
                                                 status: crate::models::PullProgressStatus::Extracting,
                                                 progress: detail.current.unwrap_or_default(),
                                                 total: detail.total.unwrap_or_default(),
@@ -797,8 +797,8 @@ impl DockerProcessHandle {
         let stats_server = server.clone();
 
         let stats_task = tokio::spawn(async move {
-            let mut prev_cpu_total: u64 = 0;
-            let mut prev_instant: Option<std::time::Instant> = None;
+            let mut prev_cpu_total = 0;
+            let mut prev_instant = None;
 
             let get_stats = async || {
                 let mut stream = stats_docker.stats(

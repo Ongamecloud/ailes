@@ -341,7 +341,7 @@ impl ServerInstaller {
                                                             super::websocket::WebsocketMessage::builder(
                                                                 super::websocket::WebsocketEvent::ServerStats,
                                                             )
-                                                            .json_arg(usage)
+                                                            .structured_arg(usage)
                                                             .build(),
                                                         )
                                                         .ok();

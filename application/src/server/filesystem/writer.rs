@@ -7,7 +7,7 @@ use std::{
     pin::Pin,
     task::{Context, Poll},
 };
-use tokio::io::{AsyncSeek, AsyncWrite};
+use tokio::io::{AsyncSeek, AsyncWrite, AsyncWriteExt};
 
 pub const ALLOCATION_THRESHOLD: i64 = 1024 * 1024;
 
@@ -46,6 +46,8 @@ impl FileSystemWriter {
                 .filesystem
                 .set_permissions(destination, permissions)?;
         }
+
+        tokio::runtime::Handle::current().block_on(server.filesystem.chown_path(destination))?;
 
         Ok(Self {
             server,
@@ -96,7 +98,7 @@ impl Write for FileSystemWriter {
 
         self.current_position += written as u64;
 
-        if crate::unlikely(self.current_position > self.highest_position) {
+        if crate::likely(self.current_position > self.highest_position) {
             let additional_space = (self.current_position - self.highest_position) as i64;
             self.accumulated_bytes += additional_space;
             self.highest_position = self.current_position;
@@ -139,6 +141,8 @@ impl Seek for FileSystemWriter {
 
 impl Drop for FileSystemWriter {
     fn drop(&mut self) {
+        self.allocate_accumulated().ok();
+
         if let Some(modified) = self.modified
             && let Some(writer) = self.writer.take()
             && let Ok(file) = writer.into_inner()
@@ -154,6 +158,7 @@ pub struct AsyncFileSystemWriter {
     writer: Option<tokio::io::BufWriter<tokio::fs::File>>,
     ignorant: bool,
     accumulated_bytes: i64,
+    allocating_bytes: i64,
     modified: Option<SystemTime>,
     allocation_in_progress: Option<Pin<Box<dyn Future<Output = bool> + Send>>>,
     current_position: u64,
@@ -197,6 +202,7 @@ impl AsyncFileSystemWriter {
             )),
             ignorant: false,
             accumulated_bytes: 0,
+            allocating_bytes: 0,
             modified,
             allocation_in_progress: None,
             current_position: 0,
@@ -225,6 +231,7 @@ impl AsyncFileSystemWriter {
                     .await
             }));
 
+            self.allocating_bytes = bytes;
             self.accumulated_bytes = 0;
         }
     }
@@ -234,10 +241,12 @@ impl AsyncFileSystemWriter {
             match fut.as_mut().poll(cx) {
                 Poll::Ready(true) => {
                     self.allocation_in_progress = None;
+                    self.allocating_bytes = 0;
                     Poll::Ready(Ok(()))
                 }
                 Poll::Ready(false) => {
                     self.allocation_in_progress = None;
+                    self.allocating_bytes = 0;
                     Poll::Ready(Err(std::io::Error::new(
                         std::io::ErrorKind::StorageFull,
                         "Failed to allocate space",
@@ -280,12 +289,6 @@ impl AsyncWrite for AsyncFileSystemWriter {
 
                 if self.accumulated_bytes >= ALLOCATION_THRESHOLD {
                     self.start_allocation();
-
-                    match self.poll_allocation(cx) {
-                        Poll::Ready(Ok(())) => {}
-                        Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
-                        Poll::Pending => return Poll::Pending,
-                    }
                 }
             }
         }
@@ -378,29 +381,32 @@ impl AsyncSeek for AsyncFileSystemWriter {
 
 impl Drop for AsyncFileSystemWriter {
     fn drop(&mut self) {
-        if self.accumulated_bytes > 0 {
+        let leftover = self.accumulated_bytes + self.allocating_bytes;
+        if leftover > 0 {
             let server = self.server.clone();
             let parent = self.parent.clone();
-            let bytes = self.accumulated_bytes;
             let ignorant = self.ignorant;
 
-            if bytes > 0 {
-                tokio::spawn(async move {
-                    server
-                        .filesystem
-                        .async_allocate_in_path_iterator(&parent, bytes, ignorant)
-                        .await;
-                });
-            }
+            tokio::spawn(async move {
+                server
+                    .filesystem
+                    .async_allocate_in_path_iterator(&parent, leftover, ignorant)
+                    .await;
+            });
         }
 
-        if let Some(modified) = self.modified
-            && let Some(writer) = self.writer.take()
-        {
-            tokio::spawn(async move {
-                let file = writer.into_inner().into_std().await;
+        if let Some(writer) = self.writer.take() {
+            let modified = self.modified;
 
-                crate::spawn_blocking_handled(move || file.set_modified(modified.into_std()));
+            tokio::spawn(async move {
+                let mut writer = writer;
+                writer.flush().await.ok();
+
+                if let Some(modified) = modified {
+                    let file = writer.into_inner().into_std().await;
+
+                    crate::spawn_blocking_handled(move || file.set_modified(modified.into_std()));
+                }
             });
         }
     }

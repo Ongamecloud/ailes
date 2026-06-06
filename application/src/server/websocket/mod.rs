@@ -188,7 +188,7 @@ impl WebsocketMessageBuilder {
         }
     }
 
-    pub fn json_arg(mut self, arg: impl Serialize) -> Self {
+    pub fn structured_arg(mut self, arg: impl Serialize) -> Self {
         match serde_json::to_string(&arg) {
             Ok(arg) => self.args.push(arg.into()),
             Err(err) => tracing::warn!("failed to serialize websocket message argument: {:?}", err),

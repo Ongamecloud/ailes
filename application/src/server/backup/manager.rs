@@ -103,7 +103,7 @@ impl BackupManager {
                                 crate::server::websocket::WebsocketEvent::ServerBackupProgress,
                             )
                             .arg(uuid.to_compact_string())
-                            .json_arg(crate::models::Progress { progress, total })
+                            .structured_arg(crate::models::Progress { progress, total })
                             .build(),
                         )
                         .ok();
@@ -163,7 +163,7 @@ impl BackupManager {
                         crate::server::websocket::WebsocketEvent::ServerBackupCompleted,
                     )
                     .arg(uuid.to_compact_string())
-                    .json_arg(serde_json::json!({
+                    .structured_arg(serde_json::json!({
                         "checksum_type": "",
                         "checksum": "",
                         "size": 0,
@@ -195,7 +195,7 @@ impl BackupManager {
                 crate::server::websocket::WebsocketEvent::ServerBackupCompleted,
             )
             .arg(uuid.to_compact_string())
-            .json_arg(serde_json::json!({
+            .structured_arg(serde_json::json!({
                 "checksum_type": backup.checksum_type,
                 "checksum": backup.checksum,
                 "size": backup.size,
@@ -292,7 +292,7 @@ impl BackupManager {
                             crate::server::websocket::WebsocketMessage::builder(
                                 crate::server::websocket::WebsocketEvent::ServerBackupRestoreProgress,
                             )
-                            .json_arg(crate::models::Progress {
+                            .structured_arg(crate::models::Progress {
                                 progress: progress_value,
                                 total: total_value,
                             })

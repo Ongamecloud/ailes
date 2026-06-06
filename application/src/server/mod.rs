@@ -279,7 +279,7 @@ impl Server {
                     let message = websocket::WebsocketMessage::builder(
                         websocket::WebsocketEvent::ServerStats,
                     )
-                    .json_arg(usage)
+                    .structured_arg(usage)
                     .build();
 
                     if let Err(err) = server.websocket.send(message) {

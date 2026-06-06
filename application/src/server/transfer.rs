@@ -677,7 +677,7 @@ impl OutgoingServerTransfer {
                                 super::websocket::WebsocketMessage::builder(
                                     super::websocket::WebsocketEvent::ServerTransferProgress,
                                 )
-                                .json_arg(crate::models::TransferProgress {
+                                .structured_arg(crate::models::TransferProgress {
                                     archive_progress: current_bytes_archived,
                                     network_progress: current_bytes_sent,
                                     total: bytes_total,

@@ -160,7 +160,7 @@ impl OperationManager {
                                     crate::server::websocket::WebsocketEvent::ServerOperationProgress,
                                 )
                                 .arg(operation_uuid.to_compact_string())
-                                .json_arg(&operation)
+                                .structured_arg(&operation)
                                 .build(),
                             )
                             .ok();
