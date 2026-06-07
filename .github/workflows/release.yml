@@ -10,6 +10,25 @@ env:
   PROJECT_NAME: wings-rs
 
 jobs:
+  generate-sbom:
+    name: Generate SBOM
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Generate source SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: cyclonedx-json
+          output-file: sbom-source.cyclonedx.json
+          artifact-name: sbom-source.cyclonedx.json
+          upload-artifact: true
+
   dist:
     name: Dist
     runs-on: ${{ matrix.os }}
@@ -70,7 +89,7 @@ jobs:
 
   publish-draft-release:
     name: Publish Draft Release
-    needs: [dist]
+    needs: [dist, generate-sbom]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -86,10 +105,10 @@ jobs:
         run: |
           RAW_TAG="${{ github.ref_name }}"
           VERSION="${RAW_TAG#release-}"
-          
+
           # Output the clean version to use as the Release Title
           echo "version=$VERSION" >> $GITHUB_OUTPUT
-          
+
           if [[ "$VERSION" == *-* ]]; then
             echo "is_prerelease=true" >> $GITHUB_OUTPUT
           else
@@ -103,19 +122,29 @@ jobs:
           draft: true
           prerelease: ${{ steps.release_info.outputs.is_prerelease == 'true' }}
           generate_release_notes: true
-          files: artifacts/*/*
+          files: |
+            artifacts/${{ env.PROJECT_NAME }}-*/*
+            artifacts/sbom-source.cyclonedx.json/sbom-source.cyclonedx.json
 
   create-multiarch-image:
     name: Create multi-arch Docker image
-    needs: [dist]
+    needs: [dist, generate-sbom]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
+      id-token: write
+      attestations: write
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Download source SBOM
+        uses: actions/download-artifact@v4
+        with:
+          name: sbom-source.cyclonedx.json
+          path: sbom
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -167,11 +196,22 @@ jobs:
           echo "DOCKER_TAGS=$DOCKER_TAGS" >> $GITHUB_ENV
 
       - name: Build & push multi-arch image
+        id: build
         uses: docker/build-push-action@v5
         with:
           context: .
           platforms: linux/amd64,linux/arm64,linux/riscv64,linux/ppc64le
           push: true
           tags: ${{ env.DOCKER_TAGS }}
+          sbom: true
+          provenance: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Attach source SBOM attestation to image
+        uses: actions/attest-sbom@v4
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          sbom-path: sbom/sbom-source.cyclonedx.json
+          push-to-registry: true

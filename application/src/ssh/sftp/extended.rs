@@ -434,7 +434,7 @@ pub async fn handle_extended(
                 available_user_space: u64,
             }
 
-            let (total_space, free_space) = match sftp_session.server.filesystem.disk_limit() {
+            let (total_space, available_space) = match sftp_session.server.filesystem.disk_limit() {
                 0 => {
                     let disks = sysinfo::Disks::new();
 
@@ -472,10 +472,10 @@ pub async fn handle_extended(
                     id,
                     data: russh_sftp::ser::to_bytes(&SpaceAvailableReply {
                         total_space,
-                        available_space: free_space,
+                        available_space,
 
                         total_user_space: total_space,
-                        available_user_space: free_space,
+                        available_user_space: available_space,
                     })
                     .map_err(map_ser_err)?
                     .into(),
