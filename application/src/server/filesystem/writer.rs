@@ -47,7 +47,7 @@ impl FileSystemWriter {
                 .set_permissions(destination, permissions)?;
         }
 
-        tokio::runtime::Handle::current().block_on(server.filesystem.chown_path(destination))?;
+        server.filesystem.chown_path(destination)?;
 
         Ok(Self {
             server,
@@ -191,7 +191,7 @@ impl AsyncFileSystemWriter {
                 .await?;
         }
 
-        server.filesystem.chown_path(destination).await?;
+        server.filesystem.async_chown_path(destination).await?;
 
         Ok(Self {
             server,

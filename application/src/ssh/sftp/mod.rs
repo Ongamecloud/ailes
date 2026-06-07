@@ -625,7 +625,7 @@ impl russh_sftp::server::Handler for SftpSession {
             return Err(StatusCode::NoSuchFile);
         }
 
-        if self.server.filesystem.chown_path(path).await.is_err() {
+        if self.server.filesystem.async_chown_path(path).await.is_err() {
             return Err(StatusCode::Failure);
         }
         if let Some(permissions) = attrs.permissions

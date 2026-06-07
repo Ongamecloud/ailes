@@ -776,7 +776,7 @@ impl ScheduleAction {
                     })
                     .await;
 
-                if let Err(err) = server.filesystem.chown_path(&path).await {
+                if let Err(err) = server.filesystem.async_chown_path(&path).await {
                     tracing::error!(path = %path.display(), "failed to change ownership: {:?}", err);
 
                     return Err("failed to change ownership".into());

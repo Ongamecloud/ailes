@@ -1036,7 +1036,7 @@ impl Server {
                                 "Ensuring file permissions are set correctly, this could take a few seconds...",
                             );
 
-                            server.filesystem.chown_path(&server.filesystem.base_path).await?;
+                            server.filesystem.async_chown_path(&server.filesystem.base_path).await?;
                         }
 
                         server.setup_container().await?;

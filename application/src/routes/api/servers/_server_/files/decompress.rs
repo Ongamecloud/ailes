@@ -154,7 +154,7 @@ mod post {
                 }
             }
 
-            server.filesystem.chown_path(&root).await?;
+            server.filesystem.async_chown_path(&root).await?;
 
             ApiResponse::new_serialized(Response {}).ok()
         } else {

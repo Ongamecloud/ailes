@@ -1033,7 +1033,55 @@ impl Filesystem {
         Ok(())
     }
 
-    pub async fn chown_path(&self, path: impl AsRef<Path>) -> Result<(), anyhow::Error> {
+    pub fn chown_path(&self, path: impl AsRef<Path>) -> Result<(), anyhow::Error> {
+        if self.config.load().system.user.rootless.enabled {
+            return Ok(());
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsFd;
+
+            let metadata = self.metadata(path.as_ref())?;
+
+            let owner_uid = rustix::fs::Uid::from_raw_unchecked(self.config.load().system.user.uid);
+            let owner_gid = rustix::fs::Gid::from_raw_unchecked(self.config.load().system.user.gid);
+
+            if crate::unlikely(path.as_ref() == Path::new("") || path.as_ref() == Path::new("/")) {
+                std::os::unix::fs::chown(
+                    &self.base_path,
+                    Some(owner_uid.as_raw()),
+                    Some(owner_gid.as_raw()),
+                )?;
+            } else {
+                rustix::fs::chownat(
+                    self.cap_filesystem.get_inner()?.as_fd(),
+                    self.relative_path(path.as_ref()),
+                    Some(owner_uid),
+                    Some(owner_gid),
+                    rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+                )?;
+            }
+
+            if metadata.is_dir() {
+                let mut directory = self.read_dir(path.as_ref())?;
+
+                while let Some(entry) = directory.next_entry() {
+                    let path = entry?.1;
+
+                    self.chown_path(path)?;
+                }
+            }
+
+            Ok(())
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(())
+        }
+    }
+
+    pub async fn async_chown_path(&self, path: impl AsRef<Path>) -> Result<(), anyhow::Error> {
         if self.config.load().system.user.rootless.enabled {
             return Ok(());
         }

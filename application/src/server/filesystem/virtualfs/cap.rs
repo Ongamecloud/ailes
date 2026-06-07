@@ -730,7 +730,8 @@ impl super::VirtualWritableFilesystem for VirtualCapFilesystem {
         }
 
         if self.is_primary_server_fs {
-            tokio::runtime::Handle::current().block_on(self.server.filesystem.chown_path(path))?;
+            tokio::runtime::Handle::current()
+                .block_on(self.server.filesystem.async_chown_path(path))?;
         }
 
         Ok(())
@@ -753,7 +754,7 @@ impl super::VirtualWritableFilesystem for VirtualCapFilesystem {
         }
 
         if self.is_primary_server_fs {
-            self.server.filesystem.chown_path(path).await?;
+            self.server.filesystem.async_chown_path(path).await?;
         }
 
         Ok(())
