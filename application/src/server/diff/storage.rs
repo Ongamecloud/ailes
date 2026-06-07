@@ -283,7 +283,9 @@ impl Storage {
         let mut chain = Vec::new();
         let mut cur = Some(id);
 
-        while let Some(rid) = cur {
+        while let Some(rid) = cur
+            && chain.len() < 1000
+        {
             let row = self
                 .conn
                 .query_row(

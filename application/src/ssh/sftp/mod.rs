@@ -27,6 +27,8 @@ pub struct FileHandle {
     path_components: Vec<String>,
 
     file: Arc<Mutex<std::fs::File>>,
+    known_size: u64,
+    append: bool,
 
     diff_track: bool,
     diff_before: Option<Vec<u8>>,
@@ -1247,6 +1249,16 @@ impl russh_sftp::server::Handler for SftpSession {
                 .await;
         }
 
+        if pflags.contains(OpenFlags::TRUNCATE)
+            && let Some(old) = pre_size.filter(|&s| s > 0)
+            && let Some(parent_components) = path_components.get(0..path_components.len() - 1)
+        {
+            self.server
+                .filesystem
+                .async_allocate_in_path_iterator(parent_components, -(old as i64), true)
+                .await;
+        }
+
         let handle = self.next_handle_id();
 
         self.handles.insert(
@@ -1259,6 +1271,12 @@ impl russh_sftp::server::Handler for SftpSession {
                 path,
                 path_components,
                 file: Arc::new(Mutex::new(file)),
+                known_size: if pflags.contains(OpenFlags::TRUNCATE) {
+                    0
+                } else {
+                    pre_size.unwrap_or(0)
+                },
+                append: pflags.contains(OpenFlags::APPEND),
                 diff_track,
                 diff_before,
                 diff_dirty: false,
@@ -1330,6 +1348,13 @@ impl russh_sftp::server::Handler for SftpSession {
             return Err(StatusCode::PermissionDenied);
         }
 
+        let end = offset.saturating_add(data.len() as u64);
+        let delta = if handle.append {
+            data.len() as i64
+        } else {
+            end.saturating_sub(handle.known_size) as i64
+        };
+
         if !self
             .server
             .filesystem
@@ -1338,7 +1363,7 @@ impl russh_sftp::server::Handler for SftpSession {
                     .path_components
                     .get(0..handle.path_components.len() - 1)
                     .ok_or(StatusCode::Failure)?,
-                data.len() as i64,
+                delta,
                 false,
             )
             .await
@@ -1346,16 +1371,48 @@ impl russh_sftp::server::Handler for SftpSession {
             return Err(StatusCode::Failure);
         }
 
-        tokio::task::spawn_blocking({
+        match tokio::task::spawn_blocking({
             let file = Arc::clone(&handle.file);
 
             move || file.lock().write_all_at(offset, &data)
         })
         .await
-        .map_err(|_| StatusCode::Failure)?
-        .map_err(|_| StatusCode::Failure)?;
+        {
+            Ok(Ok(())) => (),
+            Ok(Err(_)) => {
+                self.server
+                    .filesystem
+                    .async_allocate_in_path_iterator(
+                        handle
+                            .path_components
+                            .get(0..handle.path_components.len() - 1)
+                            .ok_or(StatusCode::Failure)?,
+                        -delta,
+                        true,
+                    )
+                    .await;
+                return Err(StatusCode::Failure);
+            }
+            Err(_) => {
+                self.server
+                    .filesystem
+                    .async_allocate_in_path_iterator(
+                        handle
+                            .path_components
+                            .get(0..handle.path_components.len() - 1)
+                            .ok_or(StatusCode::Failure)?,
+                        -delta,
+                        true,
+                    )
+                    .await;
+                return Err(StatusCode::Failure);
+            }
+        }
 
         handle.diff_dirty = true;
+        if !handle.append {
+            handle.known_size = handle.known_size.max(end);
+        }
 
         Ok(Status {
             id,

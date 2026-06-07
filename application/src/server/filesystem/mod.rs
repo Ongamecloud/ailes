@@ -660,8 +660,9 @@ impl Filesystem {
             self.async_create_dir_all(parent).await?;
         }
 
-        let metadata = self.async_metadata(&old_path).await?;
-        let is_dir = metadata.is_dir();
+        let old_metadata = self.async_metadata(&old_path).await?;
+        let new_metadata = self.async_metadata(&new_path).await.ok();
+        let is_dir = old_metadata.is_dir();
 
         let old_parent = self
             .async_canonicalize(match old_path.parent() {
@@ -697,10 +698,19 @@ impl Filesystem {
                 );
             }
         } else {
-            let size = metadata.len() as i64;
+            let size = old_metadata.len() as i64;
 
-            self.async_allocate_in_path(&old_parent, -size, true).await;
-            self.async_allocate_in_path(&new_parent, size, true).await;
+            if let Some(new_metadata) = new_metadata {
+                let new_size = new_metadata.len() as i64;
+                let size_delta = new_size - size;
+
+                self.async_allocate_in_path(&old_parent, -size, true).await;
+                self.async_allocate_in_path(&new_parent, size_delta, true)
+                    .await;
+            } else {
+                self.async_allocate_in_path(&old_parent, -size, true).await;
+                self.async_allocate_in_path(&new_parent, size, true).await;
+            }
         }
 
         self.async_rename(old_path, &self.cap_filesystem, new_path)
@@ -853,7 +863,7 @@ impl Filesystem {
     fn try_update_atomics(&self, delta: impl Into<usage::SpaceDelta>, ignorant: bool) -> bool {
         let delta: usage::SpaceDelta = delta.into();
 
-        if crate::unlikely(delta.logical == 0 && delta.physical == 0) {
+        if delta.logical == 0 && delta.physical == 0 {
             return true;
         }
 

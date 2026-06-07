@@ -107,7 +107,9 @@ pub async fn handle_extended(
                 fn bytes(length: u64, bytes_read: usize, total_bytes_read: u64) -> usize {
                     if length > 0 {
                         if total_bytes_read > length {
-                            (length - (total_bytes_read - bytes_read as u64)) as usize
+                            (length
+                                .saturating_sub(total_bytes_read.saturating_sub(bytes_read as u64)))
+                                as usize
                         } else {
                             bytes_read
                         }
@@ -127,13 +129,18 @@ pub async fn handle_extended(
                                 let bytes_read = file.read(&mut buffer).await?;
                                 total_bytes_read += bytes_read as u64;
 
-                                if bytes_read == 0 {
+                                if crate::unlikely(bytes_read == 0) {
                                     break;
                                 }
 
-                                let bytes_read =
-                                    bytes(request.length, bytes_read, total_bytes_read);
-                                hasher.safe_write_all(&buffer, bytes_read)?;
+                                let take = bytes(request.length, bytes_read, total_bytes_read);
+                                hasher.safe_write_all(&buffer, take)?;
+
+                                if crate::unlikely(
+                                    request.length != 0 && total_bytes_read >= request.length,
+                                ) {
+                                    break;
+                                }
                             }
 
                             (*hasher.finalize()).into()
@@ -145,13 +152,18 @@ pub async fn handle_extended(
                                 let bytes_read = file.read(&mut buffer).await?;
                                 total_bytes_read += bytes_read as u64;
 
-                                if bytes_read == 0 {
+                                if crate::unlikely(bytes_read == 0) {
                                     break;
                                 }
 
-                                let bytes_read =
-                                    bytes(request.length, bytes_read, total_bytes_read);
-                                hasher.update(buffer.get_slice(..bytes_read)?);
+                                let take = bytes(request.length, bytes_read, total_bytes_read);
+                                hasher.update(buffer.get_slice(..take)?);
+
+                                if crate::unlikely(
+                                    request.length != 0 && total_bytes_read >= request.length,
+                                ) {
+                                    break;
+                                }
                             }
 
                             hasher.finalize().to_be_bytes().to_vec()
@@ -163,13 +175,18 @@ pub async fn handle_extended(
                                 let bytes_read = file.read(&mut buffer).await?;
                                 total_bytes_read += bytes_read as u64;
 
-                                if bytes_read == 0 {
+                                if crate::unlikely(bytes_read == 0) {
                                     break;
                                 }
 
-                                let bytes_read =
-                                    bytes(request.length, bytes_read, total_bytes_read);
-                                hasher.safe_update(&buffer, bytes_read)?;
+                                let take = bytes(request.length, bytes_read, total_bytes_read);
+                                hasher.safe_update(&buffer, take)?;
+
+                                if crate::unlikely(
+                                    request.length != 0 && total_bytes_read >= request.length,
+                                ) {
+                                    break;
+                                }
                             }
 
                             (*hasher.finalize()).into()
@@ -181,13 +198,18 @@ pub async fn handle_extended(
                                 let bytes_read = file.read(&mut buffer).await?;
                                 total_bytes_read += bytes_read as u64;
 
-                                if bytes_read == 0 {
+                                if crate::unlikely(bytes_read == 0) {
                                     break;
                                 }
 
-                                let bytes_read =
-                                    bytes(request.length, bytes_read, total_bytes_read);
-                                hasher.safe_update(&buffer, bytes_read)?;
+                                let take = bytes(request.length, bytes_read, total_bytes_read);
+                                hasher.safe_update(&buffer, take)?;
+
+                                if crate::unlikely(
+                                    request.length != 0 && total_bytes_read >= request.length,
+                                ) {
+                                    break;
+                                }
                             }
 
                             (*hasher.finalize()).into()
@@ -199,13 +221,18 @@ pub async fn handle_extended(
                                 let bytes_read = file.read(&mut buffer).await?;
                                 total_bytes_read += bytes_read as u64;
 
-                                if bytes_read == 0 {
+                                if crate::unlikely(bytes_read == 0) {
                                     break;
                                 }
 
-                                let bytes_read =
-                                    bytes(request.length, bytes_read, total_bytes_read);
-                                hasher.safe_update(&buffer, bytes_read)?;
+                                let take = bytes(request.length, bytes_read, total_bytes_read);
+                                hasher.safe_update(&buffer, take)?;
+
+                                if crate::unlikely(
+                                    request.length != 0 && total_bytes_read >= request.length,
+                                ) {
+                                    break;
+                                }
                             }
 
                             (*hasher.finalize()).into()
@@ -217,13 +244,18 @@ pub async fn handle_extended(
                                 let bytes_read = file.read(&mut buffer).await?;
                                 total_bytes_read += bytes_read as u64;
 
-                                if bytes_read == 0 {
+                                if crate::unlikely(bytes_read == 0) {
                                     break;
                                 }
 
-                                let bytes_read =
-                                    bytes(request.length, bytes_read, total_bytes_read);
-                                hasher.safe_update(&buffer, bytes_read)?;
+                                let take = bytes(request.length, bytes_read, total_bytes_read);
+                                hasher.safe_update(&buffer, take)?;
+
+                                if crate::unlikely(
+                                    request.length != 0 && total_bytes_read >= request.length,
+                                ) {
+                                    break;
+                                }
                             }
 
                             (*hasher.finalize()).into()
@@ -235,13 +267,18 @@ pub async fn handle_extended(
                                 let bytes_read = file.read(&mut buffer).await?;
                                 total_bytes_read += bytes_read as u64;
 
-                                if bytes_read == 0 {
+                                if crate::unlikely(bytes_read == 0) {
                                     break;
                                 }
 
-                                let bytes_read =
-                                    bytes(request.length, bytes_read, total_bytes_read);
-                                hasher.safe_update(&buffer, bytes_read)?;
+                                let take = bytes(request.length, bytes_read, total_bytes_read);
+                                hasher.safe_update(&buffer, take)?;
+
+                                if crate::unlikely(
+                                    request.length != 0 && total_bytes_read >= request.length,
+                                ) {
+                                    break;
+                                }
                             }
 
                             (*hasher.finalize()).into()
@@ -347,35 +384,21 @@ pub async fn handle_extended(
             if let Ok(metadata) = sftp_session
                 .server
                 .filesystem
-                .async_metadata(destination_path)
-                .await
-                && !metadata.is_file()
-                && request.overwrite == 0
-            {
-                return Err(StatusCode::NoSuchFile);
-            }
-
-            if !sftp_session
-                .server
-                .filesystem
-                .async_allocate_in_path(
-                    destination_path.parent().ok_or(StatusCode::NoSuchFile)?,
-                    metadata.len() as i64,
-                    false,
-                )
+                .async_symlink_metadata(destination_path)
                 .await
             {
-                return Err(StatusCode::Failure);
+                if metadata.is_dir() {
+                    return Err(StatusCode::NoSuchFile);
+                }
+                if request.overwrite == 0 {
+                    return Err(StatusCode::Failure);
+                }
             }
 
             sftp_session
                 .server
                 .filesystem
-                .async_copy(
-                    &source_path,
-                    &sftp_session.server.filesystem,
-                    &destination_path,
-                )
+                .async_quota_copy(&source_path, &destination_path, &sftp_session.server, None)
                 .await
                 .map_err(|_| StatusCode::NoSuchFile)?;
 
@@ -439,7 +462,8 @@ pub async fn handle_extended(
                 }
                 total => (
                     total as u64,
-                    total as u64 - sftp_session.server.filesystem.limiter_usage().await,
+                    (total as u64)
+                        .saturating_sub(sftp_session.server.filesystem.limiter_usage().await),
                 ),
             };
 
@@ -533,7 +557,8 @@ pub async fn handle_extended(
                 }
                 total => (
                     total as u64,
-                    total as u64 - sftp_session.server.filesystem.limiter_usage().await,
+                    (total as u64)
+                        .saturating_sub(sftp_session.server.filesystem.limiter_usage().await),
                 ),
             };
 

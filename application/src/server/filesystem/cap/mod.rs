@@ -446,23 +446,6 @@ impl CapFilesystem {
         Ok(file.into_std())
     }
 
-    pub async fn async_copy(
-        &self,
-        from: impl AsRef<Path>,
-        to_dir: &CapFilesystem,
-        to: impl AsRef<Path>,
-    ) -> Result<u64, anyhow::Error> {
-        let from = self.relative_path(from.as_ref());
-        let to = self.relative_path(to.as_ref());
-
-        let inner = self.async_get_inner().await?;
-        let to_inner = to_dir.async_get_inner().await?;
-        let bytes_copied =
-            tokio::task::spawn_blocking(move || inner.copy(from, &to_inner, to)).await??;
-
-        Ok(bytes_copied)
-    }
-
     pub async fn async_quota_copy(
         &self,
         path: impl AsRef<Path>,
@@ -509,9 +492,6 @@ impl CapFilesystem {
             .filesystem
             .relative_path(destination_path.as_ref());
 
-        let mut reader = self.open(&path)?;
-        let mut writer = destination_server.filesystem.create(&destination_path)?;
-
         let Some(destination_parent) = destination_path.parent() else {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -520,7 +500,32 @@ impl CapFilesystem {
             .into());
         };
 
-        let mut cached_allocation_progress = 0i64;
+        let destination_metadata = destination_server
+            .filesystem
+            .metadata(&destination_path)
+            .ok();
+        if let Some(metadata) = &destination_metadata
+            && !metadata.is_file()
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "Destination path exists and is not a file",
+            )
+            .into());
+        }
+
+        let mut reader = self.open(&path)?;
+        let mut writer = destination_server.filesystem.create(&destination_path)?;
+
+        if let Some(destination_metadata) = &destination_metadata {
+            destination_server.filesystem.allocate_in_path(
+                destination_parent,
+                -(destination_metadata.len() as i64),
+                false,
+            );
+        }
+
+        let mut cached_allocation_progress = 0;
 
         let bytes_copied = crate::io::copy_file_progress(
             &mut reader,
