@@ -1,5 +1,7 @@
+use crate::io::SafeSliceExt;
 use bollard::errors::Error::DockerResponseServerError;
 use futures::StreamExt;
+use parking_lot::RwLock;
 use rand::distr::SampleString;
 use std::{
     collections::HashMap,
@@ -8,12 +10,7 @@ use std::{
     sync::{Arc, Weak},
     task::{Context, Poll},
 };
-use tokio::{
-    io::{AsyncWriteExt, ReadBuf},
-    sync::RwLock,
-};
-
-use crate::io::SafeSliceExt;
+use tokio::io::{AsyncWriteExt, ReadBuf};
 
 #[inline]
 pub fn string_to_option(s: &str) -> Option<String> {
@@ -831,7 +828,7 @@ impl DockerProcessHandle {
                     }
                 };
 
-                let mut usage = stats_usage.write().await;
+                let mut usage = stats_usage.write();
 
                 if let Some(memory_stats) = &stats.memory_stats {
                     let mut memory_bytes = memory_stats.usage.unwrap_or(0);
@@ -920,7 +917,7 @@ impl DockerProcessHandle {
                                 .signed_duration_since(started_at.with_timezone(&chrono::Utc))
                                 .num_milliseconds()
                                 .max(0) as u64;
-                            state_usage.write().await.uptime = uptime;
+                            state_usage.write().uptime = uptime;
                         }
                         super::ProcessStatus::Running
                     }
@@ -928,7 +925,7 @@ impl DockerProcessHandle {
                         super::ProcessStatus::Paused
                     }
                     _ => {
-                        state_usage.write().await.uptime = 0;
+                        state_usage.write().uptime = 0;
                         super::ProcessStatus::Stopped {
                             exit_code: state.exit_code.unwrap_or(-1) as i32,
                             oom_killed: state.oom_killed.unwrap_or(false),
@@ -936,7 +933,7 @@ impl DockerProcessHandle {
                     }
                 };
 
-                let usage = *state_usage.read().await;
+                let usage = *state_usage.read();
 
                 if status_tx.send((process_status, usage)).await.is_err() {
                     break;
@@ -973,7 +970,7 @@ impl super::ProcessHandle for DockerProcessHandle {
     async fn resource_usage(
         &self,
     ) -> Result<super::super::resources::ResourceUsage, anyhow::Error> {
-        Ok(*self.resource_usage.read().await)
+        Ok(*self.resource_usage.read())
     }
 
     async fn logs(

@@ -65,7 +65,7 @@ pub async fn handle_ws(
                                 "closing websocket due to user permissions removal",
                             );
                             if let Some(socket_jwt) = socket_jwt.read().await.as_ref() {
-                                state.config.jwt.deny(socket_jwt.base.jwt_id.clone()).await;
+                                state.config.jwt.deny(socket_jwt.base.jwt_id.clone());
                             }
                             websocket_handler.close("permission revoked").await;
                             break;

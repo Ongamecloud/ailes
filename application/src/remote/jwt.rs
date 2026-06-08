@@ -1,8 +1,8 @@
 use compact_str::ToCompactString;
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation};
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{collections::HashMap, sync::Arc};
-use tokio::sync::RwLock;
 
 #[derive(Debug, Clone, Copy)]
 pub enum JwtValidateError {
@@ -76,9 +76,9 @@ impl BasePayload {
             return Err(JwtValidateError::InvalidIssuedAt);
         }
 
-        if let Some(expired_until) = client.denied_jtokens.read().await.get(&self.jwt_id)
+        if let Some(expired_until) = client.denied_jtokens.read().get(&self.jwt_id)
             && let Some(issued) = self.issued_at
-            && issued < expired_until.timestamp()
+            && issued <= expired_until.timestamp()
         {
             return Err(JwtValidateError::Denied);
         }
@@ -120,13 +120,13 @@ impl JwtClient {
                 loop {
                     tokio::time::sleep(std::time::Duration::from_secs(60)).await;
 
-                    let mut denied = denied_jtokens.write().await;
+                    let mut denied = denied_jtokens.write();
                     denied.retain(|_, &mut expiration| {
                         expiration > chrono::Utc::now() - chrono::Duration::hours(1)
                     });
                     drop(denied);
 
-                    let mut seen = seen_jtoken_ids.write().await;
+                    let mut seen = seen_jtoken_ids.write();
                     seen.retain(|_, &mut (_, expiration)| {
                         expiration > chrono::Utc::now() - chrono::Duration::hours(1)
                     });
@@ -166,8 +166,8 @@ impl JwtClient {
         jsonwebtoken::encode(&Header::new(Algorithm::HS256), payload, &self.encoding_key)
     }
 
-    pub async fn limited_jwt_id(&self, id: &str) -> bool {
-        let seen = self.seen_jtoken_ids.read().await;
+    pub fn limited_jwt_id(&self, id: &str) -> bool {
+        let seen = self.seen_jtoken_ids.read();
         if let Some((count, _)) = seen.get(id) {
             if *count >= self.max_jwt_uses {
                 return false;
@@ -175,7 +175,7 @@ impl JwtClient {
                 drop(seen);
 
                 if self.max_jwt_uses != 0 {
-                    let mut seen = self.seen_jtoken_ids.write().await;
+                    let mut seen = self.seen_jtoken_ids.write();
                     if let Some((count, _)) = seen.get_mut(id) {
                         *count += 1;
                     }
@@ -186,15 +186,14 @@ impl JwtClient {
 
             self.seen_jtoken_ids
                 .write()
-                .await
                 .insert(id.to_compact_string(), (1, chrono::Utc::now()));
         }
 
         true
     }
 
-    pub async fn deny(&self, id: impl Into<compact_str::CompactString>) {
-        let mut denied = self.denied_jtokens.write().await;
+    pub fn deny(&self, id: impl Into<compact_str::CompactString>) {
+        let mut denied = self.denied_jtokens.write();
         denied.insert(id.into(), chrono::Utc::now());
     }
 }

@@ -10,6 +10,7 @@ mod post {
     };
     use axum::http::StatusCode;
     use ignore::{gitignore::GitignoreBuilder, overrides::OverrideBuilder};
+    use parking_lot::Mutex;
     use serde::{Deserialize, Serialize};
     use std::{
         path::{Path, PathBuf},
@@ -18,10 +19,7 @@ mod post {
             atomic::{AtomicUsize, Ordering},
         },
     };
-    use tokio::{
-        io::{AsyncBufReadExt, AsyncReadExt, BufReader},
-        sync::Mutex,
-    };
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
     use utoipa::ToSchema;
 
     async fn search_in_stream(
@@ -248,7 +246,7 @@ mod post {
                                             Err(_) => return Ok(()),
                                         };
 
-                                        results.lock().await.push(entry);
+                                        results.lock().push(entry);
                                         results_count.fetch_add(1, Ordering::Relaxed);
                                         return Ok(());
                                     }
@@ -292,7 +290,7 @@ mod post {
                                                 Err(_) => return Ok(()),
                                             };
 
-                                            results.lock().await.push(entry);
+                                            results.lock().push(entry);
                                             results_count.fetch_add(1, Ordering::Relaxed);
                                         }
                                     }
@@ -459,7 +457,7 @@ mod post {
                                         Err(_) => return Ok(()),
                                     };
 
-                                    results.lock().await.push(entry);
+                                    results.lock().push(entry);
                                     results_count.fetch_add(1, Ordering::Relaxed);
 
                                     Ok(())
@@ -472,7 +470,7 @@ mod post {
         }
 
         ApiResponse::new_serialized(Response {
-            results: &results.lock().await,
+            results: &results.lock(),
         })
         .ok()
     }

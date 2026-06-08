@@ -240,9 +240,10 @@ pub async fn run(ctx: DiskCheckerContext) {
                 total_size_physical += metadata.size_physical();
             }
 
-            *disk_usage.write().await = tmp_disk_usage;
+            let old_disk_usage = std::mem::replace(&mut *disk_usage.write().await, tmp_disk_usage);
             disk_usage_cached_logical.store(total_size, Ordering::Relaxed);
             disk_usage_cached_physical.store(total_size_physical, Ordering::Relaxed);
+            drop(old_disk_usage);
 
             tracing::debug!(
                 path = %cap_filesystem.base_path.display(),

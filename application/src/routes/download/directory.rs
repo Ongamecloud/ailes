@@ -65,7 +65,7 @@ mod get {
                 .ok();
         }
 
-        if !state.config.jwt.limited_jwt_id(&payload.unique_id).await {
+        if !state.config.jwt.limited_jwt_id(&payload.unique_id) {
             return ApiResponse::error("token has already been used")
                 .with_status(StatusCode::UNAUTHORIZED)
                 .ok();
