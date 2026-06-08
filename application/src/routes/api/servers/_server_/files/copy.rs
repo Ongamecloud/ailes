@@ -78,8 +78,7 @@ mod post {
                     || (filesystem.is_primary_server_fs()
                         && server
                             .filesystem
-                            .is_ignored(&path, metadata.file_type.is_dir())
-                            .await)
+                            .is_ignored(&path, metadata.file_type.is_dir()))
                 {
                     return ApiResponse::error("file not found")
                         .with_status(StatusCode::NOT_FOUND)
@@ -143,7 +142,7 @@ mod post {
             compact_str::format_compact!("{base_name}{suffix}{extension}")
         }
 
-        if filesystem.is_primary_server_fs() && server.filesystem.is_ignored(parent, true).await {
+        if filesystem.is_primary_server_fs() && server.filesystem.is_ignored(parent, true) {
             return ApiResponse::error("parent directory not found")
                 .with_status(StatusCode::EXPECTATION_FAILED)
                 .ok();

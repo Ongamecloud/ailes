@@ -21,11 +21,10 @@ pub struct ExecSession {
 
 impl ExecSession {
     #[inline]
-    async fn has_permission(&self, permission: Permission) -> bool {
+    fn has_permission(&self, permission: Permission) -> bool {
         self.server
             .user_permissions
             .has_permission(self.user_uuid, permission)
-            .await
     }
 
     pub fn run(self, command: String, channel: Channel<Msg>) {
@@ -37,7 +36,7 @@ impl ExecSession {
                 match segments.next() {
                     Some("tar") => {
                         if let Some("-xzpPf") = segments.next() {
-                            if !self.has_permission(Permission::FileCreate).await {
+                            if !self.has_permission(Permission::FileCreate) {
                                 channel
                                     .make_writer()
                                     .write_all(b"Permission denied.\r\n")
@@ -103,7 +102,7 @@ impl ExecSession {
                             && segments.next() == Some("tar")
                             && segments.next().is_some()
                         {
-                            if !self.has_permission(Permission::FileArchive).await {
+                            if !self.has_permission(Permission::FileArchive) {
                                 channel
                                     .make_writer()
                                     .write_all(b"Permission denied.\r\n")
@@ -176,7 +175,7 @@ impl ExecSession {
                                 base,
                                 paths,
                                 None,
-                                self.server.filesystem.get_ignored().await.into(),
+                                self.server.filesystem.get_ignored().into(),
                                 crate::server::filesystem::archive::create::CreateTarOptions {
                                     compression_type: match destination
                                         .extension()
@@ -219,7 +218,7 @@ impl ExecSession {
                     _ => {}
                 }
 
-                if self.has_permission(Permission::ControlConsole).await {
+                if self.has_permission(Permission::ControlConsole) {
                     if self.server.state.get_state() != crate::server::state::ServerState::Offline {
                         if let Err(err) =
                             self.server.send_stdin(format!("{command}\n").into()).await

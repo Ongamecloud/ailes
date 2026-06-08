@@ -111,14 +111,11 @@ pub async fn handle_jwt(
                     let has_console_read = jwt
                         .permissions
                         .has_calagopus_permission_or(Permission::ControlReadConsole, true);
-                    server
-                        .user_permissions
-                        .set_permissions(
-                            jwt.user_uuid,
-                            jwt.permissions.clone(),
-                            jwt.ignored_files.as_deref(),
-                        )
-                        .await;
+                    server.user_permissions.set_permissions(
+                        jwt.user_uuid,
+                        jwt.permissions.clone(),
+                        jwt.ignored_files.as_deref(),
+                    );
 
                     if websocket_handler
                         .socket_jwt

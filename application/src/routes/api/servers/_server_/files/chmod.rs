@@ -75,7 +75,6 @@ mod post {
                 && server
                     .filesystem
                     .is_ignored(&source, metadata.file_type.is_dir())
-                    .await
             {
                 continue;
             }
@@ -97,10 +96,7 @@ mod post {
 
                     let walker = async {
                         let mut walker = filesystem
-                            .async_walk_dir(
-                                &source,
-                                vec![server.filesystem.get_ignored().await].into(),
-                            )
+                            .async_walk_dir(&source, vec![server.filesystem.get_ignored()].into())
                             .await?;
 
                         walker

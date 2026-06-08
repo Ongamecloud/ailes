@@ -91,7 +91,7 @@ pub struct Filesystem {
     pub disk_usage: Arc<RwLock<usage::DiskUsage>>,
     pub last_disk_check: Arc<AtomicU64>,
     pub disk_check_completed: Arc<tokio::sync::Notify>,
-    disk_ignored: Arc<RwLock<ignore::gitignore::Gitignore>>,
+    disk_ignored: arc_swap::ArcSwap<ignore::gitignore::Gitignore>,
 
     pub archive_fs_cache: moka::future::Cache<PathBuf, Arc<dyn VirtualReadableFilesystem>>,
     pub pulls: RwLock<HashMap<uuid::Uuid, Arc<RwLock<pull::Download>>>>,
@@ -160,11 +160,11 @@ impl Filesystem {
             disk_usage,
             last_disk_check,
             disk_check_completed,
-            disk_ignored: Arc::new(RwLock::new(
+            disk_ignored: arc_swap::ArcSwap::from_pointee(
                 disk_ignored
                     .build()
                     .unwrap_or_else(|_| ignore::gitignore::Gitignore::empty()),
-            )),
+            ),
 
             archive_fs_cache: moka::future::CacheBuilder::new(8)
                 .time_to_idle(std::time::Duration::from_mins(1))
@@ -197,27 +197,16 @@ impl Filesystem {
         }
 
         if let Ok(disk_ignored) = disk_ignored.build() {
-            *self.disk_ignored.write().await = disk_ignored;
+            self.disk_ignored.store(Arc::new(disk_ignored));
         }
     }
 
-    pub async fn is_ignored(&self, path: &Path, is_dir: bool) -> bool {
-        self.disk_ignored
-            .read()
-            .await
-            .matched(path, is_dir)
-            .is_ignore()
+    pub fn is_ignored(&self, path: &Path, is_dir: bool) -> bool {
+        self.disk_ignored.load().matched(path, is_dir).is_ignore()
     }
 
-    pub async fn get_ignored(&self) -> ignore::gitignore::Gitignore {
-        self.disk_ignored.read().await.clone()
-    }
-
-    pub fn is_ignored_sync(&self, path: &Path, is_dir: bool) -> bool {
-        self.disk_ignored
-            .blocking_read()
-            .matched(path, is_dir)
-            .is_ignore()
+    pub fn get_ignored(&self) -> ignore::gitignore::Gitignore {
+        (**self.disk_ignored.load()).clone()
     }
 
     pub async fn pulls(
@@ -763,7 +752,7 @@ impl Filesystem {
                 writer.shutdown().await?;
             }
         } else {
-            let ignored = server.filesystem.get_ignored().await;
+            let ignored = server.filesystem.get_ignored();
             let mut walker = filesystem
                 .async_walk_dir_stream(&path, ignored.into())
                 .await?;
@@ -1182,7 +1171,7 @@ impl Filesystem {
             );
         }
 
-        if self.cap_filesystem.is_uninitialized().await {
+        if self.cap_filesystem.is_uninitialized() {
             let base_path = self.base_path.clone();
             match tokio::task::spawn_blocking(move || {
                 cap_std::fs::Dir::open_ambient_dir(&base_path, cap_std::ambient_authority())
@@ -1190,7 +1179,7 @@ impl Filesystem {
             .await
             {
                 Ok(Ok(dir)) => {
-                    *self.cap_filesystem.inner.write().await = Some(Arc::new(dir));
+                    self.cap_filesystem.inner.store(Some(Arc::new(dir)));
                     if self.app_state.config.load().system.disk_check_use_inotify {
                         if let Err(err) = self
                             .app_state
@@ -1234,7 +1223,7 @@ impl Filesystem {
             );
         }
 
-        if self.cap_filesystem.is_uninitialized().await {
+        if self.cap_filesystem.is_uninitialized() {
             let base_path = self.base_path.clone();
             match tokio::task::spawn_blocking(move || {
                 cap_std::fs::Dir::open_ambient_dir(&base_path, cap_std::ambient_authority())
@@ -1242,7 +1231,7 @@ impl Filesystem {
             .await
             {
                 Ok(Ok(dir)) => {
-                    *self.cap_filesystem.inner.write().await = Some(Arc::new(dir));
+                    self.cap_filesystem.inner.store(Some(Arc::new(dir)));
                     if self.app_state.config.load().system.disk_check_use_inotify {
                         if let Err(err) = self
                             .app_state

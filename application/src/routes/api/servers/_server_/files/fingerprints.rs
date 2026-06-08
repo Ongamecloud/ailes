@@ -85,8 +85,7 @@ mod get {
             };
 
             if !metadata.file_type.is_file()
-                || (filesystem.is_primary_server_fs()
-                    && server.filesystem.is_ignored(&path, false).await)
+                || (filesystem.is_primary_server_fs() && server.filesystem.is_ignored(&path, false))
             {
                 continue;
             }

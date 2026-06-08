@@ -107,7 +107,7 @@ mod get {
             Ok(metadata) => {
                 if !metadata.file_type.is_file()
                     || (filesystem.is_primary_server_fs()
-                        && server.filesystem.is_ignored(&path, false).await)
+                        && server.filesystem.is_ignored(&path, false))
                 {
                     return ApiResponse::error("file not found")
                         .with_status(StatusCode::NOT_FOUND)

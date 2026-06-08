@@ -210,7 +210,7 @@ mod post {
                 }
 
                 let ignored = if filesystem.is_primary_server_fs() {
-                    server.filesystem.get_ignored().await.into()
+                    server.filesystem.get_ignored().into()
                 } else {
                     Default::default()
                 };
@@ -335,11 +335,7 @@ mod post {
                 let path_includes = Arc::new(override_builder.build()?);
 
                 let ignored = if filesystem.is_primary_server_fs() {
-                    vec![
-                        server.filesystem.get_ignored().await,
-                        ignore_builder.build()?,
-                    ]
-                    .into()
+                    vec![server.filesystem.get_ignored(), ignore_builder.build()?].into()
                 } else {
                     ignore_builder.build()?.into()
                 };

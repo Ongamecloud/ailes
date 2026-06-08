@@ -90,7 +90,7 @@ mod post {
                 .ok();
         }
 
-        if filesystem.is_primary_server_fs() && server.filesystem.is_ignored(&root, true).await {
+        if filesystem.is_primary_server_fs() && server.filesystem.is_ignored(&root, true) {
             return ApiResponse::error("path not found")
                 .with_status(StatusCode::NOT_FOUND)
                 .ok();
@@ -134,8 +134,8 @@ mod post {
             let (tx, rx) = tokio::sync::oneshot::channel::<()>();
 
             let ignored = vec![
-                server.filesystem.get_ignored().await,
-                destination_server.filesystem.get_ignored().await,
+                server.filesystem.get_ignored(),
+                destination_server.filesystem.get_ignored(),
             ];
             let ignored = IsIgnoredFn::from(ignored);
 
@@ -371,7 +371,7 @@ mod post {
 
                             let archive_task = async {
                                 let is_ignored = if filesystem.is_primary_server_fs() {
-                                    server.filesystem.get_ignored().await.into()
+                                    server.filesystem.get_ignored().into()
                                 } else {
                                     Default::default()
                                 };

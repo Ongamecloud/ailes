@@ -876,7 +876,7 @@ impl OutgoingServerTransfer {
                         .build(),
                     )
                     .ok();
-                server.user_permissions.clear_permissions().await;
+                server.user_permissions.clear_permissions();
             });
         }));
 

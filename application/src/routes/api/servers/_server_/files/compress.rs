@@ -99,7 +99,7 @@ mod post {
         let destination_path = destination_root.join(file_name);
 
         if destination_filesystem.is_primary_server_fs()
-            && server.filesystem.is_ignored(&destination_path, false).await
+            && server.filesystem.is_ignored(&destination_path, false)
         {
             return ApiResponse::error("file not found")
                 .with_status(StatusCode::EXPECTATION_FAILED)
@@ -130,7 +130,7 @@ mod post {
                         let destination_filesystem = destination_filesystem.clone();
 
                         async move {
-                            let ignored = server.filesystem.get_ignored().await;
+                            let ignored = server.filesystem.get_ignored();
                             let writer = tokio::task::spawn_blocking(move || {
                                 destination_filesystem.create_seekable_file(&destination_path)
                             })

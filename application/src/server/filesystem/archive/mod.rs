@@ -482,7 +482,7 @@ impl Archive {
                         if self
                             .server
                             .filesystem
-                            .is_ignored_sync(&destination_path, header.entry_type().is_dir())
+                            .is_ignored(&destination_path, header.entry_type().is_dir())
                         {
                             continue;
                         }
@@ -638,7 +638,7 @@ impl Archive {
 
                                     if server
                                         .filesystem
-                                        .is_ignored_sync(&destination_path, entry.is_dir())
+                                        .is_ignored(&destination_path, entry.is_dir())
                                     {
                                         continue;
                                     }
@@ -737,7 +737,7 @@ impl Archive {
                                 if self
                                     .server
                                     .filesystem
-                                    .is_ignored_sync(&destination_path, entry.is_dir())
+                                    .is_ignored(&destination_path, entry.is_dir())
                                 {
                                     continue;
                                 }
@@ -828,7 +828,7 @@ impl Archive {
                         if self
                             .server
                             .filesystem
-                            .is_ignored_sync(path, entry.entry().is_directory())
+                            .is_ignored(path, entry.entry().is_directory())
                         {
                             archive = entry.skip()?;
                             continue;
@@ -966,7 +966,7 @@ impl Archive {
 
                                     if server
                                         .filesystem
-                                        .is_ignored_sync(&destination_path, entry.is_directory())
+                                        .is_ignored(&destination_path, entry.is_directory())
                                     {
                                         return Ok(true);
                                     }
@@ -1044,7 +1044,7 @@ impl Archive {
                                 if self
                                     .server
                                     .filesystem
-                                    .is_ignored_sync(&destination_path, entry.is_directory())
+                                    .is_ignored(&destination_path, entry.is_directory())
                                 {
                                     continue;
                                 }
@@ -1111,7 +1111,7 @@ impl Archive {
                         let destination_path = destination.join(entry.name());
                         if server
                             .filesystem
-                            .is_ignored_sync(&destination_path, entry.is_directory())
+                            .is_ignored(&destination_path, entry.is_directory())
                         {
                             return Ok(());
                         }

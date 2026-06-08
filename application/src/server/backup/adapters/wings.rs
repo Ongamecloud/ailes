@@ -648,7 +648,7 @@ impl BackupExt for WingsBackup {
 
                             if server
                                 .filesystem
-                                .is_ignored_sync(&path, entry.is_dir())
+                                .is_ignored(&path, entry.is_dir())
                             {
                                 continue;
                             }
@@ -723,7 +723,7 @@ impl BackupExt for WingsBackup {
 
                                     if server
                                         .filesystem
-                                        .is_ignored_sync(destination_path, entry.is_directory())
+                                        .is_ignored(destination_path, entry.is_directory())
                                     {
                                         return Ok(true);
                                     }
@@ -797,7 +797,7 @@ impl BackupExt for WingsBackup {
 
                                 if server
                                     .filesystem
-                                    .is_ignored_sync(destination_path, entry.is_directory())
+                                    .is_ignored(destination_path, entry.is_directory())
                                 {
                                     continue;
                                 }

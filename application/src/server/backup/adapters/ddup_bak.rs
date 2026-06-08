@@ -654,7 +654,7 @@ impl BackupExt for DdupBakBackup {
 
                     if server
                         .filesystem
-                        .is_ignored_sync(&path, entry.is_directory())
+                        .is_ignored(&path, entry.is_directory())
                     {
                         continue;
                     }

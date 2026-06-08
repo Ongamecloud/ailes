@@ -11,6 +11,7 @@ use crate::{
 };
 use axum::http::{HeaderMap, HeaderValue};
 pub use functions::{DirectoryStreamWalkFn, DirectoryWalkFn, IsIgnoredFn};
+use parking_lot::RwLock;
 use std::{
     ops::Bound,
     path::{Path, PathBuf},
@@ -18,7 +19,7 @@ use std::{
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite},
-    sync::{RwLock, Semaphore},
+    sync::Semaphore,
 };
 
 pub mod archive;
@@ -281,7 +282,7 @@ pub trait DirectoryWalk {
                     let error = Arc::clone(&error);
                     let func = func.clone();
 
-                    if crate::unlikely(error.read().await.is_some()) {
+                    if crate::unlikely(error.read().is_some()) {
                         break;
                     }
 
@@ -294,7 +295,7 @@ pub trait DirectoryWalk {
                         match func(file_type, path).await {
                             Ok(_) => {}
                             Err(err) => {
-                                *error.write().await = Some(err);
+                                *error.write() = Some(err);
                             }
                         }
                     });
@@ -305,7 +306,7 @@ pub trait DirectoryWalk {
 
         semaphore.acquire_many(threads as u32).await.ok();
 
-        if let Some(err) = error.write().await.take() {
+        if let Some(err) = error.write().take() {
             return Err(err);
         }
 
@@ -339,7 +340,7 @@ pub trait DirectoryStreamWalk {
                     let error = Arc::clone(&error);
                     let func = func.clone();
 
-                    if crate::unlikely(error.read().await.is_some()) {
+                    if crate::unlikely(error.read().is_some()) {
                         break;
                     }
 
@@ -353,7 +354,7 @@ pub trait DirectoryStreamWalk {
                             match func(file_type, path, stream).await {
                                 Ok(_) => {}
                                 Err(err) => {
-                                    *error.write().await = Some(err);
+                                    *error.write() = Some(err);
                                 }
                             }
                         });
@@ -370,7 +371,7 @@ pub trait DirectoryStreamWalk {
 
         semaphore.acquire_many(threads as u32).await.ok();
 
-        if let Some(err) = error.write().await.take() {
+        if let Some(err) = error.write().take() {
             return Err(err);
         }
 

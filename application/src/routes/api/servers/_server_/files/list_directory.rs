@@ -49,8 +49,7 @@ mod get {
         let metadata = filesystem.async_metadata(&root).await;
         if let Ok(metadata) = metadata {
             if !metadata.file_type.is_dir()
-                || (filesystem.is_primary_server_fs()
-                    && server.filesystem.is_ignored(&root, true).await)
+                || (filesystem.is_primary_server_fs() && server.filesystem.is_ignored(&root, true))
             {
                 return ApiResponse::error("path not a directory")
                     .with_status(StatusCode::EXPECTATION_FAILED)
@@ -63,7 +62,7 @@ mod get {
         }
 
         let is_ignored = if filesystem.is_primary_server_fs() {
-            server.filesystem.get_ignored().await.into()
+            server.filesystem.get_ignored().into()
         } else {
             Default::default()
         };

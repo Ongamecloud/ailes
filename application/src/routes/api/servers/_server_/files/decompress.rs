@@ -67,18 +67,14 @@ mod post {
 
         let source = root.join(data.file);
 
-        if server
-            .filesystem
-            .is_ignored(
-                &source,
-                server
-                    .filesystem
-                    .async_metadata(&source)
-                    .await
-                    .is_ok_and(|m| m.is_dir()),
-            )
-            .await
-        {
+        if server.filesystem.is_ignored(
+            &source,
+            server
+                .filesystem
+                .async_metadata(&source)
+                .await
+                .is_ok_and(|m| m.is_dir()),
+        ) {
             return ApiResponse::error("file not found")
                 .with_status(StatusCode::NOT_FOUND)
                 .ok();

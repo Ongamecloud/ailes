@@ -1,3 +1,4 @@
+use parking_lot::Mutex;
 use serde::{
     Deserialize, Deserializer, Serialize,
     de::{SeqAccess, Visitor},
@@ -8,7 +9,6 @@ use std::{
     ops::{Deref, DerefMut},
     sync::Arc,
 };
-use tokio::sync::Mutex;
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Hash)]
 pub enum Permission {
@@ -119,7 +119,7 @@ impl Default for UserPermissionsMap {
                 loop {
                     tokio::time::sleep(std::time::Duration::from_secs(60)).await;
 
-                    let mut map = map.lock().await;
+                    let mut map = map.lock();
                     map.retain(|_, (_, _, last_access)| {
                         last_access.elapsed().as_secs() < 60 * 60 * 24
                     });
@@ -142,8 +142,8 @@ impl UserPermissionsMap {
         }
     }
 
-    pub async fn has_permission(&self, user_uuid: uuid::Uuid, permission: Permission) -> bool {
-        let mut map = self.map.lock().await;
+    pub fn has_permission(&self, user_uuid: uuid::Uuid, permission: Permission) -> bool {
+        let mut map = self.map.lock();
         if let Some((permissions, _, last_access)) = map.get_mut(&user_uuid) {
             *last_access = std::time::Instant::now();
 
@@ -153,13 +153,13 @@ impl UserPermissionsMap {
         }
     }
 
-    pub async fn has_calagopus_permission_or(
+    pub fn has_calagopus_permission_or(
         &self,
         user_uuid: uuid::Uuid,
         permission: Permission,
         default: bool,
     ) -> bool {
-        let mut map = self.map.lock().await;
+        let mut map = self.map.lock();
         if let Some((permissions, _, last_access)) = map.get_mut(&user_uuid) {
             *last_access = std::time::Instant::now();
 
@@ -169,13 +169,13 @@ impl UserPermissionsMap {
         }
     }
 
-    pub async fn is_ignored(
+    pub fn is_ignored(
         &self,
         user_uuid: uuid::Uuid,
         path: impl AsRef<std::path::Path>,
         is_dir: bool,
     ) -> bool {
-        let mut map = self.map.lock().await;
+        let mut map = self.map.lock();
         if let Some((_, ignored, last_access)) = map.get_mut(&user_uuid) {
             *last_access = std::time::Instant::now();
 
@@ -188,14 +188,14 @@ impl UserPermissionsMap {
         }
     }
 
-    pub async fn set_permissions(
+    pub fn set_permissions(
         &self,
         user_uuid: uuid::Uuid,
         permissions: Permissions,
         ignored_files: Option<&[impl AsRef<str>]>,
     ) {
         if permissions.is_empty() {
-            self.map.lock().await.remove(&user_uuid);
+            self.map.lock().remove(&user_uuid);
             self.removal_sender.send(user_uuid).ok();
             return;
         }
@@ -211,7 +211,7 @@ impl UserPermissionsMap {
             None
         };
 
-        let mut map = self.map.lock().await;
+        let mut map = self.map.lock();
         if let Some((current_permissions, current_ignored, _)) = map.get_mut(&user_uuid) {
             *current_permissions = permissions;
             if let Some(overrides) = overrides {
@@ -229,8 +229,8 @@ impl UserPermissionsMap {
         }
     }
 
-    pub async fn clear_permissions(&self) {
-        let mut map = self.map.lock().await;
+    pub fn clear_permissions(&self) {
+        let mut map = self.map.lock();
         for user_uuid in map.keys().copied().collect::<Vec<_>>() {
             map.remove(&user_uuid);
             self.removal_sender.send(user_uuid).ok();

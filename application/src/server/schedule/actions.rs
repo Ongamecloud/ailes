@@ -613,16 +613,14 @@ impl ScheduleAction {
                     return Err("path is not a directory".into());
                 }
 
-                if filesystem.is_primary_server_fs()
-                    && server.filesystem.is_ignored(&root, true).await
-                {
+                if filesystem.is_primary_server_fs() && server.filesystem.is_ignored(&root, true) {
                     return Err("path not found".into());
                 }
 
                 let destination = root.join(name);
 
                 if filesystem.is_primary_server_fs()
-                    && server.filesystem.is_ignored(&destination, true).await
+                    && server.filesystem.is_ignored(&destination, true)
                 {
                     return Err("destination not found".into());
                 }
@@ -693,9 +691,7 @@ impl ScheduleAction {
 
                 let metadata = filesystem.async_metadata(&path).await;
 
-                if filesystem.is_primary_server_fs()
-                    && server.filesystem.is_ignored(parent, true).await
-                {
+                if filesystem.is_primary_server_fs() && server.filesystem.is_ignored(parent, true) {
                     return Err("file not found".into());
                 }
 
@@ -709,9 +705,7 @@ impl ScheduleAction {
                     0
                 };
 
-                if filesystem.is_primary_server_fs()
-                    && server.filesystem.is_ignored(parent, true).await
-                {
+                if filesystem.is_primary_server_fs() && server.filesystem.is_ignored(parent, true) {
                     return Err("parent directory not found".into());
                 }
 
@@ -827,8 +821,7 @@ impl ScheduleAction {
                             || (filesystem.is_primary_server_fs()
                                 && server
                                     .filesystem
-                                    .is_ignored(&path, metadata.file_type.is_dir())
-                                    .await)
+                                    .is_ignored(&path, metadata.file_type.is_dir()))
                         {
                             return Err("file not found".into());
                         } else {
@@ -840,9 +833,7 @@ impl ScheduleAction {
                     }
                 };
 
-                if filesystem.is_primary_server_fs()
-                    && server.filesystem.is_ignored(parent, true).await
-                {
+                if filesystem.is_primary_server_fs() && server.filesystem.is_ignored(parent, true) {
                     return Err("parent directory not found".into());
                 }
 
@@ -977,7 +968,6 @@ impl ScheduleAction {
                         && server
                             .filesystem
                             .is_ignored(&source, metadata.file_type.is_dir())
-                            .await
                     {
                         continue;
                     }
@@ -1044,11 +1034,9 @@ impl ScheduleAction {
                             && (server
                                 .filesystem
                                 .is_ignored(&from, from_metadata.file_type.is_dir())
-                                .await
                                 || server
                                     .filesystem
-                                    .is_ignored(&to, from_metadata.file_type.is_dir())
-                                    .await))
+                                    .is_ignored(&to, from_metadata.file_type.is_dir())))
                     {
                         continue;
                     }
@@ -1133,7 +1121,7 @@ impl ScheduleAction {
                 let destination_path = destination_root.join(file_name);
 
                 if destination_filesystem.is_primary_server_fs()
-                    && server.filesystem.is_ignored(&destination_path, false).await
+                    && server.filesystem.is_ignored(&destination_path, false)
                 {
                     return Err("file not found".into());
                 }
@@ -1164,7 +1152,7 @@ impl ScheduleAction {
                             let destination_filesystem = destination_filesystem.clone();
 
                             async move {
-                                let ignored = server.filesystem.get_ignored().await;
+                                let ignored = server.filesystem.get_ignored();
                                 let writer = tokio::task::spawn_blocking(move || {
                                     destination_filesystem.create_seekable_file(&destination_path)
                                 })
@@ -1335,18 +1323,14 @@ impl ScheduleAction {
 
                 let source = root.join(file);
 
-                if server
-                    .filesystem
-                    .is_ignored(
-                        &source,
-                        server
-                            .filesystem
-                            .async_metadata(&source)
-                            .await
-                            .is_ok_and(|m| m.is_dir()),
-                    )
-                    .await
-                {
+                if server.filesystem.is_ignored(
+                    &source,
+                    server
+                        .filesystem
+                        .async_metadata(&source)
+                        .await
+                        .is_ok_and(|m| m.is_dir()),
+                ) {
                     return Err("file not found".into());
                 }
 

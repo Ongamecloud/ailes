@@ -162,9 +162,7 @@ mod post {
                     .await;
                 let path = root.join(file_name);
 
-                if filesystem.is_primary_server_fs()
-                    && server.filesystem.is_ignored(&path, false).await
-                {
+                if filesystem.is_primary_server_fs() && server.filesystem.is_ignored(&path, false) {
                     return ApiResponse::error("file not found")
                         .with_status(StatusCode::NOT_FOUND)
                         .ok();
@@ -322,7 +320,7 @@ mod post {
                     if ignored
                         .as_ref()
                         .is_some_and(|o| o.matched(parent, false).is_ignore())
-                        || server.filesystem.is_ignored(parent, false).await
+                        || server.filesystem.is_ignored(parent, false)
                     {
                         return ApiResponse::error("file not found")
                             .with_status(StatusCode::NOT_FOUND)
@@ -348,7 +346,7 @@ mod post {
                         && (ignored
                             .as_ref()
                             .is_some_and(|o| o.matched(&path, false).is_ignore())
-                            || server.filesystem.is_ignored(&path, false).await)
+                            || server.filesystem.is_ignored(&path, false))
                     {
                         return ApiResponse::error("file not found")
                             .with_status(StatusCode::NOT_FOUND)

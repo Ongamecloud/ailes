@@ -330,8 +330,7 @@ impl ServerWebsocketHandler {
 
         Ok(server
             .user_permissions
-            .has_permission(user_uuid, permission)
-            .await)
+            .has_permission(user_uuid, permission))
     }
 
     async fn has_calagopus_permission_or(
@@ -343,8 +342,7 @@ impl ServerWebsocketHandler {
 
         Ok(server
             .user_permissions
-            .has_calagopus_permission_or(user_uuid, permission, default)
-            .await)
+            .has_calagopus_permission_or(user_uuid, permission, default))
     }
 
     async fn close(&self, reason: &str) {

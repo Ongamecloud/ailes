@@ -43,14 +43,11 @@ mod post {
         crate::Payload(data): crate::Payload<Payload>,
     ) -> ApiResponseResult {
         for user_permission in data.user_permissions {
-            server
-                .user_permissions
-                .set_permissions(
-                    user_permission.user,
-                    user_permission.permissions,
-                    Some(&user_permission.ignored_files),
-                )
-                .await;
+            server.user_permissions.set_permissions(
+                user_permission.user,
+                user_permission.permissions,
+                Some(&user_permission.ignored_files),
+            );
         }
 
         ApiResponse::new_serialized(Response {}).ok()

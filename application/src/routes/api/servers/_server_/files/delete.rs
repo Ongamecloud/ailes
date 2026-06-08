@@ -57,7 +57,6 @@ mod post {
                 && server
                     .filesystem
                     .is_ignored(&source, metadata.file_type.is_dir())
-                    .await
             {
                 continue;
             }

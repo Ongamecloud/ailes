@@ -31,7 +31,7 @@ pub async fn handle_extended(
     command: String,
     data: Vec<u8>,
 ) -> Result<russh_sftp::protocol::Packet, StatusCode> {
-    if !sftp_session.allow_action().await {
+    if !sftp_session.allow_action() {
         return Err(StatusCode::PermissionDenied);
     }
 
@@ -39,7 +39,7 @@ pub async fn handle_extended(
 
     match command.as_str() {
         "check-file" | "check-file-name" => {
-            if !sftp_session.has_permission(Permission::FileRead).await {
+            if !sftp_session.has_permission(Permission::FileRead) {
                 return Err(StatusCode::PermissionDenied);
             }
 
@@ -86,7 +86,7 @@ pub async fn handle_extended(
                     return Err(StatusCode::NoSuchFile);
                 }
 
-                if sftp_session.is_ignored(&path, metadata.is_dir()).await {
+                if sftp_session.is_ignored(&path, metadata.is_dir()) {
                     return Err(StatusCode::NoSuchFile);
                 }
 
@@ -331,10 +331,8 @@ pub async fn handle_extended(
             }
         }
         "copy-file" => {
-            if !sftp_session
-                .has_permission(Permission::FileReadContent)
-                .await
-                || !sftp_session.has_permission(Permission::FileCreate).await
+            if !sftp_session.has_permission(Permission::FileReadContent)
+                || !sftp_session.has_permission(Permission::FileCreate)
             {
                 return Err(StatusCode::PermissionDenied);
             }
@@ -375,7 +373,7 @@ pub async fn handle_extended(
                 return Err(StatusCode::NoSuchFile);
             }
 
-            if sftp_session.is_ignored(&source_path, false).await {
+            if sftp_session.is_ignored(&source_path, false) {
                 return Err(StatusCode::NoSuchFile);
             }
 
@@ -599,7 +597,7 @@ pub async fn handle_extended(
                 return Err(StatusCode::PermissionDenied);
             }
 
-            if !sftp_session.has_permission(Permission::FileCreate).await {
+            if !sftp_session.has_permission(Permission::FileCreate) {
                 return Err(StatusCode::PermissionDenied);
             }
 
@@ -631,10 +629,8 @@ pub async fn handle_extended(
             };
 
             if !metadata.is_file()
-                || sftp_session
-                    .is_ignored(&targetpath, metadata.is_dir())
-                    .await
-                || sftp_session.is_ignored(&linkpath, false).await
+                || sftp_session.is_ignored(&targetpath, metadata.is_dir())
+                || sftp_session.is_ignored(&linkpath, false)
             {
                 return Err(StatusCode::NoSuchFile);
             }
@@ -686,7 +682,7 @@ pub async fn handle_extended(
                 return Err(StatusCode::PermissionDenied);
             }
 
-            if !sftp_session.has_permission(Permission::FileUpdate).await {
+            if !sftp_session.has_permission(Permission::FileUpdate) {
                 return Err(StatusCode::PermissionDenied);
             }
 
@@ -727,7 +723,7 @@ pub async fn handle_extended(
                 return Err(StatusCode::PermissionDenied);
             }
 
-            if !sftp_session.has_permission(Permission::FileUpdate).await {
+            if !sftp_session.has_permission(Permission::FileUpdate) {
                 return Err(StatusCode::PermissionDenied);
             }
 
@@ -774,7 +770,7 @@ pub async fn handle_extended(
                 Err(_) => return Err(StatusCode::BadMessage),
             };
 
-            if !sftp_session.has_permission(Permission::FileRead).await {
+            if !sftp_session.has_permission(Permission::FileRead) {
                 return Err(StatusCode::PermissionDenied);
             }
 
@@ -842,7 +838,7 @@ pub async fn handle_extended(
                 return Err(StatusCode::PermissionDenied);
             }
 
-            if !sftp_session.has_permission(Permission::FileUpdate).await {
+            if !sftp_session.has_permission(Permission::FileUpdate) {
                 return Err(StatusCode::PermissionDenied);
             }
 
@@ -867,12 +863,8 @@ pub async fn handle_extended(
                 Err(_) => return Err(StatusCode::NoSuchFile),
             };
 
-            if sftp_session
-                .is_ignored(&old_path, old_metadata.is_dir())
-                .await
-                || sftp_session
-                    .is_ignored(&new_path, old_metadata.is_dir())
-                    .await
+            if sftp_session.is_ignored(&old_path, old_metadata.is_dir())
+                || sftp_session.is_ignored(&new_path, old_metadata.is_dir())
             {
                 return Err(StatusCode::Failure);
             }

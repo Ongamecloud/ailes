@@ -122,8 +122,7 @@ mod get {
         let metadata = filesystem.async_symlink_metadata(&path).await;
         if let Ok(metadata) = metadata {
             if !metadata.file_type.is_dir()
-                || (filesystem.is_primary_server_fs()
-                    && server.filesystem.is_ignored(&path, true).await)
+                || (filesystem.is_primary_server_fs() && server.filesystem.is_ignored(&path, true))
             {
                 return ApiResponse::error("directory not found")
                     .with_status(StatusCode::NOT_FOUND)
@@ -136,7 +135,7 @@ mod get {
         }
 
         let ignore = if filesystem.is_primary_server_fs() {
-            server.filesystem.get_ignored().await.into()
+            server.filesystem.get_ignored().into()
         } else {
             Default::default()
         };

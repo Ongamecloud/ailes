@@ -218,7 +218,7 @@ impl Download {
         }
 
         if filesystem.is_primary_server_fs()
-            && server.filesystem.is_ignored(&real_destination, false).await
+            && server.filesystem.is_ignored(&real_destination, false)
         {
             return Err(anyhow::anyhow!("file not found"));
         }

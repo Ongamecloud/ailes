@@ -266,8 +266,8 @@ async fn migrate_server(
         let source = CapFilesystem::new(staging_path.clone()).await?;
         let destination = CapFilesystem::new(base_path.to_path_buf()).await?;
 
-        let source_dir = source.async_get_inner().await?;
-        let destination_dir = destination.async_get_inner().await?;
+        let source_dir = source.get_inner()?;
+        let destination_dir = destination.get_inner()?;
 
         tokio::task::spawn_blocking(move || copy_tree(&source_dir, &destination_dir)).await?
     }

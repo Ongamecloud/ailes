@@ -523,7 +523,7 @@ impl super::VirtualReadableFilesystem for VirtualCapFilesystem {
     }
 
     async fn close(&self) -> Result<(), anyhow::Error> {
-        self.inner.close().await;
+        self.inner.close();
         Ok(())
     }
 }

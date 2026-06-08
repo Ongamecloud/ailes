@@ -141,7 +141,6 @@ mod post {
                                 && server
                                     .filesystem
                                     .is_ignored(&from, metadata.file_type.is_dir())
-                                    .await
                             {
                                 continue;
                             }
@@ -172,7 +171,6 @@ mod post {
                                 && server
                                     .filesystem
                                     .is_ignored(&to, metadata.file_type.is_dir())
-                                    .await
                             {
                                 continue;
                             }

@@ -107,7 +107,7 @@ mod get {
                     && root != Path::new("/")
                     && root != Path::new(".")
                     && root != Path::new("")
-                    && (server.filesystem.is_ignored(&root, true).await))
+                    && (server.filesystem.is_ignored(&root, true)))
             {
                 return ApiResponse::error("path not a directory")
                     .with_status(StatusCode::EXPECTATION_FAILED)
@@ -122,9 +122,9 @@ mod get {
         let is_ignored = if filesystem.is_primary_server_fs()
             && let Some(ignore) = ignore
         {
-            vec![server.filesystem.get_ignored().await, ignore].into()
+            vec![server.filesystem.get_ignored(), ignore].into()
         } else if filesystem.is_primary_server_fs() {
-            server.filesystem.get_ignored().await.into()
+            server.filesystem.get_ignored().into()
         } else {
             Default::default()
         };

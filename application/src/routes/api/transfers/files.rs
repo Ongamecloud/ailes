@@ -211,7 +211,7 @@ mod post {
                                                 if filesystem.is_primary_server_fs()
                                                     && server
                                                         .filesystem
-                                                        .is_ignored_sync(&destination_path, is_dir)
+                                                        .is_ignored(&destination_path, is_dir)
                                                 {
                                                     continue;
                                                 }
@@ -297,7 +297,7 @@ mod post {
                                                 if filesystem.is_primary_server_fs()
                                                     && server
                                                         .filesystem
-                                                        .is_ignored_sync(&destination_path, is_dir)
+                                                        .is_ignored(&destination_path, is_dir)
                                                 {
                                                     continue;
                                                 }
