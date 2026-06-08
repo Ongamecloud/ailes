@@ -107,6 +107,7 @@ impl CapFilesystem {
                         result.pop();
                     }
                 }
+                std::path::Component::CurDir => {}
                 _ => {
                     result.push(component);
                 }
