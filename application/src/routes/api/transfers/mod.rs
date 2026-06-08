@@ -7,20 +7,21 @@ use utoipa_axum::{
 
 mod _server_;
 mod files;
+mod ws;
 
 mod get {
     use crate::{
         response::{ApiResponse, ApiResponseResult},
         routes::{ApiError, GetState},
     };
-    use std::{collections::HashMap, sync::atomic::Ordering};
+    use std::{collections::BTreeMap, sync::atomic::Ordering};
 
     #[utoipa::path(get, path = "/", responses(
-        (status = OK, body = HashMap<uuid::Uuid, crate::models::TransferProgress>),
+        (status = OK, body = BTreeMap<uuid::Uuid, crate::models::TransferProgress>),
         (status = NOT_FOUND, body = ApiError),
     ))]
     pub async fn route(state: GetState) -> ApiResponseResult {
-        let mut transfers = HashMap::new();
+        let mut transfers = BTreeMap::new();
 
         for server in state.server_manager.get_servers().await.iter() {
             if let Some(outgoing_transfer) = server.outgoing_transfer.read().await.as_ref() {
@@ -932,6 +933,13 @@ pub fn router(state: &State) -> OpenApiRouter<State> {
             )),
         )
         .routes(routes!(post::route).layer(DefaultBodyLimit::disable()))
+        .nest(
+            "/ws",
+            ws::router(state).route_layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                crate::routes::api::auth,
+            )),
+        )
         .nest("/files", files::router(state))
         .nest(
             "/{server}",
