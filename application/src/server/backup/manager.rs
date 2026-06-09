@@ -270,7 +270,8 @@ impl BackupManager {
                 .set_backup_restore_status(server.uuid, backup.uuid(), false)
                 .await?;
 
-            return Err(err.context("failed to truncate root directory before restoring backup"));
+            return Err(anyhow::anyhow!(err)
+                .context("failed to truncate root directory before restoring backup"));
         }
 
         let progress = Arc::new(AtomicU64::new(0));

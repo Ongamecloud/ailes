@@ -27,13 +27,13 @@ use tokio::{
 pub mod archive;
 pub mod cap;
 pub mod disk_checker;
+pub mod file;
 pub mod inotify;
 pub mod limiter;
 pub mod operations;
 pub mod pull;
 pub mod usage;
 pub mod virtualfs;
-pub mod writer;
 
 #[inline]
 pub fn encode_mode(mode: u32) -> compact_str::CompactString {
@@ -1005,7 +1005,7 @@ impl Filesystem {
         true
     }
 
-    pub async fn truncate_root(&self) -> Result<(), anyhow::Error> {
+    pub async fn truncate_root(&self) -> Result<(), std::io::Error> {
         self.disk_usage.write().await.clear();
         self.disk_usage_cached_logical.store(0, Ordering::Relaxed);
         self.disk_usage_cached_physical.store(0, Ordering::Relaxed);
@@ -1022,7 +1022,7 @@ impl Filesystem {
         Ok(())
     }
 
-    pub fn chown_path(&self, path: impl AsRef<Path>) -> Result<(), anyhow::Error> {
+    pub fn chown_path(&self, path: impl AsRef<Path>) -> Result<(), std::io::Error> {
         if self.config.load().system.user.rootless.enabled {
             return Ok(());
         }
@@ -1031,12 +1031,13 @@ impl Filesystem {
         {
             use std::os::fd::AsFd;
 
-            let metadata = self.metadata(path.as_ref())?;
-
             let owner_uid = rustix::fs::Uid::from_raw_unchecked(self.config.load().system.user.uid);
             let owner_gid = rustix::fs::Gid::from_raw_unchecked(self.config.load().system.user.gid);
 
-            if crate::unlikely(path.as_ref() == Path::new("") || path.as_ref() == Path::new("/")) {
+            if path.as_ref() == Path::new("")
+                || path.as_ref() == Path::new(".")
+                || path.as_ref() == Path::new("/")
+            {
                 std::os::unix::fs::chown(
                     &self.base_path,
                     Some(owner_uid.as_raw()),
@@ -1052,16 +1053,6 @@ impl Filesystem {
                 )?;
             }
 
-            if metadata.is_dir() {
-                let mut directory = self.read_dir(path.as_ref())?;
-
-                while let Some(entry) = directory.next_entry() {
-                    let path = entry?.1;
-
-                    self.chown_path(path)?;
-                }
-            }
-
             Ok(())
         }
         #[cfg(not(unix))]
@@ -1069,8 +1060,54 @@ impl Filesystem {
             Ok(())
         }
     }
+    pub async fn async_chown_path(&self, path: impl AsRef<Path>) -> Result<(), std::io::Error> {
+        if self.config.load().system.user.rootless.enabled {
+            return Ok(());
+        }
 
-    pub async fn async_chown_path(&self, path: impl AsRef<Path>) -> Result<(), anyhow::Error> {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsFd;
+
+            let owner_uid = rustix::fs::Uid::from_raw_unchecked(self.config.load().system.user.uid);
+            let owner_gid = rustix::fs::Gid::from_raw_unchecked(self.config.load().system.user.gid);
+
+            tokio::task::spawn_blocking({
+                let cap_filesystem = self.cap_filesystem.clone();
+                let path = self.relative_path(path.as_ref());
+                let base_path = self.base_path.clone();
+
+                move || {
+                    if path == Path::new("") || path == Path::new(".") || path == Path::new("/") {
+                        std::os::unix::fs::chown(
+                            &base_path,
+                            Some(owner_uid.as_raw()),
+                            Some(owner_gid.as_raw()),
+                        )
+                    } else {
+                        Ok(rustix::fs::chownat(
+                            cap_filesystem.get_inner()?.as_fd(),
+                            path,
+                            Some(owner_uid),
+                            Some(owner_gid),
+                            rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+                        )?)
+                    }
+                }
+            })
+            .await
+            .map_err(std::io::Error::other)?
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(())
+        }
+    }
+
+    pub async fn async_chown_path_recursive(
+        &self,
+        path: impl AsRef<Path>,
+    ) -> Result<(), anyhow::Error> {
         if self.config.load().system.user.rootless.enabled {
             return Ok(());
         }
@@ -1090,7 +1127,7 @@ impl Filesystem {
                 let base_path = self.base_path.clone();
 
                 move || {
-                    if crate::unlikely(path == Path::new("") || path == Path::new("/")) {
+                    if path == Path::new("") || path == Path::new(".") || path == Path::new("/") {
                         Ok::<_, anyhow::Error>(std::os::unix::fs::chown(
                             &base_path,
                             Some(owner_uid.as_raw()),
@@ -1145,6 +1182,69 @@ impl Filesystem {
         {
             Ok(())
         }
+    }
+
+    pub fn create_chowned_dir_all(&self, path: impl AsRef<Path>) -> Result<(), std::io::Error> {
+        let path = self.relative_path(path.as_ref());
+        if path.as_os_str().is_empty() {
+            return Ok(());
+        }
+
+        match self.create_dir(&path) {
+            Ok(_) => {
+                self.chown_path(&path)?;
+                return Ok(());
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => return Ok(()),
+            Err(err) if err.kind() != std::io::ErrorKind::NotFound => return Err(err),
+            Err(_) => {}
+        }
+
+        let mut progress = PathBuf::new();
+        for component in path.components() {
+            progress.push(component);
+
+            match self.create_dir(&progress) {
+                Ok(_) => self.chown_path(&progress)?,
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(err) => return Err(err),
+            }
+        }
+
+        Ok(())
+    }
+
+    pub async fn async_create_chowned_dir_all(
+        &self,
+        path: impl AsRef<Path>,
+    ) -> Result<(), std::io::Error> {
+        let path = self.relative_path(path.as_ref());
+        if path.as_os_str().is_empty() {
+            return Ok(());
+        }
+
+        match self.async_create_dir(&path).await {
+            Ok(_) => {
+                self.async_chown_path(&path).await?;
+                return Ok(());
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => return Ok(()),
+            Err(err) if err.kind() != std::io::ErrorKind::NotFound => return Err(err),
+            Err(_) => {}
+        }
+
+        let mut progress = PathBuf::new();
+        for component in path.components() {
+            progress.push(component);
+
+            match self.async_create_dir(&progress).await {
+                Ok(_) => self.async_chown_path(&progress).await?,
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(err) => return Err(err),
+            }
+        }
+
+        Ok(())
     }
 
     pub async fn setup(&self) {

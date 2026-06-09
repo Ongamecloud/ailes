@@ -75,10 +75,10 @@ impl CapFilesystem {
     }
 
     #[inline]
-    pub fn get_inner(&self) -> Result<Arc<cap_std::fs::Dir>, anyhow::Error> {
+    pub fn get_inner(&self) -> Result<Arc<cap_std::fs::Dir>, std::io::Error> {
         self.inner
             .load_full()
-            .ok_or_else(|| anyhow::anyhow!("filesystem not initialized"))
+            .ok_or_else(|| std::io::Error::other("filesystem not initialized"))
     }
 
     #[inline]
@@ -115,25 +115,7 @@ impl CapFilesystem {
         })
     }
 
-    pub async fn async_create_dir_all(&self, path: impl AsRef<Path>) -> Result<(), anyhow::Error> {
-        let path = self.relative_path(path.as_ref());
-
-        let inner = self.get_inner()?;
-        tokio::task::spawn_blocking(move || inner.create_dir_all(path)).await??;
-
-        Ok(())
-    }
-
-    pub fn create_dir_all(&self, path: impl AsRef<Path>) -> Result<(), anyhow::Error> {
-        let path = self.relative_path(path.as_ref());
-
-        let inner = self.get_inner()?;
-        inner.create_dir_all(path)?;
-
-        Ok(())
-    }
-
-    pub async fn async_create_dir(&self, path: impl AsRef<Path>) -> Result<(), anyhow::Error> {
+    pub async fn async_create_dir(&self, path: impl AsRef<Path>) -> Result<(), std::io::Error> {
         let path = self.relative_path(path.as_ref());
 
         let inner = self.get_inner()?;
@@ -142,7 +124,34 @@ impl CapFilesystem {
         Ok(())
     }
 
-    pub async fn async_remove_dir_all(&self, path: impl AsRef<Path>) -> Result<(), anyhow::Error> {
+    pub fn create_dir(&self, path: impl AsRef<Path>) -> Result<(), std::io::Error> {
+        let path = self.relative_path(path.as_ref());
+
+        let inner = self.get_inner()?;
+        inner.create_dir(path)?;
+
+        Ok(())
+    }
+
+    pub async fn async_create_dir_all(&self, path: impl AsRef<Path>) -> Result<(), std::io::Error> {
+        let path = self.relative_path(path.as_ref());
+
+        let inner = self.get_inner()?;
+        tokio::task::spawn_blocking(move || inner.create_dir_all(path)).await??;
+
+        Ok(())
+    }
+
+    pub fn create_dir_all(&self, path: impl AsRef<Path>) -> Result<(), std::io::Error> {
+        let path = self.relative_path(path.as_ref());
+
+        let inner = self.get_inner()?;
+        inner.create_dir_all(path)?;
+
+        Ok(())
+    }
+
+    pub async fn async_remove_dir_all(&self, path: impl AsRef<Path>) -> Result<(), std::io::Error> {
         let path = self.relative_path(path.as_ref());
 
         let inner = self.get_inner()?;
@@ -151,7 +160,7 @@ impl CapFilesystem {
         Ok(())
     }
 
-    pub fn remove_dir_all(&self, path: impl AsRef<Path>) -> Result<(), anyhow::Error> {
+    pub fn remove_dir_all(&self, path: impl AsRef<Path>) -> Result<(), std::io::Error> {
         let path = self.relative_path(path.as_ref());
 
         let inner = self.get_inner()?;
@@ -160,7 +169,7 @@ impl CapFilesystem {
         Ok(())
     }
 
-    pub async fn async_remove_file(&self, path: impl AsRef<Path>) -> Result<(), anyhow::Error> {
+    pub async fn async_remove_file(&self, path: impl AsRef<Path>) -> Result<(), std::io::Error> {
         let path = self.relative_path(path.as_ref());
 
         let inner = self.get_inner()?;
@@ -169,7 +178,7 @@ impl CapFilesystem {
         Ok(())
     }
 
-    pub fn remove_file(&self, path: impl AsRef<Path>) -> Result<(), anyhow::Error> {
+    pub fn remove_file(&self, path: impl AsRef<Path>) -> Result<(), std::io::Error> {
         let path = self.relative_path(path.as_ref());
 
         let inner = self.get_inner()?;
@@ -183,7 +192,7 @@ impl CapFilesystem {
         from: impl AsRef<Path>,
         to_dir: &CapFilesystem,
         to: impl AsRef<Path>,
-    ) -> Result<(), anyhow::Error> {
+    ) -> Result<(), std::io::Error> {
         let from = self.relative_path(from.as_ref());
         let to = self.relative_path(to.as_ref());
 
@@ -199,7 +208,7 @@ impl CapFilesystem {
         from: impl AsRef<Path>,
         to_dir: &CapFilesystem,
         to: impl AsRef<Path>,
-    ) -> Result<(), anyhow::Error> {
+    ) -> Result<(), std::io::Error> {
         let from = self.relative_path(from.as_ref());
         let to = self.relative_path(to.as_ref());
 
@@ -210,7 +219,7 @@ impl CapFilesystem {
         Ok(())
     }
 
-    pub async fn async_metadata(&self, path: impl AsRef<Path>) -> Result<Metadata, anyhow::Error> {
+    pub async fn async_metadata(&self, path: impl AsRef<Path>) -> Result<Metadata, std::io::Error> {
         let path = self.relative_path(path.as_ref());
 
         let metadata = if path.components().next().is_none() {
@@ -224,7 +233,7 @@ impl CapFilesystem {
         Ok(metadata)
     }
 
-    pub fn metadata(&self, path: impl AsRef<Path>) -> Result<Metadata, anyhow::Error> {
+    pub fn metadata(&self, path: impl AsRef<Path>) -> Result<Metadata, std::io::Error> {
         let path = self.relative_path(path.as_ref());
 
         let metadata = if path.components().next().is_none() {
@@ -241,7 +250,7 @@ impl CapFilesystem {
     pub async fn async_symlink_metadata(
         &self,
         path: impl AsRef<Path>,
-    ) -> Result<Metadata, anyhow::Error> {
+    ) -> Result<Metadata, std::io::Error> {
         let path = self.relative_path(path.as_ref());
 
         let metadata = if path.components().next().is_none() {
@@ -257,7 +266,7 @@ impl CapFilesystem {
         Ok(metadata)
     }
 
-    pub fn symlink_metadata(&self, path: impl AsRef<Path>) -> Result<Metadata, anyhow::Error> {
+    pub fn symlink_metadata(&self, path: impl AsRef<Path>) -> Result<Metadata, std::io::Error> {
         let path = self.relative_path(path.as_ref());
 
         let metadata = if path.components().next().is_none() {
@@ -274,7 +283,7 @@ impl CapFilesystem {
     pub async fn async_canonicalize(
         &self,
         path: impl AsRef<Path>,
-    ) -> Result<PathBuf, anyhow::Error> {
+    ) -> Result<PathBuf, std::io::Error> {
         let path = self.relative_path(path.as_ref());
         if path.components().next().is_none() {
             return Ok(path);
@@ -286,7 +295,7 @@ impl CapFilesystem {
         Ok(canonicalized)
     }
 
-    pub async fn async_read_link(&self, path: impl AsRef<Path>) -> Result<PathBuf, anyhow::Error> {
+    pub async fn async_read_link(&self, path: impl AsRef<Path>) -> Result<PathBuf, std::io::Error> {
         let path = self.relative_path(path.as_ref());
 
         let inner = self.get_inner()?;
@@ -295,7 +304,7 @@ impl CapFilesystem {
         Ok(link)
     }
 
-    pub fn read_link(&self, path: impl AsRef<Path>) -> Result<PathBuf, anyhow::Error> {
+    pub fn read_link(&self, path: impl AsRef<Path>) -> Result<PathBuf, std::io::Error> {
         let path = self.relative_path(path.as_ref());
 
         let inner = self.get_inner()?;
@@ -304,7 +313,7 @@ impl CapFilesystem {
         Ok(link)
     }
 
-    pub fn read_link_contents(&self, path: impl AsRef<Path>) -> Result<PathBuf, anyhow::Error> {
+    pub fn read_link_contents(&self, path: impl AsRef<Path>) -> Result<PathBuf, std::io::Error> {
         let path = self.relative_path(path.as_ref());
 
         let inner = self.get_inner()?;
@@ -317,17 +326,18 @@ impl CapFilesystem {
         &self,
         path: impl AsRef<Path>,
         limit: usize,
-    ) -> Result<String, anyhow::Error> {
+    ) -> Result<String, std::io::Error> {
         let content = self.async_read_to_vec(path, limit).await?;
 
-        Ok(String::from_utf8(content)?)
+        String::from_utf8(content)
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))
     }
 
     pub async fn async_read_to_vec(
         &self,
         path: impl AsRef<Path>,
         limit: usize,
-    ) -> Result<Vec<u8>, anyhow::Error> {
+    ) -> Result<Vec<u8>, std::io::Error> {
         let path = self.relative_path(path.as_ref());
 
         let mut file = self.async_open(path).await?;
@@ -355,7 +365,7 @@ impl CapFilesystem {
     pub async fn async_open(
         &self,
         path: impl AsRef<Path>,
-    ) -> Result<tokio::fs::File, anyhow::Error> {
+    ) -> Result<tokio::fs::File, std::io::Error> {
         let path = self.relative_path(path.as_ref());
 
         let inner = self.get_inner()?;
@@ -364,7 +374,7 @@ impl CapFilesystem {
         Ok(tokio::fs::File::from_std(file.into_std()))
     }
 
-    pub fn open(&self, path: impl AsRef<Path>) -> Result<std::fs::File, anyhow::Error> {
+    pub fn open(&self, path: impl AsRef<Path>) -> Result<std::fs::File, std::io::Error> {
         let path = self.relative_path(path.as_ref());
 
         let inner = self.get_inner()?;
@@ -377,7 +387,7 @@ impl CapFilesystem {
         &self,
         path: impl AsRef<Path>,
         options: OpenOptions,
-    ) -> Result<tokio::fs::File, anyhow::Error> {
+    ) -> Result<tokio::fs::File, std::io::Error> {
         let path = self.relative_path(path.as_ref());
 
         let inner = self.get_inner()?;
@@ -390,7 +400,7 @@ impl CapFilesystem {
         &self,
         path: impl AsRef<Path>,
         options: OpenOptions,
-    ) -> Result<std::fs::File, anyhow::Error> {
+    ) -> Result<std::fs::File, std::io::Error> {
         let path = self.relative_path(path.as_ref());
 
         let inner = self.get_inner()?;
@@ -403,7 +413,7 @@ impl CapFilesystem {
         &self,
         path: impl AsRef<Path>,
         data: impl AsRef<[u8]>,
-    ) -> Result<(), anyhow::Error> {
+    ) -> Result<(), std::io::Error> {
         let path = self.relative_path(path.as_ref());
 
         let mut file = self.async_create(path).await?;
@@ -416,7 +426,7 @@ impl CapFilesystem {
     pub async fn async_create(
         &self,
         path: impl AsRef<Path>,
-    ) -> Result<tokio::fs::File, anyhow::Error> {
+    ) -> Result<tokio::fs::File, std::io::Error> {
         let path = self.relative_path(path.as_ref());
 
         let inner = self.get_inner()?;
@@ -425,7 +435,7 @@ impl CapFilesystem {
         Ok(tokio::fs::File::from_std(file.into_std()))
     }
 
-    pub fn create(&self, path: impl AsRef<Path>) -> Result<std::fs::File, anyhow::Error> {
+    pub fn create(&self, path: impl AsRef<Path>) -> Result<std::fs::File, std::io::Error> {
         let path = self.relative_path(path.as_ref());
 
         let inner = self.get_inner()?;
@@ -440,7 +450,7 @@ impl CapFilesystem {
         destination_path: impl AsRef<Path>,
         destination_server: &crate::server::Server,
         progress: Option<&Arc<AtomicU64>>,
-    ) -> Result<u64, anyhow::Error> {
+    ) -> Result<u64, std::io::Error> {
         let (guard, listener) = AbortGuard::new();
 
         let bytes_copied = tokio::task::spawn_blocking({
@@ -474,7 +484,7 @@ impl CapFilesystem {
         destination_server: &crate::server::Server,
         progress: Option<&Arc<AtomicU64>>,
         listener: AbortListener,
-    ) -> Result<u64, anyhow::Error> {
+    ) -> Result<u64, std::io::Error> {
         let path = self.relative_path(path.as_ref());
         let destination_path = destination_server
             .filesystem
@@ -484,8 +494,7 @@ impl CapFilesystem {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "Destination path has no parent",
-            )
-            .into());
+            ));
         };
 
         let destination_metadata = destination_server
@@ -498,8 +507,7 @@ impl CapFilesystem {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::AlreadyExists,
                 "Destination path exists and is not a file",
-            )
-            .into());
+            ));
         }
 
         let mut reader = self.open(&path)?;
@@ -524,7 +532,7 @@ impl CapFilesystem {
                 }
                 cached_allocation_progress += bytes_read as i64;
 
-                if cached_allocation_progress >= super::writer::ALLOCATION_THRESHOLD {
+                if cached_allocation_progress >= super::file::ALLOCATION_THRESHOLD {
                     if !destination_server.filesystem.allocate_in_path(
                         destination_parent,
                         cached_allocation_progress,
@@ -554,8 +562,7 @@ impl CapFilesystem {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::StorageFull,
                 "Failed to allocate space",
-            )
-            .into());
+            ));
         }
 
         Ok(bytes_copied)
@@ -565,7 +572,7 @@ impl CapFilesystem {
         &self,
         path: impl AsRef<Path>,
         permissions: PortablePermissions,
-    ) -> Result<(), anyhow::Error> {
+    ) -> Result<(), std::io::Error> {
         let path = self.relative_path(path.as_ref());
 
         if path.components().next().is_none() {
@@ -596,7 +603,7 @@ impl CapFilesystem {
         &self,
         path: impl AsRef<Path>,
         permissions: PortablePermissions,
-    ) -> Result<(), anyhow::Error> {
+    ) -> Result<(), std::io::Error> {
         let path = self.relative_path(path.as_ref());
 
         if path.components().next().is_none() {
@@ -621,7 +628,7 @@ impl CapFilesystem {
         &self,
         path: impl AsRef<Path>,
         permissions: PortablePermissions,
-    ) -> Result<(), anyhow::Error> {
+    ) -> Result<(), std::io::Error> {
         let path = self.relative_path(path.as_ref());
 
         if path.components().next().is_none() {
@@ -659,7 +666,7 @@ impl CapFilesystem {
         path: impl AsRef<Path>,
         modification_time: std::time::SystemTime,
         access_time: Option<std::time::SystemTime>,
-    ) -> Result<(), anyhow::Error> {
+    ) -> Result<(), std::io::Error> {
         #[cfg(unix)]
         {
             use std::os::fd::AsFd;
@@ -667,14 +674,37 @@ impl CapFilesystem {
             let path = self.relative_path(path.as_ref());
             let inner = self.get_inner()?;
 
-            let elapsed_modification = modification_time.duration_since(std::time::UNIX_EPOCH)?;
+            let elapsed_modification = modification_time
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "modification time is before UNIX_EPOCH",
+                    )
+                })?;
             let elapsed_access = access_time
                 .unwrap_or_else(std::time::SystemTime::now)
-                .duration_since(std::time::UNIX_EPOCH)?;
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "access time is before UNIX_EPOCH",
+                    )
+                })?;
 
             let times = rustix::fs::Timestamps {
-                last_modification: elapsed_modification.try_into()?,
-                last_access: elapsed_access.try_into()?,
+                last_modification: elapsed_modification.try_into().map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "modification time is too large",
+                    )
+                })?,
+                last_access: elapsed_access.try_into().map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "access time is too large",
+                    )
+                })?,
             };
 
             tokio::task::spawn_blocking(move || {
@@ -715,7 +745,7 @@ impl CapFilesystem {
         path: impl AsRef<Path>,
         modification_time: std::time::SystemTime,
         access_time: Option<std::time::SystemTime>,
-    ) -> Result<(), anyhow::Error> {
+    ) -> Result<(), std::io::Error> {
         #[cfg(unix)]
         {
             use std::os::fd::AsFd;
@@ -723,14 +753,37 @@ impl CapFilesystem {
             let path = self.relative_path(path.as_ref());
             let inner = self.get_inner()?;
 
-            let elapsed_modification = modification_time.duration_since(std::time::UNIX_EPOCH)?;
+            let elapsed_modification = modification_time
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "modification time is before UNIX_EPOCH",
+                    )
+                })?;
             let elapsed_access = access_time
                 .unwrap_or_else(std::time::SystemTime::now)
-                .duration_since(std::time::UNIX_EPOCH)?;
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "access time is before UNIX_EPOCH",
+                    )
+                })?;
 
             let times = rustix::fs::Timestamps {
-                last_modification: elapsed_modification.try_into()?,
-                last_access: elapsed_access.try_into()?,
+                last_modification: elapsed_modification.try_into().map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "modification time is too large",
+                    )
+                })?,
+                last_access: elapsed_access.try_into().map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "access time is too large",
+                    )
+                })?,
             };
 
             rustix::fs::utimensat(
@@ -763,7 +816,7 @@ impl CapFilesystem {
         &self,
         target: impl AsRef<Path>,
         link: impl AsRef<Path>,
-    ) -> Result<(), anyhow::Error> {
+    ) -> Result<(), std::io::Error> {
         let target = self.relative_path(target.as_ref());
         let link = self.relative_path(link.as_ref());
 
@@ -788,7 +841,7 @@ impl CapFilesystem {
         &self,
         target: impl AsRef<Path>,
         link: impl AsRef<Path>,
-    ) -> Result<(), anyhow::Error> {
+    ) -> Result<(), std::io::Error> {
         let target = self.relative_path(target.as_ref());
         let link = self.relative_path(link.as_ref());
 
@@ -814,7 +867,7 @@ impl CapFilesystem {
         target: impl AsRef<Path>,
         dst_dir: &CapFilesystem,
         link: impl AsRef<Path>,
-    ) -> Result<(), anyhow::Error> {
+    ) -> Result<(), std::io::Error> {
         let target = self.relative_path(target.as_ref());
         let link = self.relative_path(link.as_ref());
 
@@ -830,7 +883,7 @@ impl CapFilesystem {
         target: impl AsRef<Path>,
         dst_dir: &CapFilesystem,
         link: impl AsRef<Path>,
-    ) -> Result<(), anyhow::Error> {
+    ) -> Result<(), std::io::Error> {
         let target = self.relative_path(target.as_ref());
         let link = self.relative_path(link.as_ref());
 
@@ -844,7 +897,7 @@ impl CapFilesystem {
     pub async fn async_read_dir_all(
         &self,
         path: impl AsRef<Path>,
-    ) -> Result<Vec<String>, anyhow::Error> {
+    ) -> Result<Vec<String>, std::io::Error> {
         let mut read_dir = self.async_read_dir(path).await?;
 
         let mut names = Vec::new();
@@ -858,7 +911,7 @@ impl CapFilesystem {
     pub async fn async_read_dir(
         &self,
         path: impl AsRef<Path>,
-    ) -> Result<AsyncReadDir, anyhow::Error> {
+    ) -> Result<AsyncReadDir, std::io::Error> {
         let path = self.relative_path(path.as_ref());
 
         Ok(if path.components().next().is_none() {
@@ -875,7 +928,7 @@ impl CapFilesystem {
         })
     }
 
-    pub fn read_dir(&self, path: impl AsRef<Path>) -> Result<ReadDir, anyhow::Error> {
+    pub fn read_dir(&self, path: impl AsRef<Path>) -> Result<ReadDir, std::io::Error> {
         let path = self.relative_path(path.as_ref());
 
         Ok(if path.components().next().is_none() {
@@ -890,13 +943,13 @@ impl CapFilesystem {
     pub async fn async_walk_dir(
         &self,
         path: impl AsRef<Path>,
-    ) -> Result<AsyncWalkDir, anyhow::Error> {
+    ) -> Result<AsyncWalkDir, std::io::Error> {
         let path = self.relative_path(path.as_ref());
 
         AsyncWalkDir::new(self.clone(), path).await
     }
 
-    pub fn walk_dir(&self, path: impl AsRef<Path>) -> Result<WalkDir, anyhow::Error> {
+    pub fn walk_dir(&self, path: impl AsRef<Path>) -> Result<WalkDir, std::io::Error> {
         let path = self.relative_path(path.as_ref());
 
         WalkDir::new(self.clone(), path)

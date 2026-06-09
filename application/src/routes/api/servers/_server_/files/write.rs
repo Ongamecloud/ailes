@@ -186,7 +186,6 @@ mod post {
         }
 
         file.shutdown().await?;
-        filesystem.async_chown(&path).await?;
 
         let mut revision_id = None;
 

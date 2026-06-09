@@ -181,7 +181,7 @@ impl AsyncWalkDir {
     pub async fn new(
         cap_filesystem: super::CapFilesystem,
         path: PathBuf,
-    ) -> Result<Self, anyhow::Error> {
+    ) -> Result<Self, std::io::Error> {
         let read_dir = cap_filesystem.async_read_dir(&path).await?;
 
         Ok(Self {
@@ -196,7 +196,7 @@ impl AsyncWalkDir {
         self
     }
 
-    pub async fn next_entry(&mut self) -> Option<Result<(FileType, PathBuf), anyhow::Error>> {
+    pub async fn next_entry(&mut self) -> Option<Result<(FileType, PathBuf), std::io::Error>> {
         'stack: while let Some((parent_path, read_dir)) = self.stack.last_mut() {
             match read_dir.next_entry().await {
                 Some(Ok((file_type, name))) => {
@@ -215,7 +215,7 @@ impl AsyncWalkDir {
 
                     return Some(Ok((file_type, full_path)));
                 }
-                Some(Err(err)) => return Some(Err(err.into())),
+                Some(Err(err)) => return Some(Err(err)),
                 None => {
                     self.stack.pop();
                 }
@@ -262,7 +262,7 @@ impl AsyncWalkDir {
                         }
                     });
                 }
-                Err(err) => return Err(err),
+                Err(err) => return Err(err.into()),
             }
         }
 
@@ -283,7 +283,10 @@ pub struct WalkDir {
 }
 
 impl WalkDir {
-    pub fn new(cap_filesystem: super::CapFilesystem, path: PathBuf) -> Result<Self, anyhow::Error> {
+    pub fn new(
+        cap_filesystem: super::CapFilesystem,
+        path: PathBuf,
+    ) -> Result<Self, std::io::Error> {
         let read_dir = cap_filesystem.read_dir(&path)?;
 
         Ok(Self {
@@ -298,7 +301,7 @@ impl WalkDir {
         self
     }
 
-    pub fn next_entry(&mut self) -> Option<Result<(FileType, PathBuf), anyhow::Error>> {
+    pub fn next_entry(&mut self) -> Option<Result<(FileType, PathBuf), std::io::Error>> {
         'stack: while let Some((parent_path, read_dir)) = self.stack.last_mut() {
             match read_dir.next_entry() {
                 Some(Ok((file_type, name))) => {
@@ -318,7 +321,7 @@ impl WalkDir {
                     return Some(Ok((file_type, full_path)));
                 }
                 Some(Err(err)) => {
-                    return Some(Err(err.into()));
+                    return Some(Err(err));
                 }
                 None => {
                     self.stack.pop();

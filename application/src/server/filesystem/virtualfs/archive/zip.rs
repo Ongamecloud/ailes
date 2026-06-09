@@ -79,10 +79,10 @@ impl SortableZipEntry {
             size: entry.size(),
             size_compressed: entry.compressed_size(),
             modified: crate::server::filesystem::archive::zip_entry_get_modified_time(entry)
-                .map(|dt| dt.into_std().into())
+                .map(|dt| dt.into())
                 .unwrap_or_default(),
             created: crate::server::filesystem::archive::zip_entry_get_created_time(entry)
-                .map(|dt| dt.into_std().into())
+                .map(|dt| dt.into())
                 .unwrap_or_else(|| *archive_created),
         }
     }
@@ -284,10 +284,10 @@ impl VirtualZipArchive {
             symlink: entry.is_symlink(),
             mime: detected_mime.mime,
             modified: crate::server::filesystem::archive::zip_entry_get_modified_time(&entry)
-                .map(|dt| dt.into_std().into())
+                .map(|dt| dt.into())
                 .unwrap_or_default(),
             created: crate::server::filesystem::archive::zip_entry_get_created_time(&entry)
-                .map(|dt| dt.into_std().into())
+                .map(|dt| dt.into())
                 .unwrap_or_else(|| *archive_created),
         }
     }
@@ -337,10 +337,8 @@ impl VirtualReadableFilesystem for VirtualZipArchive {
                     PortablePermissions::from_mode(0o644)
                 },
                 size: entry.size(),
-                modified: crate::server::filesystem::archive::zip_entry_get_modified_time(&entry)
-                    .map(|dt| dt.into_std()),
-                created: crate::server::filesystem::archive::zip_entry_get_created_time(&entry)
-                    .map(|dt| dt.into_std()),
+                modified: crate::server::filesystem::archive::zip_entry_get_modified_time(&entry),
+                created: crate::server::filesystem::archive::zip_entry_get_created_time(&entry),
             }),
             Err(e) => {
                 if Self::is_virtual_directory(&self.sizes, path_ref) {
@@ -481,12 +479,12 @@ impl VirtualReadableFilesystem for VirtualZipArchive {
                                 crate::server::filesystem::archive::zip_entry_get_modified_time(
                                     &entry,
                                 )
-                                .map(|dt| dt.into_std().into())
+                                .map(|dt| dt.into())
                                 .unwrap_or_default();
                             let c = crate::server::filesystem::archive::zip_entry_get_created_time(
                                 &entry,
                             )
-                            .map(|dt| dt.into_std().into())
+                            .map(|dt| dt.into())
                             .unwrap_or(archive_created);
                             (m, c)
                         } else {
@@ -1003,8 +1001,7 @@ impl VirtualReadableFilesystem for VirtualZipArchive {
                         entry_header.set_mtime(
                             zip_entry_get_modified_time(&entry)
                                 .map(|dt| {
-                                    dt.into_std()
-                                        .duration_since(std::time::UNIX_EPOCH)
+                                    dt.duration_since(std::time::UNIX_EPOCH)
                                         .unwrap_or_default()
                                         .as_secs()
                                 })
@@ -1134,7 +1131,6 @@ impl VirtualReadableFilesystem for VirtualZipArchive {
 
                         let entry = archive.by_index(zip_index)?;
                         let mtime = zip_entry_get_modified_time(&entry)
-                            .map(|t| t.into_std())
                             .unwrap_or_else(std::time::SystemTime::now);
                         let meta = Metadata {
                             uid: 0,

@@ -961,12 +961,6 @@ impl Server {
             "starting server"
         );
 
-        self.configuration
-            .read()
-            .await
-            .ensure_vmounts(&self.app_state.config)
-            .await?;
-
         let server = self.clone();
         tokio::spawn(async move {
             match server
@@ -1036,7 +1030,7 @@ impl Server {
                                 "Ensuring file permissions are set correctly, this could take a few seconds...",
                             );
 
-                            server.filesystem.async_chown_path(&server.filesystem.base_path).await?;
+                            server.filesystem.async_chown_path_recursive(&server.filesystem.base_path).await?;
                         }
 
                         server.setup_container().await?;

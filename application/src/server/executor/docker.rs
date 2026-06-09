@@ -1192,6 +1192,12 @@ impl super::ServerExecutor for DockerExecutor {
             .await
             .container_config(&self.app_config, &self.docker, &server.filesystem)
             .await?;
+        server
+            .configuration
+            .read()
+            .await
+            .ensure_vmounts(&self.app_config)
+            .await?;
 
         let container = self
             .docker

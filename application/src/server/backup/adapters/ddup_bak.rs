@@ -664,14 +664,14 @@ impl BackupExt for DdupBakBackup {
                             server.log_daemon(compact_str::format_compact!("(restoring): {}", path.display()));
 
                             if let Some(parent) = path.parent() {
-                                server.filesystem.create_dir_all(parent)?;
+                                server.filesystem.create_chowned_dir_all(parent)?;
                             }
 
-                            let mut writer = crate::server::filesystem::writer::FileSystemWriter::new(
+                            let mut writer = crate::server::filesystem::file::ServerFile::new(
                                 server.clone(),
                                 &path,
                                 Some(PortablePermissions::from_mode(file.mode.bits())),
-                                Some(cap_std::time::SystemTime::from_std(file.mtime)),
+                                Some(file.mtime),
                             )?;
                             let reader = repository.entry_reader(Entry::File(file.clone()))?;
                             let mut reader =
@@ -681,7 +681,7 @@ impl BackupExt for DdupBakBackup {
                             writer.flush()?;
                         }
                         Entry::Directory(directory) => {
-                            server.filesystem.create_dir_all(&path)?;
+                            server.filesystem.create_chowned_dir_all(&path)?;
                             server.filesystem.set_permissions(
                                 &path,
                                 PortablePermissions::from_mode(directory.mode.bits()),

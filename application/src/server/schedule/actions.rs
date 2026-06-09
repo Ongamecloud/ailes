@@ -645,12 +645,6 @@ impl ScheduleAction {
                         timestamp: chrono::Utc::now(),
                     })
                     .await;
-
-                if let Err(err) = filesystem.async_chown(&destination).await {
-                    tracing::error!(path = %destination.display(), "failed to change ownership: {:?}", err);
-
-                    return Err("failed to change ownership".into());
-                }
             }
             ScheduleAction::WriteFile {
                 file: file_path,
@@ -769,12 +763,6 @@ impl ScheduleAction {
                         timestamp: chrono::Utc::now(),
                     })
                     .await;
-
-                if let Err(err) = server.filesystem.async_chown_path(&path).await {
-                    tracing::error!(path = %path.display(), "failed to change ownership: {:?}", err);
-
-                    return Err("failed to change ownership".into());
-                }
             }
             ScheduleAction::CopyFile {
                 foreground,

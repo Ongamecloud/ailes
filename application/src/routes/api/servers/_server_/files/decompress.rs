@@ -150,8 +150,6 @@ mod post {
                 }
             }
 
-            server.filesystem.async_chown_path(&root).await?;
-
             ApiResponse::new_serialized(Response {}).ok()
         } else {
             ApiResponse::new_serialized(ResponseAccepted { identifier })

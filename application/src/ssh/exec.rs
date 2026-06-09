@@ -160,7 +160,7 @@ impl ExecSession {
                                 let destination = destination.clone();
 
                                 move || {
-                                    crate::server::filesystem::writer::FileSystemWriter::new(
+                                    crate::server::filesystem::file::ServerFile::new(
                                         server,
                                         &destination,
                                         None,

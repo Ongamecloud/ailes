@@ -301,7 +301,10 @@ impl super::VirtualReadableFilesystem for VirtualCapFilesystem {
         #[async_trait::async_trait]
         impl DirectoryWalk for IgnoreAsyncWalkDir {
             async fn next_entry(&mut self) -> Option<Result<(FileType, PathBuf), anyhow::Error>> {
-                self.inner.next_entry().await
+                self.inner
+                    .next_entry()
+                    .await
+                    .map(|res| res.map_err(|err| err.into()))
             }
         }
 
@@ -336,7 +339,7 @@ impl super::VirtualReadableFilesystem for VirtualCapFilesystem {
 
                 let (file_type, path) = match entry {
                     Ok((file_type, path)) => (file_type, path),
-                    Err(err) => return Some(Err(err)),
+                    Err(err) => return Some(Err(err.into())),
                 };
 
                 let reader: AsyncReadableFileStream = if file_type.is_file() {
@@ -534,7 +537,13 @@ impl super::VirtualWritableFilesystem for VirtualCapFilesystem {
         self.check_writable()?;
         let path = self.check_ignored(FileType::Dir, path.as_ref())?;
 
-        self.inner.create_dir_all(path)
+        if self.is_primary_server_fs {
+            self.server.filesystem.create_chowned_dir_all(&path)?;
+        } else {
+            self.inner.create_dir_all(&path)?;
+        }
+
+        Ok(())
     }
     async fn async_create_dir_all(
         &self,
@@ -543,14 +552,25 @@ impl super::VirtualWritableFilesystem for VirtualCapFilesystem {
         self.check_writable()?;
         let path = self.check_ignored(FileType::Dir, path.as_ref())?;
 
-        self.inner.async_create_dir_all(path).await
+        if self.is_primary_server_fs {
+            self.server
+                .filesystem
+                .async_create_chowned_dir_all(&path)
+                .await?;
+        } else {
+            self.inner.async_create_dir_all(&path).await?;
+        }
+
+        Ok(())
     }
 
     fn remove_dir_all(&self, path: &(dyn AsRef<Path> + Send + Sync)) -> Result<(), anyhow::Error> {
         self.check_writable()?;
         let path = self.check_ignored(FileType::Dir, path.as_ref())?;
 
-        self.inner.remove_dir_all(path)
+        self.inner.remove_dir_all(path)?;
+
+        Ok(())
     }
     async fn async_remove_dir_all(
         &self,
@@ -559,14 +579,18 @@ impl super::VirtualWritableFilesystem for VirtualCapFilesystem {
         self.check_writable()?;
         let path = self.check_ignored(FileType::Dir, path.as_ref())?;
 
-        self.inner.async_remove_dir_all(path).await
+        self.inner.async_remove_dir_all(path).await?;
+
+        Ok(())
     }
 
     fn remove_file(&self, path: &(dyn AsRef<Path> + Send + Sync)) -> Result<(), anyhow::Error> {
         self.check_writable()?;
         let path = self.check_ignored(FileType::File, path.as_ref())?;
 
-        self.inner.remove_file(path)
+        self.inner.remove_file(path)?;
+
+        Ok(())
     }
     async fn async_remove_file(
         &self,
@@ -575,7 +599,9 @@ impl super::VirtualWritableFilesystem for VirtualCapFilesystem {
         self.check_writable()?;
         let path = self.check_ignored(FileType::File, path.as_ref())?;
 
-        self.inner.async_remove_file(path).await
+        self.inner.async_remove_file(path).await?;
+
+        Ok(())
     }
 
     fn create_symlink(
@@ -587,7 +613,12 @@ impl super::VirtualWritableFilesystem for VirtualCapFilesystem {
         let original = self.check_ignored(FileType::File, original.as_ref())?;
         let link = self.check_ignored(FileType::Symlink, link.as_ref())?;
 
-        self.inner.symlink(original, link)
+        self.inner.symlink(original, &link)?;
+        if self.is_primary_server_fs {
+            self.server.filesystem.chown_path(&link)?;
+        }
+
+        Ok(())
     }
     async fn async_create_symlink(
         &self,
@@ -598,7 +629,12 @@ impl super::VirtualWritableFilesystem for VirtualCapFilesystem {
         let original = self.check_ignored(FileType::File, original.as_ref())?;
         let link = self.check_ignored(FileType::Symlink, link.as_ref())?;
 
-        self.inner.async_symlink(original, link).await
+        self.inner.async_symlink(original, &link).await?;
+        if self.is_primary_server_fs {
+            self.server.filesystem.async_chown_path(&link).await?;
+        }
+
+        Ok(())
     }
 
     fn create_seekable_file(
@@ -609,14 +645,14 @@ impl super::VirtualWritableFilesystem for VirtualCapFilesystem {
         let path = self.check_ignored(FileType::File, path.as_ref())?;
 
         if self.is_primary_server_fs {
-            let writer = crate::server::filesystem::writer::FileSystemWriter::new(
+            let file = crate::server::filesystem::file::ServerFile::new(
                 self.server.clone(),
                 &path,
                 None,
                 None,
             )?;
 
-            Ok(Box::new(writer))
+            Ok(Box::new(file))
         } else {
             let file = self.inner.create(path)?;
 
@@ -631,7 +667,7 @@ impl super::VirtualWritableFilesystem for VirtualCapFilesystem {
         let path = self.check_ignored(FileType::File, path.as_ref())?;
 
         if self.is_primary_server_fs {
-            let writer = crate::server::filesystem::writer::AsyncFileSystemWriter::new(
+            let file = crate::server::filesystem::file::AsyncServerFile::new(
                 self.server.clone(),
                 &path,
                 None,
@@ -639,7 +675,7 @@ impl super::VirtualWritableFilesystem for VirtualCapFilesystem {
             )
             .await?;
 
-            Ok(Box::new(writer))
+            Ok(Box::new(file))
         } else {
             let file = self.inner.async_create(path).await?;
 
@@ -656,7 +692,17 @@ impl super::VirtualWritableFilesystem for VirtualCapFilesystem {
 
         let file = self.inner.open_with(&path, options)?;
 
-        Ok(Box::new(file))
+        if self.is_primary_server_fs {
+            let file = crate::server::filesystem::file::ServerFile::new_file(
+                self.server.clone(),
+                &path,
+                file,
+            )?;
+
+            Ok(Box::new(file))
+        } else {
+            Ok(Box::new(file))
+        }
     }
     async fn async_open_file_with_options(
         &self,
@@ -668,7 +714,17 @@ impl super::VirtualWritableFilesystem for VirtualCapFilesystem {
 
         let file = self.inner.async_open_with(&path, options).await?;
 
-        Ok(Box::new(file))
+        if self.is_primary_server_fs {
+            let file = crate::server::filesystem::file::AsyncServerFile::new_file(
+                self.server.clone(),
+                &path,
+                file,
+            )?;
+
+            Ok(Box::new(file))
+        } else {
+            Ok(Box::new(file))
+        }
     }
 
     fn set_permissions(
@@ -679,7 +735,9 @@ impl super::VirtualWritableFilesystem for VirtualCapFilesystem {
         self.check_writable()?;
         let path = self.check_ignored(FileType::File, path.as_ref())?;
 
-        self.inner.set_permissions(path, permissions)
+        self.inner.set_permissions(path, permissions)?;
+
+        Ok(())
     }
     async fn async_set_permissions(
         &self,
@@ -689,7 +747,9 @@ impl super::VirtualWritableFilesystem for VirtualCapFilesystem {
         self.check_writable()?;
         let path = self.check_ignored(FileType::File, path.as_ref())?;
 
-        self.inner.async_set_permissions(path, permissions).await
+        self.inner.async_set_permissions(path, permissions).await?;
+
+        Ok(())
     }
 
     fn rename(
@@ -701,7 +761,9 @@ impl super::VirtualWritableFilesystem for VirtualCapFilesystem {
         let from = self.check_ignored(FileType::File, from.as_ref())?;
         let to = self.check_ignored(FileType::File, to.as_ref())?;
 
-        self.inner.rename(from, &self.inner, to)
+        self.inner.rename(from, &self.inner, to)?;
+
+        Ok(())
     }
     async fn async_rename(
         &self,
@@ -712,50 +774,7 @@ impl super::VirtualWritableFilesystem for VirtualCapFilesystem {
         let from = self.check_ignored(FileType::File, from.as_ref())?;
         let to = self.check_ignored(FileType::File, to.as_ref())?;
 
-        self.inner.async_rename(from, &self.inner, to).await
-    }
-
-    fn chown(&self, path: &(dyn AsRef<Path> + Send + Sync)) -> Result<(), anyhow::Error> {
-        if self
-            .server
-            .app_state
-            .config
-            .load()
-            .system
-            .user
-            .rootless
-            .enabled
-        {
-            return Ok(());
-        }
-
-        if self.is_primary_server_fs {
-            tokio::runtime::Handle::current()
-                .block_on(self.server.filesystem.async_chown_path(path))?;
-        }
-
-        Ok(())
-    }
-    async fn async_chown(
-        &self,
-        path: &(dyn AsRef<Path> + Send + Sync),
-    ) -> Result<(), anyhow::Error> {
-        if self
-            .server
-            .app_state
-            .config
-            .load()
-            .system
-            .user
-            .rootless
-            .enabled
-        {
-            return Ok(());
-        }
-
-        if self.is_primary_server_fs {
-            self.server.filesystem.async_chown_path(path).await?;
-        }
+        self.inner.async_rename(from, &self.inner, to).await?;
 
         Ok(())
     }

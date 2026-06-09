@@ -1,20 +1,20 @@
 use crate::utils::PortablePermissions;
-use cap_std::time::SystemTime;
-use std::future::Future;
-use std::path::Path;
 use std::{
-    io::{BufWriter, Seek, SeekFrom, Write},
+    future::Future,
+    io::{Read, Seek, SeekFrom, Write},
+    path::Path,
     pin::Pin,
     task::{Context, Poll},
+    time::SystemTime,
 };
-use tokio::io::{AsyncSeek, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite, AsyncWriteExt, ReadBuf};
 
 pub const ALLOCATION_THRESHOLD: i64 = 1024 * 1024;
 
-pub struct FileSystemWriter {
+pub struct ServerFile {
     server: crate::server::Server,
     parent: Vec<String>,
-    writer: Option<BufWriter<std::fs::File>>,
+    file: Option<std::fs::File>,
     ignorant: bool,
     accumulated_bytes: i64,
     modified: Option<SystemTime>,
@@ -22,7 +22,7 @@ pub struct FileSystemWriter {
     highest_position: u64,
 }
 
-impl FileSystemWriter {
+impl ServerFile {
     pub fn new(
         server: crate::server::Server,
         destination: &Path,
@@ -52,10 +52,38 @@ impl FileSystemWriter {
         Ok(Self {
             server,
             parent,
-            writer: Some(BufWriter::with_capacity(crate::BUFFER_SIZE, file)),
+            file: Some(file),
             ignorant: false,
             accumulated_bytes: 0,
             modified,
+            current_position: 0,
+            highest_position: 0,
+        })
+    }
+
+    pub fn new_file(
+        server: crate::server::Server,
+        destination: &Path,
+        file: std::fs::File,
+    ) -> Result<Self, anyhow::Error> {
+        let parent_path = destination.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Destination has no parent",
+            )
+        })?;
+
+        let parent = server
+            .filesystem
+            .path_to_components(&server.filesystem.relative_path(parent_path));
+
+        Ok(Self {
+            server,
+            parent,
+            file: Some(file),
+            ignorant: false,
+            accumulated_bytes: 0,
+            modified: None,
             current_position: 0,
             highest_position: 0,
         })
@@ -87,14 +115,13 @@ impl FileSystemWriter {
     }
 }
 
-impl Write for FileSystemWriter {
-    #[inline]
+impl Write for ServerFile {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let Some(writer) = self.writer.as_mut() else {
-            return Err(std::io::Error::other("Writer is not available"));
+        let Some(file) = self.file.as_mut() else {
+            return Err(std::io::Error::other("File is not available"));
         };
 
-        let written = writer.write(buf)?;
+        let written = file.write(buf)?;
 
         self.current_position += written as u64;
 
@@ -111,27 +138,26 @@ impl Write for FileSystemWriter {
         Ok(written)
     }
 
-    #[inline]
     fn flush(&mut self) -> std::io::Result<()> {
         self.allocate_accumulated()?;
 
-        let Some(writer) = self.writer.as_mut() else {
-            return Err(std::io::Error::other("Writer is not available"));
+        let Some(file) = self.file.as_mut() else {
+            return Err(std::io::Error::other("File is not available"));
         };
 
-        writer.flush()
+        file.flush()
     }
 }
 
-impl Seek for FileSystemWriter {
+impl Seek for ServerFile {
     fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
         self.allocate_accumulated()?;
 
-        let Some(writer) = self.writer.as_mut() else {
-            return Err(std::io::Error::other("Writer is not available"));
+        let Some(file) = self.file.as_mut() else {
+            return Err(std::io::Error::other("File is not available"));
         };
 
-        let new_pos = writer.seek(pos)?;
+        let new_pos = file.seek(pos)?;
 
         self.current_position = new_pos;
 
@@ -139,23 +165,32 @@ impl Seek for FileSystemWriter {
     }
 }
 
-impl Drop for FileSystemWriter {
+impl Read for ServerFile {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let Some(file) = self.file.as_mut() else {
+            return Err(std::io::Error::other("File is not available"));
+        };
+
+        file.read(buf)
+    }
+}
+
+impl Drop for ServerFile {
     fn drop(&mut self) {
         self.allocate_accumulated().ok();
 
         if let Some(modified) = self.modified
-            && let Some(writer) = self.writer.take()
-            && let Ok(file) = writer.into_inner()
+            && let Some(file) = self.file.take()
         {
-            file.set_modified(modified.into_std()).ok();
+            file.set_modified(modified).ok();
         }
     }
 }
 
-pub struct AsyncFileSystemWriter {
+pub struct AsyncServerFile {
     server: crate::server::Server,
     parent: Vec<String>,
-    writer: Option<tokio::io::BufWriter<tokio::fs::File>>,
+    file: Option<tokio::fs::File>,
     ignorant: bool,
     accumulated_bytes: i64,
     allocating_bytes: i64,
@@ -165,7 +200,7 @@ pub struct AsyncFileSystemWriter {
     highest_position: u64,
 }
 
-impl AsyncFileSystemWriter {
+impl AsyncServerFile {
     pub async fn new(
         server: crate::server::Server,
         destination: &Path,
@@ -196,14 +231,41 @@ impl AsyncFileSystemWriter {
         Ok(Self {
             server,
             parent,
-            writer: Some(tokio::io::BufWriter::with_capacity(
-                crate::BUFFER_SIZE,
-                file,
-            )),
+            file: Some(file),
             ignorant: false,
             accumulated_bytes: 0,
             allocating_bytes: 0,
             modified,
+            allocation_in_progress: None,
+            current_position: 0,
+            highest_position: 0,
+        })
+    }
+
+    pub fn new_file(
+        server: crate::server::Server,
+        destination: &Path,
+        file: tokio::fs::File,
+    ) -> Result<Self, anyhow::Error> {
+        let parent_path = destination.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Destination has no parent",
+            )
+        })?;
+
+        let parent = server
+            .filesystem
+            .path_to_components(&server.filesystem.relative_path(parent_path));
+
+        Ok(Self {
+            server,
+            parent,
+            file: Some(file),
+            ignorant: false,
+            accumulated_bytes: 0,
+            allocating_bytes: 0,
+            modified: None,
             allocation_in_progress: None,
             current_position: 0,
             highest_position: 0,
@@ -260,7 +322,7 @@ impl AsyncFileSystemWriter {
     }
 }
 
-impl AsyncWrite for AsyncFileSystemWriter {
+impl AsyncWrite for AsyncServerFile {
     fn poll_write(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -272,11 +334,11 @@ impl AsyncWrite for AsyncFileSystemWriter {
             Poll::Pending => return Poll::Pending,
         }
 
-        let Some(writer) = self.writer.as_mut() else {
-            return Poll::Ready(Err(std::io::Error::other("Writer is not available")));
+        let Some(file) = self.file.as_mut() else {
+            return Poll::Ready(Err(std::io::Error::other("File is not available")));
         };
 
-        let result = Pin::new(writer).poll_write(cx, buf);
+        let result = Pin::new(file).poll_write(cx, buf);
 
         if let Poll::Ready(Ok(written)) = &result {
             let written = *written as u64;
@@ -313,11 +375,11 @@ impl AsyncWrite for AsyncFileSystemWriter {
             }
         }
 
-        let Some(writer) = self.writer.as_mut() else {
-            return Poll::Ready(Err(std::io::Error::other("Writer is not available")));
+        let Some(file) = self.file.as_mut() else {
+            return Poll::Ready(Err(std::io::Error::other("File is not available")));
         };
 
-        Pin::new(writer).poll_flush(cx)
+        Pin::new(file).poll_flush(cx)
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
@@ -337,25 +399,25 @@ impl AsyncWrite for AsyncFileSystemWriter {
             }
         }
 
-        let Some(writer) = self.writer.as_mut() else {
-            return Poll::Ready(Err(std::io::Error::other("Writer is not available")));
+        let Some(file) = self.file.as_mut() else {
+            return Poll::Ready(Err(std::io::Error::other("File is not available")));
         };
 
-        Pin::new(writer).poll_shutdown(cx)
+        Pin::new(file).poll_shutdown(cx)
     }
 }
 
-impl AsyncSeek for AsyncFileSystemWriter {
+impl AsyncSeek for AsyncServerFile {
     fn start_seek(mut self: Pin<&mut Self>, position: SeekFrom) -> std::io::Result<()> {
         if crate::unlikely(self.accumulated_bytes > 0) {
             self.start_allocation();
         }
 
-        let Some(writer) = self.writer.as_mut() else {
-            return Err(std::io::Error::other("Writer is not available"));
+        let Some(file) = self.file.as_mut() else {
+            return Err(std::io::Error::other("File is not available"));
         };
 
-        Pin::new(writer).start_seek(position)
+        Pin::new(file).start_seek(position)
     }
 
     fn poll_complete(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<u64>> {
@@ -365,11 +427,11 @@ impl AsyncSeek for AsyncFileSystemWriter {
             Poll::Pending => return Poll::Pending,
         }
 
-        let Some(writer) = self.writer.as_mut() else {
-            return Poll::Ready(Err(std::io::Error::other("Writer is not available")));
+        let Some(file) = self.file.as_mut() else {
+            return Poll::Ready(Err(std::io::Error::other("File is not available")));
         };
 
-        let result = Pin::new(writer).poll_complete(cx);
+        let result = Pin::new(file).poll_complete(cx);
 
         if let Poll::Ready(Ok(new_pos)) = &result {
             self.current_position = *new_pos;
@@ -379,7 +441,21 @@ impl AsyncSeek for AsyncFileSystemWriter {
     }
 }
 
-impl Drop for AsyncFileSystemWriter {
+impl AsyncRead for AsyncServerFile {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let Some(file) = self.file.as_mut() else {
+            return Poll::Ready(Err(std::io::Error::other("File is not available")));
+        };
+
+        Pin::new(file).poll_read(cx, buf)
+    }
+}
+
+impl Drop for AsyncServerFile {
     fn drop(&mut self) {
         let leftover = self.accumulated_bytes + self.allocating_bytes;
         if leftover > 0 {
@@ -395,17 +471,16 @@ impl Drop for AsyncFileSystemWriter {
             });
         }
 
-        if let Some(writer) = self.writer.take() {
+        if let Some(mut file) = self.file.take() {
             let modified = self.modified;
 
             tokio::spawn(async move {
-                let mut writer = writer;
-                writer.flush().await.ok();
+                file.flush().await.ok();
 
                 if let Some(modified) = modified {
-                    let file = writer.into_inner().into_std().await;
+                    let file = file.into_std().await;
 
-                    crate::spawn_blocking_handled(move || file.set_modified(modified.into_std()));
+                    crate::spawn_blocking_handled(move || file.set_modified(modified));
                 }
             });
         }

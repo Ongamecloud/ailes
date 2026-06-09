@@ -612,9 +612,4 @@ pub trait VirtualWritableFilesystem: VirtualReadableFilesystem {
         from: &(dyn AsRef<Path> + Send + Sync),
         to: &(dyn AsRef<Path> + Send + Sync),
     ) -> Result<(), anyhow::Error>;
-    fn chown(&self, path: &(dyn AsRef<Path> + Send + Sync)) -> Result<(), anyhow::Error>;
-    async fn async_chown(
-        &self,
-        path: &(dyn AsRef<Path> + Send + Sync),
-    ) -> Result<(), anyhow::Error>;
 }

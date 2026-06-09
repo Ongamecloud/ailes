@@ -619,8 +619,8 @@ impl russh_sftp::server::Handler for SftpSession {
             return Err(StatusCode::NoSuchFile);
         }
 
-        if self.server.filesystem.async_chown_path(path).await.is_err() {
-            return Err(StatusCode::Failure);
+        if let Err(err) = self.server.filesystem.async_chown_path(path).await {
+            tracing::warn!("failed to chown new directory: {:?}", err);
         }
         if let Some(permissions) = attrs.permissions
             && self
@@ -1046,6 +1046,10 @@ impl russh_sftp::server::Handler for SftpSession {
             return Err(StatusCode::Failure);
         }
 
+        if let Err(err) = self.server.filesystem.async_chown_path(&targetpath).await {
+            tracing::warn!("failed to chown new symlink: {:?}", err);
+        }
+
         self.server
             .activity
             .log_activity(Activity {
@@ -1138,6 +1142,10 @@ impl russh_sftp::server::Handler for SftpSession {
             || pflags.contains(OpenFlags::CREATE)
             || pflags.contains(OpenFlags::TRUNCATE);
 
+        if is_write && self.state.config.load().system.sftp.read_only {
+            return Err(StatusCode::PermissionDenied);
+        }
+
         let (history_enabled, file_size_cap) = {
             let config = self.state.config.load();
             (
@@ -1219,6 +1227,12 @@ impl russh_sftp::server::Handler for SftpSession {
         .await
         .map_err(|_| StatusCode::Failure)?
         .map_err(|_| StatusCode::Failure)?;
+
+        if pflags.contains(OpenFlags::CREATE)
+            && let Err(err) = self.server.filesystem.async_chown_path(&path).await
+        {
+            tracing::warn!("failed to chown new file: {:?}", err);
+        }
 
         let path_components = self.server.filesystem.path_to_components(&path);
 

@@ -244,7 +244,7 @@ mod post {
                                             itaf::decoder::ArchiveEntry::Directory(dir) => {
                                                 server
                                                     .filesystem
-                                                    .create_dir_all(&destination_path)?;
+                                                    .create_chowned_dir_all(&destination_path)?;
 
                                                 let meta = dir.metadata();
                                                 server.filesystem.set_permissions(
@@ -257,16 +257,18 @@ mod post {
                                             }
                                             itaf::decoder::ArchiveEntry::File(file_entry) => {
                                                 if let Some(parent) = destination_path.parent() {
-                                                    server.filesystem.create_dir_all(parent)?;
+                                                    server
+                                                        .filesystem
+                                                        .create_chowned_dir_all(parent)?;
                                                 }
 
                                                 let meta = file_entry.metadata().clone();
                                                 let mut writer =
-                                                    crate::server::filesystem::writer::FileSystemWriter::new(
+                                                    crate::server::filesystem::file::ServerFile::new(
                                                         server.clone(),
                                                         &destination_path,
                                                         Some(PortablePermissions::from_mode(meta.mode)),
-                                                        Some(cap_std::time::SystemTime::from_std(meta.modified)),
+                                                        Some(meta.modified),
                                                     )?
                                                     .ignorant();
 
@@ -284,7 +286,9 @@ mod post {
                                                 if let Some(parent) = destination_path.parent()
                                                     && !parent.as_os_str().is_empty()
                                                 {
-                                                    server.filesystem.create_dir_all(parent)?;
+                                                    server
+                                                        .filesystem
+                                                        .create_chowned_dir_all(parent)?;
                                                 }
 
                                                 if let Err(err) = server
@@ -320,7 +324,9 @@ mod post {
                                                 if let Some(parent) = destination_path.parent()
                                                     && !parent.as_os_str().is_empty()
                                                 {
-                                                    server.filesystem.create_dir_all(parent)?;
+                                                    server
+                                                        .filesystem
+                                                        .create_chowned_dir_all(parent)?;
                                                 }
 
                                                 if let Err(err) = server.filesystem.hard_link(
@@ -374,7 +380,7 @@ mod post {
                                             tar::EntryType::Directory => {
                                                 server
                                                     .filesystem
-                                                    .create_dir_all(destination_path)?;
+                                                    .create_chowned_dir_all(destination_path)?;
                                                 if let Ok(permissions) = header
                                                     .mode()
                                                     .map(PortablePermissions::from_mode)
@@ -394,22 +400,19 @@ mod post {
                                             }
                                             tar::EntryType::Regular => {
                                                 if let Some(parent) = destination_path.parent() {
-                                                    server.filesystem.create_dir_all(parent)?;
+                                                    server
+                                                        .filesystem
+                                                        .create_chowned_dir_all(parent)?;
                                                 }
 
                                                 let mut writer =
-                                                crate::server::filesystem::writer::FileSystemWriter::new(
+                                                crate::server::filesystem::file::ServerFile::new(
                                                     server.clone(),
                                                     destination_path,
                                                     header.mode().map(PortablePermissions::from_mode).ok(),
                                                     header
                                                         .mtime()
-                                                        .map(|t| {
-                                                            cap_std::time::SystemTime::from_std(
-                                                                std::time::UNIX_EPOCH
-                                                                    + std::time::Duration::from_secs(t),
-                                                            )
-                                                        })
+                                                        .map(|t| std::time::UNIX_EPOCH + std::time::Duration::from_secs(t))
                                                         .ok(),
                                                 )?
                                                 .ignorant();

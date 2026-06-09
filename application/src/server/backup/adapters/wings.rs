@@ -426,7 +426,7 @@ impl BackupExt for WingsBackup {
 
                         match header.entry_type() {
                             tar::EntryType::Directory => {
-                                server.filesystem.create_dir_all(destination_path)?;
+                                server.filesystem.create_chowned_dir_all(destination_path)?;
                                 if let Ok(permissions) =
                                     header.mode().map(PortablePermissions::from_mode)
                                 {
@@ -447,24 +447,21 @@ impl BackupExt for WingsBackup {
                                 ));
 
                                 if let Some(parent) = destination_path.parent() {
-                                    server.filesystem.create_dir_all(parent)?;
+                                    server.filesystem.create_chowned_dir_all(parent)?;
                                 }
 
-                                let mut writer =
-                                    crate::server::filesystem::writer::FileSystemWriter::new(
-                                        server.clone(),
-                                        destination_path,
-                                        header.mode().map(PortablePermissions::from_mode).ok(),
-                                        header
-                                            .mtime()
-                                            .map(|t| {
-                                                cap_std::time::SystemTime::from_std(
-                                                    std::time::UNIX_EPOCH
-                                                        + std::time::Duration::from_secs(t),
-                                                )
-                                            })
-                                            .ok(),
-                                    )?;
+                                let mut writer = crate::server::filesystem::file::ServerFile::new(
+                                    server.clone(),
+                                    destination_path,
+                                    header.mode().map(PortablePermissions::from_mode).ok(),
+                                    header
+                                        .mtime()
+                                        .map(|t| {
+                                            std::time::UNIX_EPOCH
+                                                + std::time::Duration::from_secs(t)
+                                        })
+                                        .ok(),
+                                )?;
 
                                 crate::io::copy_shared(&mut read_buffer, &mut entry, &mut writer)?;
                                 writer.flush()?;
@@ -570,7 +567,7 @@ impl BackupExt for WingsBackup {
                                     }
 
                                     if entry.is_dir() {
-                                        server.filesystem.create_dir_all(&path)?;
+                                        server.filesystem.create_chowned_dir_all(&path)?;
                                         server.filesystem.set_permissions(
                                             &path,
                                             PortablePermissions::from_mode(
@@ -581,10 +578,10 @@ impl BackupExt for WingsBackup {
                                         server.log_daemon(compact_str::format_compact!("(restoring): {}", path.display()));
 
                                         if let Some(parent) = path.parent() {
-                                            server.filesystem.create_dir_all(parent)?;
+                                            server.filesystem.create_chowned_dir_all(parent)?;
                                         }
 
-                                        let mut writer = crate::server::filesystem::writer::FileSystemWriter::new(
+                                        let mut writer = crate::server::filesystem::file::ServerFile::new(
                                             server.clone(),
                                             &path,
                                             entry.unix_mode().map(PortablePermissions::from_mode),
@@ -619,7 +616,7 @@ impl BackupExt for WingsBackup {
                                         } else if let Some(modified_time) = zip_entry_get_modified_time(&entry) {
                                             server.filesystem.set_times(
                                                 &path,
-                                                modified_time.into_std(),
+                                                modified_time,
                                                 None,
                                             )?;
                                         }
@@ -656,7 +653,7 @@ impl BackupExt for WingsBackup {
                             if let Some(modified_time) = zip_entry_get_modified_time(&entry) {
                                 server.filesystem.set_times(
                                     &path,
-                                    modified_time.into_std(),
+                                    modified_time,
                                     None,
                                 ).ok();
                             }
@@ -685,7 +682,16 @@ impl BackupExt for WingsBackup {
                     );
 
                     let pool = rayon::ThreadPoolBuilder::new()
-                        .num_threads(server.app_state.config.load().system.backups.wings.restore_threads)
+                        .num_threads(
+                            server
+                                .app_state
+                                .config
+                                .load()
+                                .system
+                                .backups
+                                .wings
+                                .restore_threads,
+                        )
                         .build()?;
 
                     let error = Arc::new(RwLock::new(None));
@@ -729,38 +735,40 @@ impl BackupExt for WingsBackup {
                                     }
 
                                     if entry.is_directory() {
-                                        if let Err(err) =
-                                            server.filesystem.create_dir_all(destination_path)
+                                        if let Err(err) = server
+                                            .filesystem
+                                            .create_chowned_dir_all(destination_path)
                                         {
                                             return Err(sevenz_rust2::Error::Other(
                                                 err.to_string().into(),
                                             ));
                                         }
                                     } else {
-                                        server.log_daemon(compact_str::format_compact!("(restoring): {path}"));
+                                        server.log_daemon(compact_str::format_compact!(
+                                            "(restoring): {path}"
+                                        ));
 
                                         if let Some(parent) = destination_path.parent()
                                             && let Err(err) =
-                                                server.filesystem.create_dir_all(parent)
+                                                server.filesystem.create_chowned_dir_all(parent)
                                         {
                                             return Err(sevenz_rust2::Error::Other(
                                                 err.to_string().into(),
                                             ));
                                         }
 
-                                        let mut writer = crate::server::filesystem::writer::FileSystemWriter::new(
-                                            server.clone(),
-                                            destination_path,
-                                            None,
-                                            if entry.has_last_modified_date {
-                                                Some(cap_std::time::SystemTime::from_std(
-                                                    entry.last_modified_date.into(),
-                                                ))
-                                            } else {
-                                                None
-                                            },
-                                        )
-                                        .map_err(|e| std::io::Error::other(e.to_string()))?;
+                                        let mut writer =
+                                            crate::server::filesystem::file::ServerFile::new(
+                                                server.clone(),
+                                                destination_path,
+                                                None,
+                                                if entry.has_last_modified_date {
+                                                    Some(entry.last_modified_date.into())
+                                                } else {
+                                                    None
+                                                },
+                                            )
+                                            .map_err(|e| std::io::Error::other(e.to_string()))?;
 
                                         let mut reader = CountingReader::new_with_bytes_read(
                                             reader,
@@ -802,11 +810,14 @@ impl BackupExt for WingsBackup {
                                     continue;
                                 }
 
-                                server.filesystem.set_times(
-                                    destination_path,
-                                    entry.last_modified_date.into(),
-                                    None,
-                                ).ok();
+                                server
+                                    .filesystem
+                                    .set_times(
+                                        destination_path,
+                                        entry.last_modified_date.into(),
+                                        None,
+                                    )
+                                    .ok();
                             }
                         }
 

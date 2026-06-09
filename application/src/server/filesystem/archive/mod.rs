@@ -236,22 +236,20 @@ impl StreamableArchiveFormat {
 
 pub fn zip_entry_get_modified_time(
     entry: &zip::read::ZipFile<impl std::io::Read>,
-) -> Option<cap_std::time::SystemTime> {
+) -> Option<std::time::SystemTime> {
     for field in entry.extra_data_fields() {
         if let zip::extra_fields::ExtraField::ExtendedTimestamp(ext) = field
             && let Some(mod_time) = ext.mod_time()
         {
-            return Some(cap_std::time::SystemTime::from_std(
-                std::time::UNIX_EPOCH + std::time::Duration::from_secs(mod_time as u64),
-            ));
+            return Some(
+                std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(mod_time as u64),
+            );
         }
 
         if let zip::extra_fields::ExtraField::Ntfs(ntfs) = field {
             let mtime = sevenz_rust2::NtTime::new(ntfs.mtime());
 
-            return Some(cap_std::time::SystemTime::from_std(
-                std::time::SystemTime::from(mtime),
-            ));
+            return Some(std::time::SystemTime::from(mtime));
         }
     }
 
@@ -269,12 +267,12 @@ pub fn zip_entry_get_modified_time(
             time.second() as u32,
         )?;
 
-        return Some(cap_std::time::SystemTime::from_std(
-            std::time::UNIX_EPOCH
+        return Some(
+            std::time::SystemTime::UNIX_EPOCH
                 + std::time::Duration::from_secs(
                     chrono_date.and_time(chrono_time).and_utc().timestamp() as u64,
                 ),
-        ));
+        );
     }
 
     None
@@ -282,22 +280,18 @@ pub fn zip_entry_get_modified_time(
 
 pub fn zip_entry_get_created_time(
     entry: &zip::read::ZipFile<impl std::io::Read>,
-) -> Option<cap_std::time::SystemTime> {
+) -> Option<std::time::SystemTime> {
     for field in entry.extra_data_fields() {
         if let zip::extra_fields::ExtraField::ExtendedTimestamp(ext) = field
             && let Some(cr_time) = ext.cr_time()
         {
-            return Some(cap_std::time::SystemTime::from_std(
-                std::time::UNIX_EPOCH + std::time::Duration::from_secs(cr_time as u64),
-            ));
+            return Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(cr_time as u64));
         }
 
         if let zip::extra_fields::ExtraField::Ntfs(ntfs) = field {
             let ctime = sevenz_rust2::NtTime::new(ntfs.ctime());
 
-            return Some(cap_std::time::SystemTime::from_std(
-                std::time::SystemTime::from(ctime),
-            ));
+            return Some(std::time::SystemTime::from(ctime));
         }
     }
 
@@ -418,11 +412,11 @@ impl Archive {
                     )?;
                     let mut reader = AbortReader::new(reader, listener);
 
-                    let mut writer = super::writer::FileSystemWriter::new(
+                    let mut writer = super::file::ServerFile::new(
                         self.server.clone(),
                         &file_name,
                         Some(metadata.permissions().into()),
-                        metadata.modified().ok(),
+                        metadata.modified().map(|t| t.into_std()).ok(),
                     )?;
 
                     crate::io::copy(&mut reader, &mut writer)?;
@@ -489,7 +483,9 @@ impl Archive {
 
                         match header.entry_type() {
                             tar::EntryType::Directory => {
-                                self.server.filesystem.create_dir_all(&destination_path)?;
+                                self.server
+                                    .filesystem
+                                    .create_chowned_dir_all(&destination_path)?;
                                 if let Ok(permissions) =
                                     header.mode().map(PortablePermissions::from_mode)
                                 {
@@ -504,20 +500,18 @@ impl Archive {
                             }
                             tar::EntryType::Regular => {
                                 if let Some(parent) = destination_path.parent() {
-                                    self.server.filesystem.create_dir_all(parent)?;
+                                    self.server.filesystem.create_chowned_dir_all(parent)?;
                                 }
 
-                                let mut writer = super::writer::FileSystemWriter::new(
+                                let mut writer = super::file::ServerFile::new(
                                     self.server.clone(),
                                     &destination_path,
                                     header.mode().map(PortablePermissions::from_mode).ok(),
                                     header
                                         .mtime()
                                         .map(|t| {
-                                            cap_std::time::SystemTime::from_std({
-                                                std::time::UNIX_EPOCH
-                                                    + std::time::Duration::from_secs(t)
-                                            })
+                                            std::time::UNIX_EPOCH
+                                                + std::time::Duration::from_secs(t)
                                         })
                                         .ok(),
                                 )?;
@@ -644,7 +638,9 @@ impl Archive {
                                     }
 
                                     if entry.is_dir() {
-                                        server.filesystem.create_dir_all(&destination_path)?;
+                                        server
+                                            .filesystem
+                                            .create_chowned_dir_all(&destination_path)?;
                                         server.filesystem.set_permissions(
                                             &destination_path,
                                             PortablePermissions::from_mode(
@@ -653,10 +649,10 @@ impl Archive {
                                         )?;
                                     } else if entry.is_file() {
                                         if let Some(parent) = destination_path.parent() {
-                                            server.filesystem.create_dir_all(parent)?;
+                                            server.filesystem.create_chowned_dir_all(parent)?;
                                         }
 
-                                        let mut writer = super::writer::FileSystemWriter::new(
+                                        let mut writer = super::file::ServerFile::new(
                                             server.clone(),
                                             &destination_path,
                                             entry.unix_mode().map(PortablePermissions::from_mode),
@@ -698,7 +694,7 @@ impl Archive {
                                         {
                                             server.filesystem.set_times(
                                                 &destination_path,
-                                                modified_time.into_std(),
+                                                modified_time,
                                                 None,
                                             )?;
                                         }
@@ -745,7 +741,7 @@ impl Archive {
                                 if let Some(modified_time) = zip_entry_get_modified_time(&entry) {
                                     self.server.filesystem.set_times(
                                         &destination_path,
-                                        modified_time.into_std(),
+                                        modified_time,
                                         None,
                                     )?;
                                 }
@@ -841,7 +837,9 @@ impl Archive {
                         let destination_path = destination.join(path);
 
                         if entry.entry().is_directory() {
-                            self.server.filesystem.create_dir_all(&destination_path)?;
+                            self.server
+                                .filesystem
+                                .create_chowned_dir_all(&destination_path)?;
 
                             if let Some(modified_time) = dos_time_to_unix(entry.entry().file_time) {
                                 directory_entries.push((destination_path, modified_time));
@@ -851,18 +849,15 @@ impl Archive {
                             continue;
                         } else {
                             if let Some(parent) = destination_path.parent() {
-                                self.server.filesystem.create_dir_all(parent)?;
+                                self.server.filesystem.create_chowned_dir_all(parent)?;
                             }
 
-                            let writer = super::writer::FileSystemWriter::new(
+                            let writer = super::file::ServerFile::new(
                                 self.server.clone(),
                                 &destination_path,
                                 None,
                                 dos_time_to_unix(entry.entry().file_time).map(|secs| {
-                                    cap_std::time::SystemTime::from_std(
-                                        std::time::UNIX_EPOCH
-                                            + std::time::Duration::from_secs(secs),
-                                    )
+                                    std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs)
                                 }),
                             )?;
                             let writer = AbortWriter::new(writer, listener.clone());
@@ -972,8 +967,9 @@ impl Archive {
                                     }
 
                                     if entry.is_directory() {
-                                        if let Err(err) =
-                                            server.filesystem.create_dir_all(&destination_path)
+                                        if let Err(err) = server
+                                            .filesystem
+                                            .create_chowned_dir_all(&destination_path)
                                         {
                                             return Err(sevenz_rust2::Error::Other(
                                                 err.to_string().into(),
@@ -982,21 +978,19 @@ impl Archive {
                                     } else {
                                         if let Some(parent) = destination_path.parent()
                                             && let Err(err) =
-                                                server.filesystem.create_dir_all(parent)
+                                                server.filesystem.create_chowned_dir_all(parent)
                                         {
                                             return Err(sevenz_rust2::Error::Other(
                                                 err.to_string().into(),
                                             ));
                                         }
 
-                                        let mut writer = super::writer::FileSystemWriter::new(
+                                        let mut writer = super::file::ServerFile::new(
                                             server.clone(),
                                             &destination_path,
                                             None,
                                             if entry.has_last_modified_date {
-                                                Some(cap_std::time::SystemTime::from_std(
-                                                    entry.last_modified_date.into(),
-                                                ))
+                                                Some(entry.last_modified_date.into())
                                             } else {
                                                 None
                                             },
@@ -1122,7 +1116,9 @@ impl Archive {
 
                         match entry {
                             ddup_bak::archive::entries::Entry::Directory(dir) => {
-                                server.filesystem.create_dir_all(&destination_path)?;
+                                server
+                                    .filesystem
+                                    .create_chowned_dir_all(&destination_path)?;
                                 server.filesystem.set_permissions(
                                     &destination_path,
                                     PortablePermissions::from_mode(dir.mode.bits()),
@@ -1144,11 +1140,11 @@ impl Archive {
                                     .set_times(&destination_path, dir.mtime, None)?;
                             }
                             ddup_bak::archive::entries::Entry::File(file) => {
-                                let mut writer = super::writer::FileSystemWriter::new(
+                                let mut writer = super::file::ServerFile::new(
                                     server.clone(),
                                     &destination_path,
                                     Some(PortablePermissions::from_mode(file.mode.bits())),
-                                    Some(cap_std::time::SystemTime::from_std(file.mtime)),
+                                    Some(file.mtime),
                                 )?;
 
                                 let reader = AbortReader::new(file, listener.clone());

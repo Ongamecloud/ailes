@@ -737,7 +737,7 @@ impl BackupExt for S3Backup {
                 let header = entry.header();
                 match header.entry_type() {
                     tar::EntryType::Directory => {
-                        server.filesystem.create_dir_all(path.as_ref())?;
+                        server.filesystem.create_chowned_dir_all(path.as_ref())?;
                         server
                             .filesystem
                             .set_permissions(
@@ -753,20 +753,16 @@ impl BackupExt for S3Backup {
                         server.log_daemon(compact_str::format_compact!("(restoring): {}", path.display()));
 
                         if let Some(parent) = path.parent() {
-                            server.filesystem.create_dir_all(parent)?;
+                            server.filesystem.create_chowned_dir_all(parent)?;
                         }
 
-                        let mut writer = crate::server::filesystem::writer::FileSystemWriter::new(
+                        let mut writer = crate::server::filesystem::file::ServerFile::new(
                             server.clone(),
                             &path,
                             Some(PortablePermissions::from_mode(header.mode().unwrap_or(0o644))),
                             header
                                 .mtime()
-                                .map(|t| {
-                                    cap_std::time::SystemTime::from_std(
-                                        std::time::UNIX_EPOCH + std::time::Duration::from_secs(t),
-                                    )
-                                })
+                                .map(|t| std::time::UNIX_EPOCH + std::time::Duration::from_secs(t))
                                 .ok(),
                         )?;
 
