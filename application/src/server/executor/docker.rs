@@ -855,7 +855,9 @@ impl DockerProcessHandle {
                     && let Some(net) = networks.values().next()
                 {
                     usage.network.rx_bytes = net.rx_bytes.unwrap_or(0);
+                    usage.network.rx_packets = net.rx_packets.unwrap_or(0);
                     usage.network.tx_bytes = net.tx_bytes.unwrap_or(0);
+                    usage.network.tx_packets = net.tx_packets.unwrap_or(0);
                 }
 
                 if let Some(cpu_stats) = &stats.cpu_stats
@@ -954,6 +956,13 @@ impl DockerProcessHandle {
             stdin_task,
         })
     }
+
+    #[inline]
+    fn get_server(&self) -> Result<Arc<super::super::InnerServer>, anyhow::Error> {
+        self.server
+            .upgrade()
+            .ok_or_else(|| anyhow::anyhow!("server has been dropped"))
+    }
 }
 
 impl Drop for DockerProcessHandle {
@@ -1023,10 +1032,7 @@ impl super::ProcessHandle for DockerProcessHandle {
     }
 
     async fn sync_configuration(&self) -> Result<(), anyhow::Error> {
-        let server = self
-            .server
-            .upgrade()
-            .ok_or_else(|| anyhow::anyhow!("server has been dropped"))?;
+        let server = self.get_server()?;
 
         let update_config = server
             .configuration
@@ -1048,10 +1054,7 @@ impl super::ProcessHandle for DockerProcessHandle {
     }
 
     async fn stop(&self) -> Result<(), anyhow::Error> {
-        let server = self
-            .server
-            .upgrade()
-            .ok_or_else(|| anyhow::anyhow!("server has been dropped"))?;
+        let server = self.get_server()?;
 
         let process_config = server.process_configuration.read().await;
         let stop_type = process_config.stop.r#type.clone();

@@ -14,9 +14,13 @@ struct SystemCpuStats {
 #[derive(ToSchema, Serialize, Default)]
 struct SystemNetworkStats {
     received: u64,
+    received_packets: u64,
     receiving_rate: f64,
+    received_packets_rate: f64,
     sent: u64,
+    sent_packets: u64,
     sending_rate: f64,
+    sending_packets_rate: f64,
 }
 
 #[derive(ToSchema, Serialize, Default)]
@@ -112,15 +116,25 @@ impl Default for StatsManager {
                     let total_disk_write = disk.usage().total_written_bytes;
                     let disk_write_rate = disk.usage().written_bytes as f64;
 
-                    let mut total_received = 0;
-                    let mut net_in_rate = 0.0;
-                    let mut total_transmitted = 0;
-                    let mut net_out_rate = 0.0;
-                    for (_, network) in networks.iter() {
-                        total_received += network.total_received();
-                        net_in_rate += network.received() as f64;
-                        total_transmitted += network.total_transmitted();
-                        net_out_rate += network.transmitted() as f64;
+                    let mut network = SystemNetworkStats {
+                        received: 0,
+                        receiving_rate: 0.0,
+                        received_packets: 0,
+                        received_packets_rate: 0.0,
+                        sent: 0,
+                        sending_rate: 0.0,
+                        sent_packets: 0,
+                        sending_packets_rate: 0.0,
+                    };
+                    for (_, net) in networks.iter() {
+                        network.received += net.total_received();
+                        network.received_packets += net.total_packets_received();
+                        network.receiving_rate += net.received() as f64;
+                        network.received_packets_rate += net.packets_received() as f64;
+                        network.sent += net.total_transmitted();
+                        network.sent_packets += net.total_packets_transmitted();
+                        network.sending_rate += net.transmitted() as f64;
+                        network.sending_packets_rate += net.packets_transmitted() as f64;
                     }
 
                     let cpu_usage = sys.global_cpu_usage();
@@ -136,12 +150,7 @@ impl Default for StatsManager {
                             threads: cpu_threads,
                             model: cpu_model,
                         },
-                        network: SystemNetworkStats {
-                            received: total_received,
-                            receiving_rate: net_in_rate,
-                            sent: total_transmitted,
-                            sending_rate: net_out_rate,
-                        },
+                        network,
                         memory: SystemMemoryStats {
                             used: used_memory,
                             used_process: used_memory_process,

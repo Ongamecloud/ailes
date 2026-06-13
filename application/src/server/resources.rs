@@ -14,7 +14,9 @@ nestify::nest! {
         #[schema(inline)]
         pub network: #[derive(ToSchema, Default, Deserialize, Serialize, Debug, Clone, Copy, PartialEq)] pub struct ResourceUsageNetwork {
             pub rx_bytes: u64,
+            pub rx_packets: u64,
             pub tx_bytes: u64,
+            pub tx_packets: u64,
         },
 
         pub cpu_absolute: f64,
