@@ -13,6 +13,7 @@ anyhow = { workspace = true }
 axum = { workspace = true }
 axum-server = { workspace = true }
 axum-extra = { workspace = true }
+tower-http = { workspace = true }
 bollard = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -107,7 +108,7 @@ zstd = "0.13.3"
 
 [lints.clippy]
 all = { level = "warn", priority = -1 }
-#pedantic = { level = "warn", priority = -1 }
+# pedantic = { level = "warn", priority = -1 }
 
 unwrap_used = "deny"
 panic = "deny"

@@ -133,6 +133,22 @@ macro_rules! exit_error {
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
+fn handle_panic(err: Box<dyn std::any::Any + Send + 'static>) -> Response<Body> {
+    let details = if let Some(s) = err.downcast_ref::<String>() {
+        s.as_str()
+    } else if let Some(s) = err.downcast_ref::<&str>() {
+        s
+    } else {
+        "unknown panic"
+    };
+
+    tracing::error!("a panic occurred while handling a request: {}", details);
+
+    ApiResponse::error("internal server error")
+        .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .into_response()
+}
+
 async fn handle_request(req: Request<Body>, next: Next) -> Result<Response<Body>, StatusCode> {
     tracing::info!(
         path = req.uri().path(),
@@ -440,6 +456,9 @@ async fn main_rt() {
             handle_cors,
         ))
         .layer(axum::middleware::from_fn(handle_request))
+        .layer(tower_http::catch_panic::CatchPanicLayer::custom(
+            handle_panic,
+        ))
         .with_state(state.clone());
 
     let (mut router, mut openapi) = app.split_for_parts();

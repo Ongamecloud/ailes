@@ -9,6 +9,7 @@ anyhow = "1.0.98"
 axum = { version = "0.8.1", features = ["http2", "ws", "multipart"] }
 axum-server = { version = "0.8.0", features = ["tls-rustls"] }
 axum-extra = { version = "0.12.1", features = ["query"] }
+tower-http = { version = "0.6.2", features = ["catch-panic"] }
 bollard = "0.21.0"
 serde = { version = "1.0.138", features = ["derive"] }
 serde_json = { version = "1.0.139", features = ["preserve_order"] }
@@ -39,4 +40,5 @@ opt-level = "s"
 lto = "fat"
 codegen-units = 1
 strip = true
-panic = "abort"
+# too much of a coward to enable
+# panic = "abort"
