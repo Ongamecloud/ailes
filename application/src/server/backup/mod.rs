@@ -10,6 +10,7 @@ use std::sync::{Arc, atomic::AtomicU64};
 
 pub mod adapters;
 pub mod manager;
+pub mod transfer;
 
 pub enum Backup {
     Wings(adapters::wings::WingsBackup),

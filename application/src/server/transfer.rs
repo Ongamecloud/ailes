@@ -3,7 +3,6 @@ use crate::{
         SafeAsyncWriteExt, SafeDigestExt,
         compression::{CompressionLevel, CompressionType},
         counting_reader::AsyncCountingReader,
-        hash_reader::AsyncHashReader,
     },
     server::filesystem::archive::StreamableArchiveFormat,
 };
@@ -24,7 +23,6 @@ use std::{
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    sync::Mutex,
     task::{AbortHandle, JoinHandle},
 };
 use utoipa::ToSchema;
@@ -463,92 +461,16 @@ impl OutgoingServerTransfer {
             }
 
             for backup in &backups {
-                if let Ok(Some(backup)) = backup_manager.find(&server.app_state, *backup).await {
-                    match backup.adapter() {
-                        super::backup::adapters::BackupAdapter::Wings => {
-                            let hasher = Arc::new(Mutex::new(sha2::Sha256::new()));
-
-                            let file_name = match super::backup::adapters::wings::WingsBackup::get_first_file_name(&server.app_state.config, backup.uuid()).await {
-                                Ok((_, file_name)) => file_name,
-                                Err(err) => {
-                                    tracing::error!(
-                                        server = %server.uuid,
-                                        "failed to get first file name for backup {}: {}",
-                                        backup.uuid(),
-                                        err
-                                    );
-                                    continue;
-                                }
-                            };
-                            let reader = AsyncCountingReader::new_with_bytes_read(
-                                match tokio::fs::File::open(&file_name).await {
-                                    Ok(file) => file,
-                                    Err(err) => {
-                                        tracing::error!(
-                                            server = %server.uuid,
-                                            "failed to open backup file {}: {}",
-                                            file_name.display(),
-                                            err
-                                        );
-                                        continue;
-                                    }
-                                },
-                                Arc::clone(&bytes_archived),
-                            );
-                            let reader = AsyncCountingReader::new_with_bytes_read(
-                                reader,
-                                Arc::clone(&bytes_sent),
-                            );
-                            let reader = AsyncHashReader::new_with_hasher(reader, Arc::clone(&hasher)).await;
-
-                            let (checksum_sender, checksum_receiver) = tokio::sync::oneshot::channel();
-                            tokio::spawn(async move {
-                                checksum_sender.send(hex::encode(hasher.lock().await.finalize_reset())).ok();
-                            });
-
-                            bytes_total.fetch_add(
-                                tokio::fs::metadata(&file_name)
-                                    .await
-                                    .map(|m| m.len())
-                                    .unwrap_or(0),
-                                Ordering::Relaxed
-                            );
-
-                            form = form
-                                .part(
-                                    format!("backup-{}", backup.uuid()),
-                                    reqwest::multipart::Part::stream(reqwest::Body::wrap_stream(
-                                        tokio_util::io::ReaderStream::with_capacity(reader, crate::TRANSFER_BUFFER_SIZE),
-                                    ))
-                                    .file_name(file_name.file_name().unwrap_or_default().to_string_lossy().to_string())
-                                    .mime_str("backup/wings")
-                                    .expect("failed to set mime type for archive"),
-                                )
-                                .part(
-                                    format!("backup-checksum-{}", backup.uuid()),
-                                    reqwest::multipart::Part::stream(reqwest::Body::wrap_stream(
-                                        checksum_receiver.into_stream()
-                                    ))
-                                    .file_name(format!("backup-checksum-{}", backup.uuid()))
-                                    .mime_str("text/plain")
-                                    .expect("failed to set mime type for checksum"),
-                                );
-                        }
-                        _ => {
-                            tracing::warn!(
-                                server = %server.uuid,
-                                "backup {} is not a Wings backup and cannot be transferred, skipping",
-                                backup.uuid()
-                            );
-                        }
-                    }
-                } else {
-                    tracing::warn!(
-                        server = %server.uuid,
-                        "requested backup {} does not exist",
-                        backup
-                    );
-                }
+                form = backup_manager
+                    .append_transfer_part(
+                        form,
+                        &server,
+                        *backup,
+                        &bytes_archived,
+                        &bytes_sent,
+                        &bytes_total,
+                    )
+                    .await;
             }
 
             let progress_task = Box::pin({

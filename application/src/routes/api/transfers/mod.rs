@@ -60,7 +60,7 @@ mod post {
     use futures::TryStreamExt;
     use serde::Serialize;
     use sha1::Digest;
-    use std::{io::Write, path::Path, str::FromStr, sync::atomic::Ordering};
+    use std::{io::Write, str::FromStr, sync::atomic::Ordering};
     use utoipa::ToSchema;
 
     #[derive(ToSchema, Serialize)]
@@ -189,9 +189,12 @@ mod post {
 
                 let handle = tokio::task::spawn_blocking(
                     move || -> Result<Vec<uuid::Uuid>, anyhow::Error> {
-                        let mut backups = Vec::new();
                         let mut archive_checksum = None;
-                        let mut backup_checksum = None;
+                        let mut backup_receiver =
+                            crate::server::backup::transfer::BackupReceiver::new(
+                                state.0.clone(),
+                                listener.clone(),
+                            );
 
                         while let Ok(Some(mut field)) = runtime.block_on(multipart.next_field()) {
                             if field.name() == Some("archive") {
@@ -517,146 +520,11 @@ mod post {
                                     );
                                 }
                             } else if field.name().is_some_and(|n| n.starts_with("backup-")) {
-                                tracing::debug!(
-                                    "processing backup field: {}",
-                                    field.name().unwrap_or("unknown")
-                                );
-
-                                let backup_uuid = match field
-                                    .name()
-                                    .and_then(|n| n.strip_prefix("backup-"))
-                                    .and_then(|n| uuid::Uuid::from_str(n).ok())
-                                {
-                                    Some(uuid) => uuid,
-                                    None => {
-                                        if field.name().is_some_and(|n| n.contains("checksum")) {
-                                            let backup_checksum = match backup_checksum.take() {
-                                                Some(checksum) => hex::encode(checksum),
-                                                None => {
-                                                    return Err(anyhow::anyhow!(
-                                                        "backup checksum does not match multipart checksum, None to be found"
-                                                    ));
-                                                }
-                                            };
-                                            let checksum = runtime.block_on(field.text())?;
-
-                                            if backup_checksum != checksum {
-                                                return Err(anyhow::anyhow!(
-                                                    "backup checksum does not match multipart checksum, {checksum} != {backup_checksum}"
-                                                ));
-                                            }
-
-                                            continue;
-                                        }
-
-                                        tracing::warn!(
-                                            "invalid backup field name: {}",
-                                            field.name().unwrap_or("unknown")
-                                        );
-                                        continue;
-                                    }
-                                };
-
-                                let file_name = match field.file_name() {
-                                    Some(name) => name.to_string(),
-                                    None => {
-                                        tracing::warn!(
-                                            "backup field without file name found in transfer archive"
-                                        );
-                                        continue;
-                                    }
-                                };
-
-                                match field.content_type() {
-                                    Some("backup/wings") => {
-                                        if file_name.contains("..")
-                                            || file_name.contains('/')
-                                            || file_name.contains('\\')
-                                        {
-                                            tracing::warn!(
-                                                "invalid backup file name: {}",
-                                                file_name
-                                            );
-                                            continue;
-                                        }
-
-                                        let file_name =
-                                            Path::new(&state.config.load().system.backup_directory)
-                                                .join(file_name);
-                                        let reader = tokio_util::io::StreamReader::new(
-                                            field.into_stream().map_err(|err| {
-                                                std::io::Error::other(format!(
-                                                    "failed to read multipart field: {err}"
-                                                ))
-                                            }),
-                                        );
-                                        let reader = tokio_util::io::SyncIoBridge::new(reader);
-                                        let reader = AbortReader::new(reader, listener.clone());
-                                        let reader = LimitedReader::new_with_bytes_per_second(
-                                            reader,
-                                            state
-                                                .config
-                                                .load()
-                                                .system
-                                                .transfers
-                                                .download_limit
-                                                .as_bytes(),
-                                        );
-                                        let mut reader = HashReader::new_with_hasher(
-                                            reader,
-                                            sha2::Sha256::new(),
-                                        );
-
-                                        let mut file = match std::fs::File::create(&file_name) {
-                                            Ok(file) => file,
-                                            Err(err) => {
-                                                tracing::error!(
-                                                    "failed to create backup file {}: {:#?}",
-                                                    file_name.display(),
-                                                    err
-                                                );
-                                                continue;
-                                            }
-                                        };
-
-                                        if let Err(err) = crate::io::copy(&mut reader, &mut file) {
-                                            tracing::error!(
-                                                "failed to copy backup file {}: {:#?}",
-                                                file_name.display(),
-                                                err
-                                            );
-                                            continue;
-                                        }
-
-                                        if let Err(err) = file.flush() {
-                                            tracing::error!(
-                                                "failed to flush backup file {}: {:#?}",
-                                                file_name.display(),
-                                                err
-                                            );
-                                            continue;
-                                        }
-
-                                        backups.push(backup_uuid);
-                                        backup_checksum = Some(reader.finish());
-
-                                        tracing::debug!(
-                                            "backup file {} transferred successfully",
-                                            file_name.display()
-                                        );
-                                    }
-                                    _ => {
-                                        tracing::warn!(
-                                            "invalid content type for backup field: {:?}",
-                                            field.content_type()
-                                        );
-                                        continue;
-                                    }
-                                }
+                                backup_receiver.handle_field(&runtime, field)?;
                             }
                         }
 
-                        Ok(backups)
+                        Ok(backup_receiver.into_received())
                     },
                 );
 
