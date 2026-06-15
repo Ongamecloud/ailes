@@ -8,7 +8,7 @@ use crate::{
 };
 use futures::FutureExt;
 use human_bytes::human_bytes;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use std::{
     borrow::Cow,
@@ -174,6 +174,23 @@ impl std::str::FromStr for TransferArchiveFormat {
     }
 }
 
+#[derive(ToSchema, Deserialize, Serialize, Clone, Copy)]
+pub struct TransferCapabilities {
+    pub wings_archive_format: super::filesystem::archive::ArchiveFormat,
+    pub wings_archive_compression_level: CompressionLevel,
+    pub disk_limiter_mode: super::filesystem::limiter::DiskLimiterMode,
+}
+
+impl TransferCapabilities {
+    pub fn from_config(config: &crate::config::InnerConfig) -> Self {
+        Self {
+            wings_archive_format: config.system.backups.wings.archive_format,
+            wings_archive_compression_level: config.system.backups.compression_level,
+            disk_limiter_mode: config.system.disk_limiter_mode,
+        }
+    }
+}
+
 pub struct OutgoingServerTransfer {
     pub bytes_archived: Arc<AtomicU64>,
     pub bytes_sent: Arc<AtomicU64>,
@@ -225,7 +242,7 @@ impl OutgoingServerTransfer {
             .app_state
             .config
             .client
-            .set_server_transfer(server.uuid, false, Vec::new())
+            .set_server_transfer(server.uuid, false, &Default::default())
             .await
             .ok();
         server.outgoing_transfer.write().await.take();
@@ -241,6 +258,32 @@ impl OutgoingServerTransfer {
                 .build(),
             )
             .ok();
+    }
+
+    async fn query_destination_capabilities(
+        url: &str,
+        token: &str,
+    ) -> Result<TransferCapabilities, anyhow::Error> {
+        let mut query_url = reqwest::Url::parse(url)?;
+        query_url
+            .path_segments_mut()
+            .map_err(|_| anyhow::anyhow!("transfer url cannot be a base"))?
+            .pop_if_empty()
+            .push("query");
+
+        let capabilities = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(15))
+            .build()?
+            .get(query_url)
+            .header("Authorization", token)
+            .header("Accept", "application/json")
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+
+        Ok(capabilities)
     }
 
     pub fn start(
@@ -460,11 +503,34 @@ impl OutgoingServerTransfer {
                 );
             }
 
+            let destination_capabilities = if backups.is_empty() {
+                None
+            } else {
+                match Self::query_destination_capabilities(&url, &token).await {
+                    Ok(capabilities) => Some(capabilities),
+                    Err(err) => {
+                        tracing::warn!(
+                            server = %server.uuid,
+                            "failed to query destination transfer capabilities, falling back to local config: {err:#}"
+                        );
+                        Self::log(
+                            &server,
+                            "Could not query destination capabilities, using local backup format for conversions.",
+                        );
+
+                        Some(TransferCapabilities::from_config(
+                            &server.app_state.config.load(),
+                        ))
+                    }
+                }
+            };
+
             for backup in &backups {
                 form = backup_manager
                     .append_transfer_part(
+                        &server.app_state,
+                        destination_capabilities.as_ref(),
                         form,
-                        &server,
                         *backup,
                         &bytes_archived,
                         &bytes_sent,
@@ -830,8 +896,8 @@ pub struct IncomingServerTransfer {
 impl IncomingServerTransfer {
     pub async fn try_join_handles(
         &mut self,
-        main: JoinHandle<Result<Vec<uuid::Uuid>, anyhow::Error>>,
-    ) -> Result<Vec<uuid::Uuid>, anyhow::Error> {
+        main: JoinHandle<Result<super::backup::transfer::ReceivedBackups, anyhow::Error>>,
+    ) -> Result<super::backup::transfer::ReceivedBackups, anyhow::Error> {
         let (backups, _) = tokio::try_join!(async { main.await? }, async {
             Ok(futures::future::try_join_all(
                 self.multiplex_handles.drain(..).map(|h| h.1),

@@ -6,7 +6,9 @@ use utoipa_axum::{
 };
 
 mod _server_;
+mod capabilities;
 mod files;
+mod query;
 mod ws;
 
 mod get {
@@ -188,7 +190,10 @@ mod post {
                 let (guard, listener) = AbortGuard::new();
 
                 let handle = tokio::task::spawn_blocking(
-                    move || -> Result<Vec<uuid::Uuid>, anyhow::Error> {
+                    move || -> Result<
+                        crate::server::backup::transfer::ReceivedBackups,
+                        anyhow::Error,
+                    > {
                         let mut archive_checksum = None;
                         let mut backup_receiver =
                             crate::server::backup::transfer::BackupReceiver::new(
@@ -636,7 +641,7 @@ mod post {
                                 state
                                     .config
                                     .client
-                                    .set_server_transfer(subject, false, vec![])
+                                    .set_server_transfer(subject, false, &Default::default())
                                     .await
                                     .ok();
 
@@ -655,7 +660,7 @@ mod post {
                         };
 
                         match incoming.try_join_handles(handle).await {
-                            Ok(backups) => {
+                            Ok(received_backups) => {
                                 tracing::info!(
                                     server = %server.uuid,
                                     "server transfer completed successfully"
@@ -663,7 +668,7 @@ mod post {
                                 if state
                                     .config
                                     .client
-                                    .set_server_transfer(subject, true, backups)
+                                    .set_server_transfer(subject, true, &received_backups)
                                     .await
                                     .is_ok()
                                 {
@@ -683,7 +688,7 @@ mod post {
                                     state
                                         .config
                                         .client
-                                        .set_server_transfer(subject, false, vec![])
+                                        .set_server_transfer(subject, false, &Default::default())
                                         .await
                                         .ok();
 
@@ -699,7 +704,7 @@ mod post {
                                 state
                                     .config
                                     .client
-                                    .set_server_transfer(subject, false, vec![])
+                                    .set_server_transfer(subject, false, &Default::default())
                                     .await
                                     .ok();
 
@@ -714,7 +719,7 @@ mod post {
                     let state = state.clone();
                     async move {
                         match handle.await {
-                            Ok(Ok(backups)) => {
+                            Ok(Ok(received_backups)) => {
                                 tracing::info!(
                                     server = %server.uuid,
                                     "server transfer completed successfully"
@@ -722,7 +727,7 @@ mod post {
                                 if state
                                     .config
                                     .client
-                                    .set_server_transfer(subject, true, backups)
+                                    .set_server_transfer(subject, true, &received_backups)
                                     .await
                                     .is_ok()
                                 {
@@ -742,7 +747,7 @@ mod post {
                                     state
                                         .config
                                         .client
-                                        .set_server_transfer(subject, false, vec![])
+                                        .set_server_transfer(subject, false, &Default::default())
                                         .await
                                         .ok();
 
@@ -758,7 +763,7 @@ mod post {
                                 state
                                     .config
                                     .client
-                                    .set_server_transfer(subject, false, vec![])
+                                    .set_server_transfer(subject, false, &Default::default())
                                     .await
                                     .ok();
 
@@ -773,7 +778,7 @@ mod post {
                                 state
                                     .config
                                     .client
-                                    .set_server_transfer(subject, false, vec![])
+                                    .set_server_transfer(subject, false, &Default::default())
                                     .await
                                     .ok();
 
@@ -804,6 +809,14 @@ pub fn router(state: &State) -> OpenApiRouter<State> {
             )),
         )
         .routes(routes!(post::route).layer(DefaultBodyLimit::disable()))
+        .nest(
+            "/capabilities",
+            capabilities::router(state).route_layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                crate::routes::api::auth,
+            )),
+        )
+        .nest("/query", query::router(state))
         .nest(
             "/ws",
             ws::router(state).route_layer(axum::middleware::from_fn_with_state(

@@ -40,6 +40,173 @@ impl BtrfsBackup {
         Self::get_backup_path(config, uuid).join("ignored")
     }
 
+    pub async fn open_send_stream(
+        &self,
+        state: &crate::routes::State,
+    ) -> Result<tokio::process::ChildStdout, anyhow::Error> {
+        let subvolume_path = Self::get_subvolume_path(&state.config, self.uuid);
+
+        if tokio::fs::metadata(&subvolume_path).await.is_err() {
+            return Err(anyhow::anyhow!(
+                "btrfs backup subvolume does not exist: {}",
+                subvolume_path.display()
+            ));
+        }
+
+        let send_dir = Self::get_backup_path(&state.config, self.uuid)
+            .join(format!(".send-{}", uuid::Uuid::new_v4()));
+        let send_path = send_dir.join("subvolume");
+
+        tokio::fs::create_dir_all(&send_dir).await?;
+
+        let output = Command::new("btrfs")
+            .args(["subvolume", "snapshot", "-r"])
+            .arg(&subvolume_path)
+            .arg(&send_path)
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            tokio::fs::remove_dir_all(&send_dir).await.ok();
+
+            return Err(anyhow::anyhow!(
+                "failed to create read-only snapshot for btrfs send: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+
+        let mut child = Command::new("btrfs")
+            .arg("send")
+            .arg(&send_path)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()?;
+
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("failed to capture btrfs send stdout"))?;
+
+        tokio::spawn(async move {
+            match child.wait_with_output().await {
+                Ok(output) if !output.status.success() => {
+                    tracing::error!(
+                        "btrfs send failed: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
+                Err(err) => tracing::error!("failed to wait for btrfs send: {err}"),
+                _ => {}
+            }
+
+            let output = Command::new("btrfs")
+                .args(["subvolume", "delete"])
+                .arg(&send_path)
+                .output()
+                .await;
+            if let Ok(output) = output
+                && !output.status.success()
+            {
+                tracing::warn!(
+                    "failed to delete temporary btrfs send snapshot {}: {}",
+                    send_path.display(),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+
+            tokio::fs::remove_dir_all(&send_dir).await.ok();
+        });
+
+        Ok(stdout)
+    }
+
+    pub async fn open_archive_stream(
+        &self,
+        state: &crate::routes::State,
+        archive_format: StreamableArchiveFormat,
+        compression_level: crate::io::compression::CompressionLevel,
+    ) -> Result<tokio::io::ReadHalf<tokio::io::SimplexStream>, anyhow::Error> {
+        let subvolume_path = Self::get_subvolume_path(&state.config, self.uuid);
+
+        if tokio::fs::metadata(&subvolume_path).await.is_err() {
+            return Err(anyhow::anyhow!(
+                "btrfs backup subvolume does not exist: {}",
+                subvolume_path.display()
+            ));
+        }
+
+        let filesystem = crate::server::filesystem::cap::CapFilesystem::new(subvolume_path).await?;
+        let names = filesystem.async_read_dir_all(Path::new("")).await?;
+        let ignore = Self::get_ignore(&state.config, self.uuid).await?;
+        let threads = state.config.load().api.file_compression_threads;
+
+        let (reader, writer) = tokio::io::simplex(crate::BUFFER_SIZE);
+
+        tokio::spawn(async move {
+            let writer = tokio_util::io::SyncIoBridge::new(writer);
+
+            let result = match archive_format {
+                StreamableArchiveFormat::Zip => {
+                    crate::server::filesystem::archive::create::create_zip_streaming(
+                        filesystem,
+                        writer,
+                        Path::new(""),
+                        names,
+                        None,
+                        ignore.into(),
+                        crate::server::filesystem::archive::create::CreateZipOptions {
+                            compression_level,
+                        },
+                    )
+                    .await
+                    .map(|inner| inner.into_inner())
+                }
+                f if f.is_itaf() => crate::server::filesystem::archive::create::create_itaf(
+                    filesystem,
+                    writer,
+                    Path::new(""),
+                    names,
+                    None,
+                    ignore.into(),
+                    crate::server::filesystem::archive::create::CreateItafOptions {
+                        compression_type: f.compression_format(),
+                        compression_level,
+                        threads,
+                        crc_enabled: true,
+                    },
+                )
+                .await
+                .map(|inner| inner.into_inner()),
+                f => crate::server::filesystem::archive::create::create_tar(
+                    filesystem,
+                    writer,
+                    Path::new(""),
+                    names,
+                    None,
+                    ignore.into(),
+                    crate::server::filesystem::archive::create::CreateTarOptions {
+                        compression_type: f.compression_format(),
+                        compression_level,
+                        threads,
+                    },
+                )
+                .await
+                .map(|inner| inner.into_inner()),
+            };
+
+            match result {
+                Ok(mut inner) => {
+                    inner.shutdown().await.ok();
+                }
+                Err(err) => {
+                    tracing::error!("failed to create archive for btrfs backup: {err}");
+                }
+            }
+        });
+
+        Ok(reader)
+    }
+
     pub async fn get_ignore(
         config: &crate::config::Config,
         uuid: uuid::Uuid,
@@ -228,117 +395,13 @@ impl BackupExt for BtrfsBackup {
         archive_format: StreamableArchiveFormat,
         _range: Option<ByteRange>,
     ) -> Result<ApiResponse, anyhow::Error> {
-        let subvolume_path = Self::get_subvolume_path(&state.config, self.uuid);
-
-        if tokio::fs::metadata(&subvolume_path).await.is_err() {
-            return Err(anyhow::anyhow!(
-                "btrfs backup subvolume does not exist: {}",
-                subvolume_path.display()
-            ));
-        }
-
-        let filesystem = crate::server::filesystem::cap::CapFilesystem::new(subvolume_path).await?;
-        let names = filesystem.async_read_dir_all(Path::new("")).await?;
-        let ignore = Self::get_ignore(&state.config, self.uuid).await?;
-
-        let (reader, writer) = tokio::io::simplex(crate::BUFFER_SIZE);
-
-        tokio::spawn({
-            let config = Arc::clone(&state.config);
-
-            async move {
-                let writer = tokio_util::io::SyncIoBridge::new(writer);
-
-                match archive_format {
-                    StreamableArchiveFormat::Zip => {
-                        match crate::server::filesystem::archive::create::create_zip_streaming(
-                            filesystem,
-                            writer,
-                            Path::new(""),
-                            names,
-                            None,
-                            ignore.into(),
-                            crate::server::filesystem::archive::create::CreateZipOptions {
-                                compression_level: config.load().system.backups.compression_level,
-                            },
-                        )
-                        .await
-                        {
-                            Ok(inner) => {
-                                inner.into_inner().shutdown().await.ok();
-                            }
-                            Err(err) => {
-                                tracing::error!(
-                                    "failed to create zip archive for btrfs backup: {}",
-                                    err
-                                );
-                            }
-                        }
-                    }
-                    f if f.is_tar() => {
-                        match crate::server::filesystem::archive::create::create_tar(
-                            filesystem,
-                            writer,
-                            Path::new(""),
-                            names,
-                            None,
-                            ignore.into(),
-                            crate::server::filesystem::archive::create::CreateTarOptions {
-                                compression_type: f.compression_format(),
-                                compression_level: config.load().system.backups.compression_level,
-                                threads: config.load().api.file_compression_threads,
-                            },
-                        )
-                        .await
-                        {
-                            Ok(inner) => {
-                                inner.into_inner().shutdown().await.ok();
-                            }
-                            Err(err) => {
-                                tracing::error!(
-                                    "failed to create tar archive for btrfs backup: {}",
-                                    err
-                                );
-                            }
-                        }
-                    }
-                    f if f.is_itaf() => {
-                        match crate::server::filesystem::archive::create::create_itaf(
-                            filesystem,
-                            writer,
-                            Path::new(""),
-                            names,
-                            None,
-                            ignore.into(),
-                            crate::server::filesystem::archive::create::CreateItafOptions {
-                                compression_type: f.compression_format(),
-                                compression_level: config.load().system.backups.compression_level,
-                                threads: config.load().api.file_compression_threads,
-                                crc_enabled: true,
-                            },
-                        )
-                        .await
-                        {
-                            Ok(inner) => {
-                                inner.into_inner().shutdown().await.ok();
-                            }
-                            Err(err) => {
-                                tracing::error!(
-                                    "failed to create itaf archive for btrfs backup: {}",
-                                    err
-                                );
-                            }
-                        }
-                    }
-                    _ => {
-                        tracing::error!(
-                            "unsupported archive format for btrfs backup: {}",
-                            archive_format.extension()
-                        );
-                    }
-                }
-            }
-        });
+        let reader = self
+            .open_archive_stream(
+                state,
+                archive_format,
+                state.config.load().system.backups.compression_level,
+            )
+            .await?;
 
         Ok(ApiResponse::new_stream(reader)
             .with_header(

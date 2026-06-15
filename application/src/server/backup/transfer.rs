@@ -1,14 +1,20 @@
-use crate::io::{
-    abort::{AbortListener, AbortReader},
-    counting_reader::AsyncCountingReader,
-    hash_reader::{AsyncHashReader, HashReader},
-    limited_reader::LimitedReader,
+use crate::{
+    io::{
+        abort::{AbortListener, AbortReader},
+        counting_reader::AsyncCountingReader,
+        hash_reader::{AsyncHashReader, HashReader},
+        limited_reader::LimitedReader,
+    },
+    server::filesystem::archive::{ArchiveFormat, StreamableArchiveFormat},
 };
 use futures::{FutureExt, TryStreamExt};
+use serde::{Deserialize, Serialize};
 use sha1::Digest;
 use std::{
+    collections::BTreeMap,
     io::Write,
     path::Path,
+    pin::Pin,
     str::FromStr,
     sync::{
         Arc,
@@ -18,65 +24,158 @@ use std::{
 use tokio::sync::Mutex;
 
 impl super::manager::BackupManager {
+    #[allow(clippy::too_many_arguments)]
     pub async fn append_transfer_part(
         &self,
+        state: &crate::routes::State,
+        capabilities: Option<&crate::server::transfer::TransferCapabilities>,
         form: reqwest::multipart::Form,
-        server: &crate::server::Server,
         uuid: uuid::Uuid,
         bytes_archived: &Arc<AtomicU64>,
         bytes_sent: &Arc<AtomicU64>,
         bytes_total: &Arc<AtomicU64>,
     ) -> reqwest::multipart::Form {
-        let backup = match self.find(&server.app_state, uuid).await {
+        let backup = match self.find(state, uuid).await {
             Ok(Some(backup)) => backup,
             Ok(None) => {
-                tracing::warn!(server = %server.uuid, "requested backup {uuid} does not exist");
+                tracing::warn!(backup = %uuid, "requested backup does not exist");
                 return form;
             }
             Err(err) => {
-                tracing::error!(server = %server.uuid, "failed to find backup {uuid}: {err:#?}");
+                tracing::error!(backup = %uuid, "failed to find backup: {err:#?}");
                 return form;
             }
         };
 
-        if backup.adapter() != super::adapters::BackupAdapter::Wings {
-            tracing::warn!(
-                server = %server.uuid,
-                "backup {uuid} is not a Wings backup and cannot be transferred, skipping"
-            );
-            return form;
+        struct TransferPart {
+            reader: Pin<Box<dyn tokio::io::AsyncRead + Send>>,
+            file_name: String,
+            content_type: &'static str,
+            ignore: Option<String>,
         }
 
-        let file_name = match super::adapters::wings::WingsBackup::get_first_file_name(
-            &server.app_state.config,
-            uuid,
-        )
-        .await
-        {
-            Ok((_, file_name)) => file_name,
-            Err(err) => {
-                tracing::error!(
-                    server = %server.uuid,
-                    "failed to get first file name for backup {uuid}: {err}"
-                );
-                return form;
-            }
-        };
+        let part = match &*backup {
+            super::Backup::Wings(backup) => {
+                let file = match tokio::fs::File::open(&backup.path).await {
+                    Ok(file) => file,
+                    Err(err) => {
+                        tracing::error!(
+                            backup = %uuid,
+                            "failed to open backup file {}: {err}",
+                            backup.path.display()
+                        );
+                        return form;
+                    }
+                };
 
-        let file = match tokio::fs::File::open(&file_name).await {
-            Ok(file) => file,
-            Err(err) => {
-                tracing::error!(
-                    server = %server.uuid,
-                    "failed to open backup file {}: {err}",
-                    file_name.display()
+                bytes_total.fetch_add(
+                    file.metadata().await.map(|m| m.len()).unwrap_or(0),
+                    Ordering::Relaxed,
+                );
+
+                TransferPart {
+                    reader: Box::pin(file),
+                    file_name: format!("{}.{}", uuid, backup.format.extension()),
+                    content_type: "backup/wings",
+                    ignore: None,
+                }
+            }
+            super::Backup::Btrfs(backup) => {
+                let Some(capabilities) = capabilities else {
+                    tracing::warn!(
+                        backup = %uuid,
+                        "destination capabilities unknown, cannot convert btrfs backup, skipping"
+                    );
+                    return form;
+                };
+
+                let native_reader = if capabilities.disk_limiter_mode
+                    == crate::server::filesystem::limiter::DiskLimiterMode::BtrfsSubvolume
+                {
+                    match backup.open_send_stream(state).await {
+                        Ok(reader) => Some(reader),
+                        Err(err) => {
+                            tracing::warn!(
+                                backup = %uuid,
+                                "native btrfs send unavailable, falling back to archive conversion: {err}"
+                            );
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                if let Some(reader) = native_reader {
+                    let ignore = tokio::fs::read_to_string(
+                        super::adapters::btrfs::BtrfsBackup::get_ignore_path(&state.config, uuid),
+                    )
+                    .await
+                    .unwrap_or_default();
+
+                    TransferPart {
+                        reader: Box::pin(reader),
+                        file_name: format!("{uuid}.btrfs"),
+                        content_type: "backup/btrfs",
+                        ignore: Some(ignore),
+                    }
+                } else {
+                    let archive_format = match capabilities.wings_archive_format {
+                        ArchiveFormat::Tar => StreamableArchiveFormat::Tar,
+                        ArchiveFormat::TarGz => StreamableArchiveFormat::TarGz,
+                        ArchiveFormat::TarXz => StreamableArchiveFormat::TarXz,
+                        ArchiveFormat::TarLzip => StreamableArchiveFormat::TarLzip,
+                        ArchiveFormat::TarBz2 => StreamableArchiveFormat::TarBz2,
+                        ArchiveFormat::TarLz4 => StreamableArchiveFormat::TarLz4,
+                        ArchiveFormat::TarZstd => StreamableArchiveFormat::TarZstd,
+                        ArchiveFormat::Zip => StreamableArchiveFormat::Zip,
+                        ArchiveFormat::SevenZip => {
+                            tracing::warn!(
+                                backup = %uuid,
+                                "cannot convert btrfs backup to 7z format as it is not streamable, skipping"
+                            );
+                            return form;
+                        }
+                    };
+
+                    let reader = match backup
+                        .open_archive_stream(
+                            state,
+                            archive_format,
+                            capabilities.wings_archive_compression_level,
+                        )
+                        .await
+                    {
+                        Ok(reader) => reader,
+                        Err(err) => {
+                            tracing::error!(
+                                backup = %uuid,
+                                "failed to convert btrfs backup for transfer: {err}"
+                            );
+                            return form;
+                        }
+                    };
+
+                    TransferPart {
+                        reader: Box::pin(reader),
+                        file_name: format!("{uuid}.{}", archive_format.extension()),
+                        content_type: "backup/wings",
+                        ignore: None,
+                    }
+                }
+            }
+            _ => {
+                tracing::warn!(
+                    backup = %uuid,
+                    "backup uses an adapter that cannot be transferred, skipping"
                 );
                 return form;
             }
         };
 
         let hasher = Arc::new(Mutex::new(sha2::Sha256::new()));
-        let reader = AsyncCountingReader::new_with_bytes_read(file, Arc::clone(bytes_archived));
+        let reader =
+            AsyncCountingReader::new_with_bytes_read(part.reader, Arc::clone(bytes_archived));
         let reader = AsyncCountingReader::new_with_bytes_read(reader, Arc::clone(bytes_sent));
         let reader = AsyncHashReader::new_with_hasher(reader, Arc::clone(&hasher)).await;
 
@@ -87,46 +186,61 @@ impl super::manager::BackupManager {
                 .ok();
         });
 
-        bytes_total.fetch_add(
-            tokio::fs::metadata(&file_name)
-                .await
-                .map(|m| m.len())
-                .unwrap_or(0),
-            Ordering::Relaxed,
-        );
-
-        form.part(
-            format!("backup-{uuid}"),
-            reqwest::multipart::Part::stream(reqwest::Body::wrap_stream(
-                tokio_util::io::ReaderStream::with_capacity(reader, crate::TRANSFER_BUFFER_SIZE),
-            ))
-            .file_name(
-                file_name
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string(),
+        let mut form = form
+            .part(
+                format!("backup-{uuid}"),
+                reqwest::multipart::Part::stream(reqwest::Body::wrap_stream(
+                    tokio_util::io::ReaderStream::with_capacity(
+                        reader,
+                        crate::TRANSFER_BUFFER_SIZE,
+                    ),
+                ))
+                .file_name(part.file_name)
+                .mime_str(part.content_type)
+                .expect("failed to set mime type for archive"),
             )
-            .mime_str("backup/wings")
-            .expect("failed to set mime type for archive"),
-        )
-        .part(
-            format!("backup-checksum-{uuid}"),
-            reqwest::multipart::Part::stream(reqwest::Body::wrap_stream(
-                checksum_receiver.into_stream(),
-            ))
-            .file_name(format!("backup-checksum-{uuid}"))
-            .mime_str("text/plain")
-            .expect("failed to set mime type for checksum"),
-        )
+            .part(
+                format!("backup-checksum-{uuid}"),
+                reqwest::multipart::Part::stream(reqwest::Body::wrap_stream(
+                    checksum_receiver.into_stream(),
+                ))
+                .file_name(format!("backup-checksum-{uuid}"))
+                .mime_str("text/plain")
+                .expect("failed to set mime type for checksum"),
+            );
+        if let Some(ignore) = part.ignore {
+            form = form.part(
+                format!("backup-ignore-{uuid}"),
+                reqwest::multipart::Part::text(ignore)
+                    .file_name(format!("backup-ignore-{uuid}"))
+                    .mime_str("text/plain")
+                    .expect("failed to set mime type for ignore"),
+            );
+        }
+
+        form
     }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BackupMigration {
+    pub checksum: String,
+    pub checksum_type: compact_str::CompactString,
+    pub browsable: bool,
+    pub streaming: bool,
+}
+
+#[derive(Debug, Default)]
+pub struct ReceivedBackups {
+    pub uuids: Vec<uuid::Uuid>,
+    pub migrations: BTreeMap<uuid::Uuid, BackupMigration>,
 }
 
 pub struct BackupReceiver {
     state: crate::routes::State,
     listener: AbortListener,
 
-    received: Vec<uuid::Uuid>,
+    received: ReceivedBackups,
     checksum: Option<String>,
 }
 
@@ -136,13 +250,13 @@ impl BackupReceiver {
         Self {
             state,
             listener,
-            received: Vec::new(),
+            received: ReceivedBackups::default(),
             checksum: None,
         }
     }
 
     #[inline]
-    pub fn into_received(self) -> Vec<uuid::Uuid> {
+    pub fn into_received(self) -> ReceivedBackups {
         self.received
     }
 
@@ -164,7 +278,9 @@ impl BackupReceiver {
         let uuid = match uuid {
             Some(uuid) => uuid,
             None => {
-                if field.name().is_some_and(|n| n.contains("checksum")) {
+                let name = field.name().unwrap_or("");
+
+                if name.contains("checksum") {
                     let checksum = match self.checksum.take() {
                         Some(checksum) => checksum,
                         None => {
@@ -184,10 +300,35 @@ impl BackupReceiver {
                     return Ok(());
                 }
 
-                tracing::warn!(
-                    "invalid backup field name: {}",
-                    field.name().unwrap_or("unknown")
-                );
+                if let Some(uuid) = name
+                    .strip_prefix("backup-ignore-")
+                    .and_then(|n| uuid::Uuid::from_str(n).ok())
+                {
+                    let backup_path =
+                        crate::server::backup::adapters::btrfs::BtrfsBackup::get_backup_path(
+                            &self.state.config,
+                            uuid,
+                        );
+                    let ignore_path =
+                        crate::server::backup::adapters::btrfs::BtrfsBackup::get_ignore_path(
+                            &self.state.config,
+                            uuid,
+                        );
+                    let contents = runtime.block_on(field.text())?;
+
+                    if let Err(err) = std::fs::create_dir_all(&backup_path)
+                        .and_then(|_| std::fs::write(&ignore_path, contents))
+                    {
+                        tracing::error!(
+                            "failed to write ignore file {}: {err:#?}",
+                            ignore_path.display()
+                        );
+                    }
+
+                    return Ok(());
+                }
+
+                tracing::warn!("invalid backup field name: {name}");
                 return Ok(());
             }
         };
@@ -206,6 +347,11 @@ impl BackupReceiver {
                     tracing::warn!("invalid backup file name: {file_name}");
                     return Ok(());
                 }
+
+                let Ok(archive_format) = ArchiveFormat::from_str(&file_name) else {
+                    tracing::warn!("invalid backup file format: {file_name}");
+                    return Ok(());
+                };
 
                 let file_name =
                     Path::new(&self.state.config.load().system.backup_directory).join(file_name);
@@ -254,13 +400,161 @@ impl BackupReceiver {
                     return Ok(());
                 }
 
-                self.received.push(uuid);
-                self.checksum = Some(hex::encode(reader.finish()));
+                let checksum = hex::encode(reader.finish());
+
+                self.received.uuids.push(uuid);
+                self.received.migrations.insert(
+                    uuid,
+                    BackupMigration {
+                        checksum: checksum.clone(),
+                        checksum_type: "sha256".into(),
+                        browsable: matches!(
+                            archive_format,
+                            ArchiveFormat::Zip | ArchiveFormat::SevenZip
+                        ),
+                        streaming: false,
+                    },
+                );
+                self.checksum = Some(checksum);
 
                 tracing::debug!(
                     "backup file {} transferred successfully",
                     file_name.display()
                 );
+            }
+            Some("backup/btrfs") => {
+                use crate::server::backup::adapters::btrfs::BtrfsBackup;
+
+                let backup_path = BtrfsBackup::get_backup_path(&self.state.config, uuid);
+                let subvolume_path = BtrfsBackup::get_subvolume_path(&self.state.config, uuid);
+
+                if std::fs::metadata(&subvolume_path).is_ok() {
+                    std::process::Command::new("btrfs")
+                        .args(["subvolume", "delete"])
+                        .arg(&subvolume_path)
+                        .output()
+                        .ok();
+                }
+
+                if let Err(err) = std::fs::create_dir_all(&backup_path) {
+                    tracing::error!(
+                        "failed to create btrfs backup directory {}: {err:#?}",
+                        backup_path.display()
+                    );
+                    return Ok(());
+                }
+
+                let reader =
+                    tokio_util::io::StreamReader::new(field.into_stream().map_err(|err| {
+                        std::io::Error::other(format!("failed to read multipart field: {err}"))
+                    }));
+                let reader = tokio_util::io::SyncIoBridge::new(reader);
+                let reader = AbortReader::new(reader, self.listener.clone());
+                let reader = LimitedReader::new_with_bytes_per_second(
+                    reader,
+                    self.state
+                        .config
+                        .load()
+                        .system
+                        .transfers
+                        .download_limit
+                        .as_bytes(),
+                );
+                let mut reader = HashReader::new_with_hasher(reader, sha2::Sha256::new());
+
+                let mut child = match std::process::Command::new("btrfs")
+                    .arg("receive")
+                    .arg(&backup_path)
+                    .stdin(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                {
+                    Ok(child) => child,
+                    Err(err) => {
+                        tracing::error!("failed to spawn btrfs receive: {err:#?}");
+                        return Ok(());
+                    }
+                };
+
+                let mut stdin = child.stdin.take().expect("btrfs receive stdin");
+                let stderr = child.stderr.take().expect("btrfs receive stderr");
+                let stderr_handle = std::thread::spawn(move || {
+                    let mut buffer = Vec::new();
+                    std::io::Read::read_to_end(&mut std::io::BufReader::new(stderr), &mut buffer)
+                        .ok();
+                    buffer
+                });
+
+                let copy_result = crate::io::copy(&mut reader, &mut stdin);
+                drop(stdin);
+
+                if copy_result.is_err() {
+                    child.kill().ok();
+                }
+
+                let status = child.wait();
+                let stderr =
+                    String::from_utf8_lossy(&stderr_handle.join().unwrap_or_default()).into_owned();
+
+                if copy_result.is_ok() && status.as_ref().is_ok_and(|s| s.success()) {
+                    self.received.uuids.push(uuid);
+                    self.checksum = Some(hex::encode(reader.finish()));
+
+                    let mut generation = None;
+                    let mut subvolume_uuid = None;
+                    if let Ok(output) = std::process::Command::new("btrfs")
+                        .args(["subvolume", "show"])
+                        .arg(&subvolume_path)
+                        .output()
+                        && output.status.success()
+                    {
+                        let output = String::from_utf8_lossy(&output.stdout);
+                        for line in output.lines() {
+                            let mut whitespace = line.split_whitespace();
+                            match whitespace.next() {
+                                Some("Generation:") => {
+                                    generation =
+                                        whitespace.next().and_then(|v| v.parse::<u64>().ok())
+                                }
+                                Some("UUID:") => {
+                                    subvolume_uuid = whitespace
+                                        .next()
+                                        .and_then(|v| uuid::Uuid::parse_str(v).ok())
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+
+                    self.received.migrations.insert(
+                        uuid,
+                        BackupMigration {
+                            checksum: format!(
+                                "{}-{}",
+                                generation.unwrap_or_default(),
+                                subvolume_uuid.unwrap_or_default()
+                            ),
+                            checksum_type: "btrfs-subvolume".into(),
+                            browsable: true,
+                            streaming: true,
+                        },
+                    );
+
+                    tracing::debug!("btrfs backup {uuid} received successfully");
+                } else {
+                    tracing::error!(
+                        "failed to receive btrfs backup {uuid}: copy={copy_result:?}, status={status:?}, stderr={stderr}"
+                    );
+
+                    if std::fs::metadata(&subvolume_path).is_ok() {
+                        std::process::Command::new("btrfs")
+                            .args(["subvolume", "delete"])
+                            .arg(&subvolume_path)
+                            .output()
+                            .ok();
+                    }
+                    std::fs::remove_dir_all(&backup_path).ok();
+                }
             }
             _ => {
                 tracing::warn!(
