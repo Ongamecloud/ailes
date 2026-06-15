@@ -148,6 +148,28 @@ impl BtrfsBackup {
         }
     }
 
+    pub fn filesystem_mount_point(path: &Path) -> Option<PathBuf> {
+        let target = std::fs::canonicalize(path).ok()?;
+        let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
+
+        let mut best: Option<PathBuf> = None;
+        for line in mountinfo.lines() {
+            if let Some(mount_point) = line.split(' ').nth(4) {
+                let mount_point = PathBuf::from(mount_point);
+
+                if target.starts_with(&mount_point)
+                    && best
+                        .as_ref()
+                        .is_none_or(|best| mount_point.as_os_str().len() > best.as_os_str().len())
+                {
+                    best = Some(mount_point);
+                }
+            }
+        }
+
+        best
+    }
+
     pub async fn cleanup_send_dir(send_dir: &Path) {
         let send_path = send_dir.join("subvolume");
 

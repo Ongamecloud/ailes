@@ -500,8 +500,13 @@ impl BackupReceiver {
                 );
                 let mut reader = HashReader::new_with_hasher(reader, sha2::Sha256::new());
 
-                let mut child = match std::process::Command::new("btrfs")
-                    .arg("receive")
+                let mut command = std::process::Command::new("btrfs");
+                command.arg("receive");
+                if let Some(mount_point) = BtrfsBackup::filesystem_mount_point(&backup_path) {
+                    command.arg("-m").arg(mount_point);
+                }
+
+                let mut child = match command
                     .arg(&backup_path)
                     .stdin(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::piped())
