@@ -23,19 +23,48 @@ use std::{
 };
 use tokio::sync::Mutex;
 
-impl super::manager::BackupManager {
-    #[allow(clippy::too_many_arguments)]
-    pub async fn append_transfer_part(
-        &self,
+pub struct BackupSender {
+    state: crate::routes::State,
+    capabilities: Option<crate::server::transfer::TransferCapabilities>,
+    bytes_archived: Arc<AtomicU64>,
+    bytes_sent: Arc<AtomicU64>,
+    bytes_total: Arc<AtomicU64>,
+
+    btrfs_parent: Option<std::path::PathBuf>,
+    btrfs_cleanup_dirs: Vec<std::path::PathBuf>,
+}
+
+impl BackupSender {
+    pub fn new(
         state: &crate::routes::State,
         capabilities: Option<&crate::server::transfer::TransferCapabilities>,
-        form: reqwest::multipart::Form,
-        uuid: uuid::Uuid,
         bytes_archived: &Arc<AtomicU64>,
         bytes_sent: &Arc<AtomicU64>,
         bytes_total: &Arc<AtomicU64>,
+    ) -> Self {
+        Self {
+            state: Arc::clone(state),
+            capabilities: capabilities.copied(),
+            bytes_archived: Arc::clone(bytes_archived),
+            bytes_sent: Arc::clone(bytes_sent),
+            bytes_total: Arc::clone(bytes_total),
+            btrfs_parent: None,
+            btrfs_cleanup_dirs: Vec::new(),
+        }
+    }
+
+    pub async fn finish(self) {
+        for dir in self.btrfs_cleanup_dirs {
+            crate::server::backup::adapters::btrfs::BtrfsBackup::cleanup_send_dir(&dir).await;
+        }
+    }
+
+    pub async fn append_part(
+        &mut self,
+        form: reqwest::multipart::Form,
+        uuid: uuid::Uuid,
     ) -> reqwest::multipart::Form {
-        let backup = match self.find(state, uuid).await {
+        let backup = match self.state.backup_manager.find(&self.state, uuid).await {
             Ok(Some(backup)) => backup,
             Ok(None) => {
                 tracing::warn!(backup = %uuid, "requested backup does not exist");
@@ -68,7 +97,7 @@ impl super::manager::BackupManager {
                     }
                 };
 
-                bytes_total.fetch_add(
+                self.bytes_total.fetch_add(
                     file.metadata().await.map(|m| m.len()).unwrap_or(0),
                     Ordering::Relaxed,
                 );
@@ -81,7 +110,7 @@ impl super::manager::BackupManager {
                 }
             }
             super::Backup::Btrfs(backup) => {
-                let Some(capabilities) = capabilities else {
+                let Some(capabilities) = self.capabilities else {
                     tracing::warn!(
                         backup = %uuid,
                         "destination capabilities unknown, cannot convert btrfs backup, skipping"
@@ -89,11 +118,14 @@ impl super::manager::BackupManager {
                     return form;
                 };
 
-                let native_reader = if capabilities.disk_limiter_mode
+                let native_stream = if capabilities.disk_limiter_mode
                     == crate::server::filesystem::limiter::DiskLimiterMode::BtrfsSubvolume
                 {
-                    match backup.open_send_stream(state).await {
-                        Ok(reader) => Some(reader),
+                    match backup
+                        .open_send_stream(&self.state, self.btrfs_parent.as_deref())
+                        .await
+                    {
+                        Ok(stream) => Some(stream),
                         Err(err) => {
                             tracing::warn!(
                                 backup = %uuid,
@@ -106,15 +138,21 @@ impl super::manager::BackupManager {
                     None
                 };
 
-                if let Some(reader) = native_reader {
+                if let Some(stream) = native_stream {
+                    self.btrfs_parent = Some(stream.snapshot_path);
+                    self.btrfs_cleanup_dirs.push(stream.send_dir);
+
                     let ignore = tokio::fs::read_to_string(
-                        super::adapters::btrfs::BtrfsBackup::get_ignore_path(&state.config, uuid),
+                        super::adapters::btrfs::BtrfsBackup::get_ignore_path(
+                            &self.state.config,
+                            uuid,
+                        ),
                     )
                     .await
                     .unwrap_or_default();
 
                     TransferPart {
-                        reader: Box::pin(reader),
+                        reader: Box::pin(stream.stdout),
                         file_name: format!("{uuid}.btrfs"),
                         content_type: "backup/btrfs",
                         ignore: Some(ignore),
@@ -140,7 +178,7 @@ impl super::manager::BackupManager {
 
                     let reader = match backup
                         .open_archive_stream(
-                            state,
+                            &self.state,
                             archive_format,
                             capabilities.wings_archive_compression_level,
                         )
@@ -175,8 +213,8 @@ impl super::manager::BackupManager {
 
         let hasher = Arc::new(Mutex::new(sha2::Sha256::new()));
         let reader =
-            AsyncCountingReader::new_with_bytes_read(part.reader, Arc::clone(bytes_archived));
-        let reader = AsyncCountingReader::new_with_bytes_read(reader, Arc::clone(bytes_sent));
+            AsyncCountingReader::new_with_bytes_read(part.reader, Arc::clone(&self.bytes_archived));
+        let reader = AsyncCountingReader::new_with_bytes_read(reader, Arc::clone(&self.bytes_sent));
         let reader = AsyncHashReader::new_with_hasher(reader, Arc::clone(&hasher)).await;
 
         let (checksum_sender, checksum_receiver) = tokio::sync::oneshot::channel();

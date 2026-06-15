@@ -525,18 +525,15 @@ impl OutgoingServerTransfer {
                 }
             };
 
+            let mut backup_sender = crate::server::backup::transfer::BackupSender::new(
+                &server.app_state,
+                destination_capabilities.as_ref(),
+                &bytes_archived,
+                &bytes_sent,
+                &bytes_total,
+            );
             for backup in &backups {
-                form = backup_manager
-                    .append_transfer_part(
-                        &server.app_state,
-                        destination_capabilities.as_ref(),
-                        form,
-                        *backup,
-                        &bytes_archived,
-                        &bytes_sent,
-                        &bytes_total,
-                    )
-                    .await;
+                form = backup_sender.append_part(form, *backup).await;
             }
 
             let progress_task = Box::pin({
@@ -797,12 +794,15 @@ impl OutgoingServerTransfer {
                             err
                         );
 
+                        backup_sender.finish().await;
                         Self::transfer_failure(&server).await;
                         return;
                     }
                 }
                 _ = progress_task => {}
             };
+
+            backup_sender.finish().await;
 
             Self::log(&server, "Finished streaming archive to destination.");
 
