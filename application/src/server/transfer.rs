@@ -851,19 +851,20 @@ impl OutgoingServerTransfer {
                 "finished outgoing server transfer"
             );
 
+            server
+                .websocket
+                .send(
+                    super::websocket::WebsocketMessage::builder(
+                        super::websocket::WebsocketEvent::ServerTransferStatus,
+                    )
+                    .arg("completed")
+                    .build(),
+                )
+                .ok();
+
             tokio::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
-                server
-                    .websocket
-                    .send(
-                        super::websocket::WebsocketMessage::builder(
-                            super::websocket::WebsocketEvent::ServerTransferStatus,
-                        )
-                        .arg("completed")
-                        .build(),
-                    )
-                    .ok();
                 server.user_permissions.clear_permissions();
             });
         }));
