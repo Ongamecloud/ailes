@@ -20,6 +20,7 @@ pub enum Backup {
     Zfs(adapters::zfs::ZfsBackup),
     Restic(adapters::restic::ResticBackup),
     ProxmoxBackupServer(adapters::pbs::PbsBackup),
+    Kopia(adapters::kopia::KopiaBackup),
 }
 
 impl Backup {
@@ -32,6 +33,7 @@ impl Backup {
             Backup::Zfs(backup) => backup.uuid(),
             Backup::Restic(backup) => backup.uuid(),
             Backup::ProxmoxBackupServer(backup) => backup.uuid(),
+            Backup::Kopia(backup) => backup.uuid(),
         }
     }
 
@@ -45,6 +47,7 @@ impl Backup {
             Backup::Zfs(_) => adapters::BackupAdapter::Zfs,
             Backup::Restic(_) => adapters::BackupAdapter::Restic,
             Backup::ProxmoxBackupServer(_) => adapters::BackupAdapter::ProxmoxBackupServer,
+            Backup::Kopia(_) => adapters::BackupAdapter::Kopia,
         }
     }
 
@@ -64,6 +67,7 @@ impl Backup {
             Backup::ProxmoxBackupServer(backup) => {
                 backup.download(state, archive_format, range).await
             }
+            Backup::Kopia(backup) => backup.download(state, archive_format, range).await,
         }
     }
 
@@ -84,6 +88,7 @@ impl Backup {
             Backup::ProxmoxBackupServer(backup) => {
                 backup.restore(server, progress, total, download_url).await
             }
+            Backup::Kopia(backup) => backup.restore(server, progress, total, download_url).await,
         }
     }
 
@@ -96,6 +101,7 @@ impl Backup {
             Backup::Zfs(backup) => backup.delete(state).await,
             Backup::Restic(backup) => backup.delete(state).await,
             Backup::ProxmoxBackupServer(backup) => backup.delete(state).await,
+            Backup::Kopia(backup) => backup.delete(state).await,
         }
     }
 
@@ -111,6 +117,7 @@ impl Backup {
             Backup::Zfs(backup) => backup.browse(server).await,
             Backup::Restic(backup) => backup.browse(server).await,
             Backup::ProxmoxBackupServer(backup) => backup.browse(server).await,
+            Backup::Kopia(backup) => backup.browse(server).await,
         }
     }
 }

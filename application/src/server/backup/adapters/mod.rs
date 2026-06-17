@@ -8,6 +8,7 @@ use utoipa::ToSchema;
 
 pub mod btrfs;
 pub mod ddup_bak;
+pub mod kopia;
 pub mod pbs;
 pub mod restic;
 pub mod s3;
@@ -25,6 +26,7 @@ pub enum BackupAdapter {
     Zfs,
     Restic,
     ProxmoxBackupServer,
+    Kopia,
 }
 
 impl BackupAdapter {
@@ -38,6 +40,7 @@ impl BackupAdapter {
             Self::Zfs,
             Self::Restic,
             Self::ProxmoxBackupServer,
+            Self::Kopia,
         ]
     }
 
@@ -51,6 +54,7 @@ impl BackupAdapter {
             Self::Zfs => "zfs",
             Self::Restic => "restic",
             Self::ProxmoxBackupServer => "proxmox-backup-server",
+            Self::Kopia => "kopia",
         }
     }
 }
@@ -79,6 +83,9 @@ impl BackupAdapter {
                 BackupAdapter::ProxmoxBackupServer => {
                     <pbs::PbsBackup as BackupFindExt>::find(state, uuid).await
                 }
+                BackupAdapter::Kopia => {
+                    <kopia::KopiaBackup as BackupFindExt>::find(state, uuid).await
+                }
             }? {
                 return Ok(Some((*adapter, backup)));
             }
@@ -100,6 +107,7 @@ impl BackupAdapter {
             BackupAdapter::Zfs => zfs::ZfsBackup::find(state, uuid).await,
             BackupAdapter::Restic => restic::ResticBackup::find(state, uuid).await,
             BackupAdapter::ProxmoxBackupServer => pbs::PbsBackup::find(state, uuid).await,
+            BackupAdapter::Kopia => kopia::KopiaBackup::find(state, uuid).await,
         }
     }
 
@@ -136,6 +144,9 @@ impl BackupAdapter {
             BackupAdapter::ProxmoxBackupServer => {
                 pbs::PbsBackup::create(server, uuid, progress, total, ignore, ignore_raw).await
             }
+            BackupAdapter::Kopia => {
+                kopia::KopiaBackup::create(server, uuid, progress, total, ignore, ignore_raw).await
+            }
         }
     }
 
@@ -152,6 +163,7 @@ impl BackupAdapter {
             BackupAdapter::Zfs => zfs::ZfsBackup::clean(server, uuid).await,
             BackupAdapter::Restic => restic::ResticBackup::clean(server, uuid).await,
             BackupAdapter::ProxmoxBackupServer => pbs::PbsBackup::clean(server, uuid).await,
+            BackupAdapter::Kopia => kopia::KopiaBackup::clean(server, uuid).await,
         }
     }
 }

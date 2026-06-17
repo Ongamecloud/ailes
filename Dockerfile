@@ -1,7 +1,11 @@
+FROM kopia/kopia:latest AS kopia
 FROM alpine:latest
 
 RUN apk add --no-cache ca-certificates coreutils curl btrfs-progs xfsprogs-extra zfs restic && \
 	update-ca-certificates
+RUN rm -rf /var/lib/apt/lists/*
+
+COPY --from=kopia /bin/kopia /usr/bin/kopia
 
 # Add calagopus-wings and entrypoint
 ARG TARGETPLATFORM

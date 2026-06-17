@@ -704,9 +704,9 @@ impl DockerProcessHandle {
                                 let Some(line_slice) = buffer.get(line_start..newline_pos) else {
                                     break;
                                 };
-                                let line = compact_str::CompactString::from_utf8_lossy(line_slice)
-                                    .trim()
-                                    .into();
+                                let line = compact_str::CompactString::from_utf8_lossy(
+                                    line_slice.trim_ascii(),
+                                );
 
                                 let line = Arc::new(line);
 
@@ -722,9 +722,9 @@ impl DockerProcessHandle {
                                 else {
                                     break;
                                 };
-                                let line = compact_str::CompactString::from_utf8_lossy(line_slice)
-                                    .trim()
-                                    .into();
+                                let line = compact_str::CompactString::from_utf8_lossy(
+                                    line_slice.trim_ascii(),
+                                );
 
                                 let line = Arc::new(line);
 
@@ -743,9 +743,9 @@ impl DockerProcessHandle {
                                 else {
                                     break;
                                 };
-                                let line = compact_str::CompactString::from_utf8_lossy(line_slice)
-                                    .trim()
-                                    .into();
+                                let line = compact_str::CompactString::from_utf8_lossy(
+                                    line_slice.trim_ascii(),
+                                );
 
                                 let line = Arc::new(line);
 
@@ -771,9 +771,7 @@ impl DockerProcessHandle {
                 if let Some(line_slice) = buffer.get(line_start..)
                     && !line_slice.is_empty()
                 {
-                    let line = compact_str::CompactString::from_utf8_lossy(line_slice)
-                        .trim()
-                        .into();
+                    let line = compact_str::CompactString::from_utf8_lossy(line_slice.trim_ascii());
 
                     let line = Arc::new(line);
 

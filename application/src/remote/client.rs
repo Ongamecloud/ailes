@@ -346,9 +346,19 @@ impl Client {
         &self,
         uuid: uuid::Uuid,
     ) -> Result<super::backups::PbsBackupConfiguration, anyhow::Error> {
-        tracing::info!("getting Proxmox Backup Server backup configuration");
+        tracing::info!("getting proxmox backup server backup configuration");
 
         super::backups::backup_pbs_configuration(self, uuid).await
+    }
+
+    #[tracing::instrument(skip(self))]
+    pub async fn backup_kopia_configuration(
+        &self,
+        uuid: uuid::Uuid,
+    ) -> Result<super::backups::KopiaBackupConfiguration, anyhow::Error> {
+        tracing::info!("getting kopia backup configuration");
+
+        super::backups::backup_kopia_configuration(self, uuid).await
     }
 
     #[tracing::instrument(skip(self))]

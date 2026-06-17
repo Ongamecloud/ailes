@@ -37,7 +37,11 @@ use std::{
         atomic::{AtomicU64, Ordering},
     },
 };
-use tokio::{io::AsyncBufReadExt, process::Command, sync::RwLock};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncReadExt},
+    process::Command,
+    sync::RwLock,
+};
 
 type ResticBackupCache =
     RwLock<HashMap<uuid::Uuid, (ResticSnapshot, Arc<ResticBackupConfiguration>)>>;
@@ -1108,7 +1112,7 @@ impl BackupExt for ResticBackup {
         &self,
         server: &crate::server::Server,
     ) -> Result<Arc<dyn VirtualReadableFilesystem>, anyhow::Error> {
-        let child = Command::new("restic")
+        let mut child = Command::new("restic")
             .envs(&self.configuration.environment)
             .arg("--json")
             .arg("--repo")
@@ -1123,29 +1127,45 @@ impl BackupExt for ResticBackup {
             .arg("/")
             .arg("--recursive")
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
             .spawn()?;
 
-        let mut line_reader = tokio::io::BufReader::new(child.into_stdout()?).lines();
-        let mut entries: Vec<ResticDirectoryEntry> = Vec::new();
+        let mut entries = Vec::new();
 
-        while let Ok(Some(line)) = line_reader.next_line().await {
-            if line.is_empty() {
-                continue;
-            }
+        if let Some(stdout) = child.stdout.take() {
+            let mut line_reader = tokio::io::BufReader::new(stdout).lines();
 
-            if let Ok(mut entry) = serde_json::from_str::<ResticDirectoryEntry>(&line) {
-                entry.path = entry
-                    .path
-                    .strip_prefix(Path::new("/"))
-                    .unwrap_or(&entry.path)
-                    .to_owned();
+            while let Ok(Some(line)) = line_reader.next_line().await {
+                if line.is_empty() {
+                    continue;
+                }
 
-                entries.push(entry);
+                if let Ok(mut entry) = serde_json::from_str::<ResticDirectoryEntry>(&line) {
+                    entry.path = entry
+                        .path
+                        .strip_prefix(Path::new("/"))
+                        .unwrap_or(&entry.path)
+                        .to_owned();
+
+                    entries.push(entry);
+                }
             }
         }
 
-        let tree = ResticTreeNode::build(entries);
+        let status = child.wait().await?;
+        if !status.success()
+            && let Some(mut stderr) = child.stderr.take()
+        {
+            let mut stderr_out = String::new();
+            stderr.read_to_string(&mut stderr_out).await?;
+
+            tracing::error!(
+                "failed to list Kopia snapshot for browsing: {}",
+                stderr_out.trim()
+            );
+        }
+
+        let tree = tokio::task::block_in_place(|| ResticTreeNode::build(entries));
 
         Ok(Arc::new(VirtualResticBackup {
             server: server.clone(),

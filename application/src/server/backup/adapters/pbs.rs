@@ -33,7 +33,6 @@ use pbs_client::{
     accessor::{ArchiveEntry, ArchiveEntryKind, PbsArchive},
     config::PbsConfig,
     manifest::{BackupManifest, MANIFEST_BLOB_NAME},
-    naming,
     pxar::{EntryKind, decoder::Decoder},
     reader::PbsBackupReader,
     rest::PbsClient,
@@ -93,7 +92,7 @@ impl BackupFindExt for PbsBackup {
         let backup_time = remote.backup_created.timestamp();
 
         let config = build_config(remote);
-        let backup_id = naming::backup_id(config.id_prefix(), server_uuid);
+        let backup_id = pbs_client::naming::backup_id(config.id_prefix(), server_uuid);
 
         Ok(Some(Backup::ProxmoxBackupServer(PbsBackup {
             uuid,
@@ -124,7 +123,7 @@ impl BackupCreateExt for PbsBackup {
         let config = build_config(remote);
         config.validate().map_err(|err| anyhow::anyhow!("{err}"))?;
 
-        let backup_id = naming::backup_id(config.id_prefix(), server.uuid);
+        let backup_id = pbs_client::naming::backup_id(config.id_prefix(), server.uuid);
 
         let (archive_reader, archive_writer) = tokio::io::simplex(crate::BUFFER_SIZE);
 
@@ -150,6 +149,7 @@ impl BackupCreateExt for PbsBackup {
                         total_files += 1;
                     }
                 }
+
                 Ok::<_, anyhow::Error>(total_files)
             }
         };
@@ -242,8 +242,11 @@ impl BackupCreateExt for PbsBackup {
                     .upload_blob(META_BLOB_NAME, &serde_json::to_vec(&metadata)?)
                     .await?;
 
-                let mut manifest =
-                    BackupManifest::new(naming::BACKUP_TYPE, backup_id.as_str(), backup_time);
+                let mut manifest = BackupManifest::new(
+                    pbs_client::naming::BACKUP_TYPE,
+                    backup_id.as_str(),
+                    backup_time,
+                );
                 let checksum = archive.file.csum.clone();
                 manifest.add_file(archive.file);
                 manifest.add_file(catalog_file.file);
@@ -293,11 +296,10 @@ impl BackupExt for PbsBackup {
         let session =
             PbsBackupReader::connect(&self.config, &self.backup_id, self.backup_time).await?;
 
-        let (pxar_reader, pxar_writer) = tokio::io::simplex(crate::BUFFER_SIZE);
+        let (pxar_reader, mut pxar_writer) = tokio::io::simplex(crate::BUFFER_SIZE);
         let (reader, writer) = tokio::io::simplex(crate::BUFFER_SIZE);
 
         tokio::spawn(async move {
-            let mut pxar_writer = pxar_writer;
             if let Err(err) = session.reassemble_archive(&mut pxar_writer, None).await {
                 tracing::error!("failed to reassemble PBS archive for download: {:?}", err);
             }
@@ -692,7 +694,7 @@ impl BackupExt for PbsBackup {
     }
 
     async fn delete(&self, state: &crate::routes::State) -> Result<(), anyhow::Error> {
-        if !naming::is_calagopus_id(self.config.id_prefix(), &self.backup_id) {
+        if !pbs_client::naming::is_calagopus_id(self.config.id_prefix(), &self.backup_id) {
             return Err(anyhow::anyhow!(
                 "refusing to delete PBS snapshot with non-Calagopus backup-id '{}'",
                 self.backup_id
@@ -706,7 +708,11 @@ impl BackupExt for PbsBackup {
 
         let client = PbsClient::new(self.config.clone())?;
         client
-            .delete_snapshot(naming::BACKUP_TYPE, &self.backup_id, self.backup_time)
+            .delete_snapshot(
+                pbs_client::naming::BACKUP_TYPE,
+                &self.backup_id,
+                self.backup_time,
+            )
             .await?;
 
         Ok(())

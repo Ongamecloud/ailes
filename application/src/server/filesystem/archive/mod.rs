@@ -800,15 +800,6 @@ impl Archive {
                     let month = (dos_time >> 21) & 0x0F;
                     let year = ((dos_time >> 25) & 0x7F) + 1980;
 
-                    if seconds >= 60
-                        || minutes >= 60
-                        || hours >= 24
-                        || !(1..=31).contains(&day)
-                        || !(1..=12).contains(&month)
-                    {
-                        return None;
-                    }
-
                     let date = chrono::NaiveDate::from_ymd_opt(year as i32, month, day)?;
                     let time = chrono::NaiveTime::from_hms_opt(hours, minutes, seconds)?;
 
@@ -823,7 +814,7 @@ impl Archive {
                         let mut entry_total = 0;
                         let archive = unrar::Archive::new_owned(
                             #[cfg(target_os = "linux")]
-                            PathBuf::from("/proc/self/fd")
+                            Path::new("/proc/self/fd")
                                 .join(std::os::fd::AsRawFd::as_raw_fd(&self.file).to_string()),
                             #[cfg(not(target_os = "linux"))]
                             self.server

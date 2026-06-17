@@ -54,9 +54,16 @@ pub struct PbsBackupConfiguration {
     pub backup_id_prefix: Option<String>,
     #[serde(default)]
     pub server_uuid: Option<uuid::Uuid>,
-    /// The backup's creation time; its Unix timestamp is used as the PBS
-    /// snapshot `backup-time` at create and at restore/delete.
     pub backup_created: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone, ToSchema, Deserialize)]
+pub struct KopiaBackupConfiguration {
+    pub url: String,
+    pub username: String,
+    pub password: String,
+    pub fingerprint: String,
+    pub tags: BTreeMap<String, String>,
 }
 
 pub async fn set_backup_status(
@@ -174,6 +181,24 @@ pub async fn backup_pbs_configuration(
         client
             .client
             .get(format!("{}/backups/{}/pbs", client.url, uuid))
+            .send()
+            .await?
+            .error_for_status()?
+            .text()
+            .await?,
+    )?;
+
+    Ok(response)
+}
+
+pub async fn backup_kopia_configuration(
+    client: &Client,
+    uuid: uuid::Uuid,
+) -> Result<KopiaBackupConfiguration, anyhow::Error> {
+    let response: KopiaBackupConfiguration = super::into_json(
+        client
+            .client
+            .get(format!("{}/backups/{}/kopia", client.url, uuid))
             .send()
             .await?
             .error_for_status()?
