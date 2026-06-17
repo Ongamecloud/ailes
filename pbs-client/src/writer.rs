@@ -17,6 +17,8 @@ const MIN_CHUNK_SIZE: usize = 1024 * 1024;
 const AVG_CHUNK_SIZE: usize = 4 * 1024 * 1024;
 const MAX_CHUNK_SIZE: usize = 16 * 1024 * 1024;
 
+const INDEX_BATCH_SIZE: usize = 256;
+
 fn stream_chunker<R: Read>(reader: R) -> fastcdc::v2020::StreamCDC<R> {
     fastcdc::v2020::StreamCDC::new(reader, MIN_CHUNK_SIZE, AVG_CHUNK_SIZE, MAX_CHUNK_SIZE)
 }
@@ -164,6 +166,11 @@ impl PbsBackupWriter {
             entries.push((end_offset, digest));
             digest_list.push(hex::encode(digest));
             offset_list.push(start_offset);
+
+            if digest_list.len() >= INDEX_BATCH_SIZE {
+                Self::register_chunks(&mut self.transport, wid, &mut digest_list, &mut offset_list)
+                    .await?;
+            }
         }
 
         producer
@@ -171,17 +178,7 @@ impl PbsBackupWriter {
             .map_err(|err| PbsError::Transport(err.to_string().into()))?;
 
         if !digest_list.is_empty() {
-            self.transport
-                .send_json(
-                    hyper::Method::PUT,
-                    "dynamic_index",
-                    &[],
-                    &serde_json::json!({
-                        "wid": wid,
-                        "digest-list": digest_list,
-                        "offset-list": offset_list,
-                    }),
-                )
+            Self::register_chunks(&mut self.transport, wid, &mut digest_list, &mut offset_list)
                 .await?;
         }
 
@@ -202,6 +199,30 @@ impl PbsBackupWriter {
             file: FileInfo::new(archive_name, end_offset, &csum),
             size: end_offset,
         })
+    }
+
+    async fn register_chunks(
+        transport: &mut H2Transport,
+        wid: u64,
+        digest_list: &mut Vec<String>,
+        offset_list: &mut Vec<u64>,
+    ) -> Result<(), PbsError> {
+        transport
+            .send_json(
+                hyper::Method::PUT,
+                "dynamic_index",
+                &[],
+                &serde_json::json!({
+                    "wid": wid,
+                    "digest-list": digest_list,
+                    "offset-list": offset_list,
+                }),
+            )
+            .await?;
+        digest_list.clear();
+        offset_list.clear();
+
+        Ok(())
     }
 
     pub async fn upload_blob(
