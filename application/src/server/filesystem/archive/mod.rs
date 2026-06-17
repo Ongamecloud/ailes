@@ -816,11 +816,16 @@ impl Archive {
                 }
 
                 tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
+                    #[cfg(not(target_os = "linux"))]
                     drop(self.file);
 
                     if let Some(total) = total {
                         let mut entry_total = 0;
                         let archive = unrar::Archive::new_owned(
+                            #[cfg(target_os = "linux")]
+                            PathBuf::from("/proc/self/fd")
+                                .join(std::os::fd::AsRawFd::as_raw_fd(&self.file).to_string()),
+                            #[cfg(not(target_os = "linux"))]
                             self.server
                                 .filesystem
                                 .base_path
