@@ -35,6 +35,7 @@ pub enum ArchiveType {
     Rar,
     SevenZip,
     Ddup,
+    Pxar,
 }
 
 #[derive(Debug, ToSchema, Deserialize, Serialize, Default, Clone, Copy)]
@@ -377,15 +378,20 @@ impl Archive {
                     ArchiveType::Tar
                 }
                 Some(ext) if ext == "ddup" => ArchiveType::Ddup,
-                _ => path.file_stem().map_or(ArchiveType::None, |stem| {
-                    if stem.to_str().is_some_and(|s| s.ends_with(".tar")) {
-                        ArchiveType::Tar
-                    } else {
-                        ArchiveType::None
-                    }
-                }),
+                Some(ext) if ext == "pxar" => ArchiveType::Pxar,
+                _ => path
+                    .file_stem()
+                    .map_or(ArchiveType::None, |stem| match stem.to_str() {
+                        Some(s) if s.ends_with(".tar") => ArchiveType::Tar,
+                        Some(s) if s.ends_with(".pxar") => ArchiveType::Pxar,
+                        _ => ArchiveType::None,
+                    }),
             }
         };
+
+        if pbs_client::pxar::is_pxar_header(header) {
+            return (CompressionType::None, ArchiveType::Pxar);
+        }
 
         match inferred.map(|f| f.mime_type()) {
             Some("application/zip") => (CompressionType::None, ArchiveType::Zip),
@@ -1239,6 +1245,126 @@ impl Archive {
 
                         Ok(())
                     })
+                })
+                .await??;
+
+                drop(guard);
+            }
+            ArchiveType::Pxar => {
+                let file = self.file.into_std().await;
+                let (guard, listener) = AbortGuard::new();
+
+                tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
+                    let reader: Box<dyn ReadSeek + Send> = match progress {
+                        Some(progress) => {
+                            Box::new(CountingReader::new_with_bytes_read(file, progress))
+                        }
+                        None => Box::new(file),
+                    };
+                    let reader = CompressionReaderMt::new(
+                        reader,
+                        self.compression,
+                        self.server
+                            .app_state
+                            .config
+                            .load()
+                            .api
+                            .file_decompression_threads,
+                    )?;
+                    let reader = AbortReader::new(reader, listener);
+                    let reader =
+                        std::io::BufReader::with_capacity(crate::TRANSFER_BUFFER_SIZE, reader);
+
+                    if let Some(total) = total
+                        && let Ok(metadata) = self.server.filesystem.metadata(&self.path)
+                    {
+                        total.store(metadata.len(), Ordering::Relaxed);
+                    }
+
+                    let mut decoder = pbs_client::pxar::decoder::Decoder::from_std(reader)?;
+                    let mut directory_entries = chunked_vec::ChunkedVec::new();
+                    let mut read_buffer = vec![0; crate::BUFFER_SIZE];
+
+                    while let Some(entry) = decoder.next() {
+                        let entry = entry?;
+
+                        let relative = match entry.path().strip_prefix("/") {
+                            Ok(relative) if !relative.as_os_str().is_empty() => relative,
+                            _ => continue,
+                        };
+                        let destination_path = destination.join(relative);
+
+                        let is_dir = matches!(entry.kind(), pbs_client::pxar::EntryKind::Directory);
+                        if self.server.filesystem.is_ignored(&destination_path, is_dir) {
+                            continue;
+                        }
+
+                        let stat = entry.metadata().stat;
+                        let permissions =
+                            PortablePermissions::from_mode((stat.mode & 0o7777) as u32);
+                        let modified_time = std::time::UNIX_EPOCH
+                            + std::time::Duration::from_secs(stat.mtime.secs.max(0) as u64);
+
+                        match entry.kind() {
+                            pbs_client::pxar::EntryKind::Directory => {
+                                self.server
+                                    .filesystem
+                                    .create_chowned_dir_all(&destination_path)?;
+                                self.server
+                                    .filesystem
+                                    .set_permissions(&destination_path, permissions)?;
+                                directory_entries.push((destination_path, modified_time));
+                            }
+                            pbs_client::pxar::EntryKind::File { .. } => {
+                                if let Some(parent) = destination_path.parent() {
+                                    self.server.filesystem.create_chowned_dir_all(parent)?;
+                                }
+
+                                let mut writer = super::file::ServerFile::new(
+                                    self.server.clone(),
+                                    &destination_path,
+                                    Some(permissions),
+                                    Some(modified_time),
+                                )?;
+
+                                if let Some(mut contents) = decoder.contents()? {
+                                    crate::io::copy_shared(
+                                        &mut read_buffer,
+                                        &mut contents,
+                                        &mut writer,
+                                    )?;
+                                }
+                                writer.flush()?;
+                            }
+                            pbs_client::pxar::EntryKind::Symlink(target) => {
+                                if let Err(err) = self
+                                    .server
+                                    .filesystem
+                                    .symlink(target.as_os_str(), &destination_path)
+                                {
+                                    tracing::debug!(
+                                        path = %destination_path.display(),
+                                        "failed to create symlink from archive: {:#?}",
+                                        err
+                                    );
+                                } else {
+                                    self.server.filesystem.set_times(
+                                        &destination_path,
+                                        modified_time,
+                                        None,
+                                    )?;
+                                }
+                            }
+                        }
+                    }
+
+                    for (destination_path, modified_time) in directory_entries {
+                        self.server
+                            .filesystem
+                            .set_times(&destination_path, modified_time, None)?;
+                    }
+
+                    Ok(())
                 })
                 .await??;
 

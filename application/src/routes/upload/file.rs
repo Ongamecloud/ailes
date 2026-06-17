@@ -410,7 +410,7 @@ mod post {
                                 },
                                 server_uuid: payload.server_uuid,
                                 user_ip,
-                                unique_id: payload.unique_id.clone(),
+                                unique_id: uuid::Uuid::new_v4().to_compact_string(),
                                 file_path: path.clone(),
                                 written_size,
                             })?);

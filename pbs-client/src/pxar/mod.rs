@@ -10,6 +10,14 @@ pub mod decoder;
 pub mod encoder;
 pub mod format;
 
+pub fn is_pxar_header(header: &[u8]) -> bool {
+    header
+        .get(..8)
+        .and_then(|bytes| bytes.try_into().ok())
+        .map(u64::from_le_bytes)
+        .is_some_and(|magic| magic == format::PXAR_ENTRY || magic == format::PXAR_FORMAT_VERSION)
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct StatxTimestamp {
     pub secs: i64,
