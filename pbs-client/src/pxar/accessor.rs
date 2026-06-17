@@ -2,19 +2,13 @@ use super::{
     format::GoodbyeItem,
     {Entry, EntryKind, Metadata, Stat, StatxTimestamp, Symlink},
 };
+use crate::osstr::{os_str_as_bytes, os_string_from_bytes};
+use positioned_io::ReadAt;
 use std::{
     ffi::OsStr,
     ops::Range,
-    os::unix::{
-        ffi::{OsStrExt, OsStringExt},
-        fs::FileExt,
-    },
     path::{Component, Path, PathBuf},
 };
-
-pub trait ReadAt {
-    fn read_at(&self, buf: &mut [u8], offset: u64) -> std::io::Result<usize>;
-}
 
 pub struct Accessor<T> {
     input: T,
@@ -116,7 +110,7 @@ impl<T: ReadAt + Clone> Directory<T> {
     }
 
     fn lookup_component(&self, name: &OsStr) -> std::io::Result<Option<FileEntry<T>>> {
-        let hash = super::format::hash_filename(name.as_bytes());
+        let hash = super::format::hash_filename(&os_str_as_bytes(name));
         let first =
             match super::format::bst_search_by(&self.table, 0, 0, |item| hash.cmp(&item.hash)) {
                 Some(index) => index,
@@ -176,10 +170,7 @@ impl<T: ReadAt + Clone> Directory<T> {
         }
         super::format::validate_filename(&name)?;
 
-        Ok((
-            std::ffi::OsString::from_vec(name),
-            file_ofs + header.full_size,
-        ))
+        Ok((os_string_from_bytes(name), file_ofs + header.full_size))
     }
 
     fn decode_cursor(&self, cursor: &Cursor) -> std::io::Result<FileEntry<T>> {
@@ -264,7 +255,7 @@ impl<T: ReadAt> FileContents<T> {
         let slice = buf
             .get_mut(..want)
             .ok_or_else(|| std::io::Error::other("pxar: read buffer too small"))?;
-        self.input.read_at(slice, self.start + offset)
+        self.input.read_at(self.start + offset, slice)
     }
 }
 
@@ -276,15 +267,9 @@ impl<T: ReadAt> std::io::Read for FileContents<T> {
     }
 }
 
-impl<T: ReadAt> FileExt for FileContents<T> {
-    fn read_at(&self, buf: &mut [u8], offset: u64) -> std::io::Result<usize> {
+impl<T: ReadAt> ReadAt for FileContents<T> {
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<usize> {
         self.read_window(buf, offset)
-    }
-
-    fn write_at(&self, _buf: &[u8], _offset: u64) -> std::io::Result<usize> {
-        Err(std::io::Error::other(
-            "pxar: archive contents are read-only",
-        ))
     }
 }
 
@@ -376,7 +361,7 @@ fn read_data(input: &impl ReadAt, offset: u64, size: u64) -> std::io::Result<Vec
 
 fn read_exact_at(input: &impl ReadAt, mut buf: &mut [u8], mut offset: u64) -> std::io::Result<()> {
     while !buf.is_empty() {
-        match input.read_at(buf, offset)? {
+        match input.read_at(offset, buf)? {
             0 => return Err(std::io::Error::other("pxar: unexpected EOF")),
             got => {
                 let rest = std::mem::take(&mut buf);

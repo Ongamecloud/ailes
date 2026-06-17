@@ -1,7 +1,7 @@
 use super::{Metadata, format::GoodbyeItem};
+use crate::osstr::os_str_as_bytes;
 use std::{
     io::{Read, Write},
-    os::unix::ffi::OsStrExt,
     path::Path,
 };
 
@@ -100,9 +100,9 @@ impl<W: Write> Encoder<W> {
         self.encode_filename(name)?;
         self.encode_metadata(metadata)?;
 
-        let target = target.as_os_str().as_bytes();
+        let target = os_str_as_bytes(target.as_os_str());
         let mut data = Vec::with_capacity(target.len() + 1);
-        data.extend_from_slice(target);
+        data.extend_from_slice(&target);
         data.push(0);
         self.write_header(super::format::PXAR_SYMLINK, data.len() as u64)?;
         self.write_all(&data)?;

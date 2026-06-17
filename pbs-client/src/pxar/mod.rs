@@ -1,6 +1,6 @@
+use super::osstr::os_str_from_bytes;
 use std::{
     ffi::OsStr,
-    os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -91,7 +91,7 @@ pub struct Symlink {
 impl Symlink {
     pub fn as_os_str(&self) -> &OsStr {
         let len = self.data.len().saturating_sub(1);
-        OsStr::from_bytes(self.data.get(..len).unwrap_or(&[]))
+        os_str_from_bytes(self.data.get(..len).unwrap_or(&[]))
     }
 }
 

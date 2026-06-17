@@ -1,10 +1,6 @@
 use super::{Entry, EntryKind, Metadata, Stat, StatxTimestamp, Symlink, format::Header};
-use std::{
-    ffi::OsString,
-    io::Read,
-    os::unix::ffi::{OsStrExt, OsStringExt},
-    path::PathBuf,
-};
+use crate::osstr::{os_str_as_bytes, os_string_from_bytes, os_string_into_bytes};
+use std::{io::Read, path::PathBuf};
 
 const SKIP_BUF_SIZE: usize = 4096;
 
@@ -99,7 +95,7 @@ impl<R: Read> Decoder<R> {
 
         self.path = PathBuf::from("/");
         self.path_lengths
-            .push(self.path.as_os_str().as_bytes().len());
+            .push(os_str_as_bytes(self.path.as_os_str()).len());
         self.state = State::InDirectory;
 
         Ok(Entry {
@@ -143,7 +139,7 @@ impl<R: Read> Decoder<R> {
             super::format::PXAR_FILENAME | super::format::PXAR_GOODBYE => {
                 self.pending = Some(next);
                 self.path_lengths
-                    .push(self.path.as_os_str().as_bytes().len());
+                    .push(os_str_as_bytes(self.path.as_os_str()).len());
                 self.state = State::InDirectory;
                 EntryKind::Directory
             }
@@ -183,10 +179,10 @@ impl<R: Read> Decoder<R> {
             .path_lengths
             .last()
             .ok_or_else(|| std::io::Error::other("pxar: path stack underflow"))?;
-        let mut bytes = std::mem::take(&mut self.path).into_os_string().into_vec();
+        let mut bytes = os_string_into_bytes(std::mem::take(&mut self.path).into_os_string());
         bytes.truncate(keep);
-        let mut path = PathBuf::from(OsString::from_vec(bytes));
-        path.push(OsString::from_vec(name.to_vec()));
+        let mut path = PathBuf::from(os_string_from_bytes(bytes));
+        path.push(os_string_from_bytes(name.to_vec()));
         self.path = path;
 
         Ok(())

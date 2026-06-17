@@ -26,6 +26,7 @@ hex = { workspace = true }
 tar = { workspace = true }
 siphasher = "1"
 compact_str = { workspace = true }
+positioned-io = { workspace = true }
 
 [lints.clippy]
 all = { level = "warn", priority = -1 }

@@ -1,4 +1,4 @@
-use super::{config::PbsConfig, error::PbsError, tls};
+use super::{config::PbsConfig, error::PbsError};
 use compact_str::CompactString;
 use reqwest::{
     StatusCode,
@@ -15,7 +15,7 @@ impl PbsClient {
     pub fn new(config: PbsConfig) -> Result<Self, PbsError> {
         config.validate()?;
 
-        let tls = tls::build_client_config(&config.fingerprint).map_err(PbsError::Config)?;
+        let tls = super::tls::build_client_config(&config.fingerprint).map_err(PbsError::Config)?;
 
         let mut headers = HeaderMap::new();
         let mut auth = HeaderValue::from_str(&config.authorization_header())
@@ -124,8 +124,8 @@ impl PbsClient {
                 .unwrap_or_else(|| "unknown".into());
 
             return PbsError::FingerprintMismatch {
-                expected: tls::normalize_fingerprint(&self.config.fingerprint)
-                    .map(|b| tls::fingerprint_hex(&b))
+                expected: super::tls::normalize_fingerprint(&self.config.fingerprint)
+                    .map(|b| super::tls::fingerprint_hex(&b))
                     .unwrap_or_else(|_| self.config.fingerprint.clone()),
                 actual,
             };

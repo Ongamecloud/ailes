@@ -6,7 +6,6 @@ pub struct PbsConfig {
     pub url: CompactString,
     pub datastore: CompactString,
     pub namespace: Option<CompactString>,
-    /// Full API token id, e.g. `user@realm!tokenname`.
     pub token_id: CompactString,
     pub token_secret: CompactString,
     pub fingerprint: CompactString,

@@ -1,11 +1,10 @@
 use super::{
     accessor::{ArchiveEntry, ArchiveEntryKind},
     error::PbsError,
+    osstr::os_str_from_bytes,
 };
 use std::{
-    ffi::OsStr,
-    io::{self, Write},
-    os::unix::ffi::OsStrExt,
+    io::Write,
     path::{Path, PathBuf},
 };
 
@@ -128,7 +127,7 @@ pub struct CatalogWriter<W> {
 }
 
 impl<W: Write> CatalogWriter<W> {
-    pub fn new(mut writer: W) -> io::Result<Self> {
+    pub fn new(mut writer: W) -> std::io::Result<Self> {
         writer.write_all(&CATALOG_MAGIC)?;
         Ok(Self {
             writer,
@@ -137,29 +136,31 @@ impl<W: Write> CatalogWriter<W> {
         })
     }
 
-    fn write_all(&mut self, data: &[u8]) -> io::Result<()> {
+    fn write_all(&mut self, data: &[u8]) -> std::io::Result<()> {
         self.writer.write_all(data)?;
         self.pos += data.len() as u64;
         Ok(())
     }
 
-    fn current(&mut self) -> io::Result<&mut DirectoryInfo> {
+    fn current(&mut self) -> std::io::Result<&mut DirectoryInfo> {
         self.stack
             .last_mut()
-            .ok_or_else(|| io::Error::other("catalog directory stack underflow"))
+            .ok_or_else(|| std::io::Error::other("catalog directory stack underflow"))
     }
 
     pub fn start_directory(&mut self, name: &[u8]) {
         self.stack.push(DirectoryInfo::new(name.to_vec()));
     }
 
-    pub fn end_directory(&mut self) -> io::Result<()> {
+    pub fn end_directory(&mut self) -> std::io::Result<()> {
         let dir = self
             .stack
             .pop()
-            .ok_or_else(|| io::Error::other("catalog directory stack underflow"))?;
+            .ok_or_else(|| std::io::Error::other("catalog directory stack underflow"))?;
         if self.stack.is_empty() {
-            return Err(io::Error::other("cannot end the catalog root directory"));
+            return Err(std::io::Error::other(
+                "cannot end the catalog root directory",
+            ));
         }
 
         let start = self.pos;
@@ -173,7 +174,7 @@ impl<W: Write> CatalogWriter<W> {
         Ok(())
     }
 
-    fn add(&mut self, name: &[u8], attribute: Attribute) -> io::Result<()> {
+    fn add(&mut self, name: &[u8], attribute: Attribute) -> std::io::Result<()> {
         self.current()?.entries.push(CatalogEntry {
             name: name.to_vec(),
             attribute,
@@ -181,42 +182,44 @@ impl<W: Write> CatalogWriter<W> {
         Ok(())
     }
 
-    pub fn add_file(&mut self, name: &[u8], size: u64, mtime: i64) -> io::Result<()> {
+    pub fn add_file(&mut self, name: &[u8], size: u64, mtime: i64) -> std::io::Result<()> {
         self.add(name, Attribute::File { size, mtime })
     }
 
-    pub fn add_symlink(&mut self, name: &[u8]) -> io::Result<()> {
+    pub fn add_symlink(&mut self, name: &[u8]) -> std::io::Result<()> {
         self.add(name, Attribute::Symlink)
     }
 
-    pub fn add_hardlink(&mut self, name: &[u8]) -> io::Result<()> {
+    pub fn add_hardlink(&mut self, name: &[u8]) -> std::io::Result<()> {
         self.add(name, Attribute::Hardlink)
     }
 
-    pub fn add_block_device(&mut self, name: &[u8]) -> io::Result<()> {
+    pub fn add_block_device(&mut self, name: &[u8]) -> std::io::Result<()> {
         self.add(name, Attribute::BlockDevice)
     }
 
-    pub fn add_char_device(&mut self, name: &[u8]) -> io::Result<()> {
+    pub fn add_char_device(&mut self, name: &[u8]) -> std::io::Result<()> {
         self.add(name, Attribute::CharDevice)
     }
 
-    pub fn add_fifo(&mut self, name: &[u8]) -> io::Result<()> {
+    pub fn add_fifo(&mut self, name: &[u8]) -> std::io::Result<()> {
         self.add(name, Attribute::Fifo)
     }
 
-    pub fn add_socket(&mut self, name: &[u8]) -> io::Result<()> {
+    pub fn add_socket(&mut self, name: &[u8]) -> std::io::Result<()> {
         self.add(name, Attribute::Socket)
     }
 
-    pub fn finish(mut self) -> io::Result<W> {
+    pub fn finish(mut self) -> std::io::Result<W> {
         if self.stack.len() != 1 {
-            return Err(io::Error::other("unbalanced catalog directories at finish"));
+            return Err(std::io::Error::other(
+                "unbalanced catalog directories at finish",
+            ));
         }
         let root = self
             .stack
             .pop()
-            .ok_or_else(|| io::Error::other("catalog directory stack underflow"))?;
+            .ok_or_else(|| std::io::Error::other("catalog directory stack underflow"))?;
 
         let start = self.pos;
         let data = root.encode(start);
@@ -373,7 +376,7 @@ fn push_walk(
     }
 
     for entry in read_table(data, block_pos)? {
-        let path = base.join(OsStr::from_bytes(&entry.name));
+        let path = base.join(os_str_from_bytes(&entry.name));
         match entry.kind {
             RawKind::Directory { child } => {
                 out.push(ArchiveEntry {
@@ -438,7 +441,7 @@ pub fn parse_catalog(data: &[u8]) -> Result<Vec<ArchiveEntry>, PbsError> {
 
     let mut out = Vec::new();
     for entry in read_table(data, root_offset)? {
-        let path = PathBuf::from(OsStr::from_bytes(&entry.name));
+        let path = PathBuf::from(os_str_from_bytes(&entry.name));
         match entry.kind {
             RawKind::Directory { child } => push_walk(data, child, Path::new(""), &mut out, 0)?,
             RawKind::File { size, mtime } => out.push(ArchiveEntry {

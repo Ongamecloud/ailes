@@ -3,17 +3,14 @@ use super::{
     datablob,
     error::PbsError,
     h2::H2Transport,
-    pxar::{
-        EntryKind,
-        accessor::{Accessor, ReadAt},
-    },
+    pxar::{EntryKind, accessor::Accessor},
     reader::parse_dynamic_index_entries,
     writer::ARCHIVE_NAME,
 };
+use compact_str::ToCompactString;
+use positioned_io::ReadAt;
 use std::{
     collections::{HashMap, VecDeque},
-    io,
-    os::unix::fs::FileExt,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -37,8 +34,8 @@ pub struct ArchiveEntry {
     pub symlink: Option<PathBuf>,
 }
 
-fn decode_err(err: io::Error) -> PbsError {
-    PbsError::Decode(err.to_string().into())
+fn decode_err(err: std::io::Error) -> PbsError {
+    PbsError::Decode(err.to_compact_string())
 }
 
 struct ChunkCache {
@@ -89,7 +86,7 @@ struct ChunkReaderInner {
 }
 
 impl ChunkReaderInner {
-    async fn fetch_chunk(&self, idx: usize) -> io::Result<Arc<Vec<u8>>> {
+    async fn fetch_chunk(&self, idx: usize) -> std::io::Result<Arc<Vec<u8>>> {
         if let Some(cached) = self
             .cache
             .lock()
@@ -102,13 +99,13 @@ impl ChunkReaderInner {
         let digest = self
             .digests
             .get(idx)
-            .ok_or_else(|| io::Error::other("chunk index out of range"))?;
+            .ok_or_else(|| std::io::Error::other("chunk index out of range"))?;
         let encoded = self
             .transport
             .download("chunk", &[("digest", hex::encode(digest))])
             .await
-            .map_err(io::Error::other)?;
-        let plaintext = datablob::decode_blob(&encoded).map_err(io::Error::other)?;
+            .map_err(std::io::Error::other)?;
+        let plaintext = datablob::decode_blob(&encoded).map_err(std::io::Error::other)?;
         let plaintext = Arc::new(plaintext);
 
         self.cache
@@ -119,7 +116,7 @@ impl ChunkReaderInner {
         Ok(plaintext)
     }
 
-    async fn read_into(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+    async fn read_into(&self, buf: &mut [u8], offset: u64) -> std::io::Result<usize> {
         if buf.is_empty() || offset >= self.size {
             return Ok(0);
         }
@@ -137,10 +134,10 @@ impl ChunkReaderInner {
 
         let src = chunk
             .get(within..within + len)
-            .ok_or_else(|| io::Error::other("chunk shorter than its index entry"))?;
+            .ok_or_else(|| std::io::Error::other("chunk shorter than its index entry"))?;
         let dst = buf
             .get_mut(..len)
-            .ok_or_else(|| io::Error::other("read buffer too small"))?;
+            .ok_or_else(|| std::io::Error::other("read buffer too small"))?;
         dst.copy_from_slice(src);
 
         Ok(len)
@@ -153,7 +150,7 @@ pub struct ChunkReader {
 }
 
 impl ReadAt for ChunkReader {
-    fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<usize> {
         let inner = &self.inner;
         inner.handle.clone().block_on(inner.read_into(buf, offset))
     }
@@ -255,7 +252,7 @@ impl PbsArchive {
         &self,
         path: &Path,
         range: Option<(u64, u64)>,
-    ) -> Result<Box<dyn io::Read + Send + Sync>, PbsError> {
+    ) -> Result<Box<dyn std::io::Read + Send + Sync>, PbsError> {
         let accessor = self.accessor()?;
         let root = accessor.open_root().map_err(decode_err)?;
 
@@ -284,7 +281,7 @@ struct RangedReader<R> {
     remaining: u64,
 }
 
-impl<R: FileExt> RangedReader<R> {
+impl<R: ReadAt> RangedReader<R> {
     fn new(inner: R, start: u64, len: u64) -> Self {
         Self {
             inner,
@@ -294,8 +291,8 @@ impl<R: FileExt> RangedReader<R> {
     }
 }
 
-impl<R: FileExt> io::Read for RangedReader<R> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+impl<R: ReadAt> std::io::Read for RangedReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         if self.remaining == 0 {
             return Ok(0);
         }
@@ -303,8 +300,8 @@ impl<R: FileExt> io::Read for RangedReader<R> {
         let want = self.remaining.min(buf.len() as u64) as usize;
         let slice = buf
             .get_mut(..want)
-            .ok_or_else(|| io::Error::other("read buffer too small"))?;
-        let read = self.inner.read_at(slice, self.offset)?;
+            .ok_or_else(|| std::io::Error::other("read buffer too small"))?;
+        let read = self.inner.read_at(self.offset, slice)?;
         self.offset += read as u64;
         self.remaining -= read as u64;
 
