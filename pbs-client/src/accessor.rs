@@ -3,16 +3,26 @@ use super::{
     datablob,
     error::PbsError,
     h2::H2Transport,
-    pxar::{EntryKind, accessor::Accessor},
+    pxar::{
+        EntryKind,
+        accessor::{Accessor, FileContents, ReadAt},
+    },
     reader::parse_dynamic_index_entries,
     writer::ARCHIVE_NAME,
 };
 use compact_str::ToCompactString;
-use positioned_io::ReadAt;
 use std::{
     collections::{HashMap, VecDeque},
+    future::Future,
+    io::Read,
     path::{Path, PathBuf},
+    pin::Pin,
     sync::{Arc, Mutex},
+    task::{Context, Poll, ready},
+};
+use tokio::{
+    io::{AsyncRead, ReadBuf},
+    runtime::Handle,
 };
 
 const CHUNK_CACHE_CAPACITY: usize = 32;
@@ -78,7 +88,6 @@ impl ChunkCache {
 
 struct ChunkReaderInner {
     transport: H2Transport,
-    handle: tokio::runtime::Handle,
     ends: Vec<u64>,
     digests: Vec<[u8; 32]>,
     size: u64,
@@ -105,7 +114,10 @@ impl ChunkReaderInner {
             .download("chunk", &[("digest", hex::encode(digest))])
             .await
             .map_err(std::io::Error::other)?;
-        let plaintext = datablob::decode_blob(&encoded).map_err(std::io::Error::other)?;
+        let plaintext = tokio::task::spawn_blocking(move || datablob::decode_blob(&encoded))
+            .await
+            .map_err(std::io::Error::other)?
+            .map_err(std::io::Error::other)?;
         let plaintext = Arc::new(plaintext);
 
         self.cache
@@ -150,15 +162,87 @@ pub struct ChunkReader {
 }
 
 impl ReadAt for ChunkReader {
-    fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<usize> {
-        let inner = &self.inner;
-        inner.handle.clone().block_on(inner.read_into(buf, offset))
+    fn read_at(
+        &self,
+        offset: u64,
+        buf: &mut [u8],
+    ) -> impl Future<Output = std::io::Result<usize>> + Send {
+        self.inner.read_into(buf, offset)
+    }
+}
+
+type ReadFuture = Pin<Box<dyn Future<Output = std::io::Result<Vec<u8>>> + Send + Sync>>;
+
+pub struct PbsFileReader {
+    contents: Arc<FileContents<ChunkReader>>,
+    offset: u64,
+    remaining: u64,
+    pending: Option<ReadFuture>,
+}
+
+impl PbsFileReader {
+    fn new(contents: FileContents<ChunkReader>, offset: u64, remaining: u64) -> Self {
+        Self {
+            contents: Arc::new(contents),
+            offset,
+            remaining,
+            pending: None,
+        }
+    }
+}
+
+impl AsyncRead for PbsFileReader {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+
+        loop {
+            if let Some(future) = this.pending.as_mut() {
+                let data = ready!(future.as_mut().poll(cx))?;
+                this.pending = None;
+                this.offset += data.len() as u64;
+                this.remaining -= data.len() as u64;
+                buf.put_slice(&data);
+                return Poll::Ready(Ok(()));
+            }
+
+            if this.remaining == 0 || buf.remaining() == 0 {
+                return Poll::Ready(Ok(()));
+            }
+
+            let want = (buf.remaining() as u64).min(this.remaining);
+            let contents = Arc::clone(&this.contents);
+            let offset = this.offset;
+            this.pending = Some(Box::pin(async move {
+                let mut chunk = vec![0; want as usize];
+                let read = contents.read_at(offset, &mut chunk).await?;
+                chunk.truncate(read);
+                Ok(chunk)
+            }));
+        }
+    }
+}
+
+pub struct SyncPbsFileReader {
+    reader: PbsFileReader,
+    handle: Handle,
+}
+
+impl Read for SyncPbsFileReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        use tokio::io::AsyncReadExt;
+
+        self.handle.block_on(self.reader.read(buf))
     }
 }
 
 pub struct PbsArchive {
     reader: ChunkReader,
     size: u64,
+    handle: Handle,
 }
 
 impl PbsArchive {
@@ -192,7 +276,6 @@ impl PbsArchive {
             reader: ChunkReader {
                 inner: Arc::new(ChunkReaderInner {
                     transport,
-                    handle: tokio::runtime::Handle::current(),
                     ends,
                     digests,
                     size,
@@ -200,6 +283,7 @@ impl PbsArchive {
                 }),
             },
             size,
+            handle: Handle::current(),
         })
     }
 
@@ -227,18 +311,22 @@ impl PbsArchive {
             let encoded = transport
                 .download("chunk", &[("digest", hex::encode(digest))])
                 .await?;
-            catalog.extend_from_slice(&datablob::decode_blob(&encoded)?);
+            let plaintext = tokio::task::spawn_blocking(move || datablob::decode_blob(&encoded))
+                .await
+                .map_err(|err| PbsError::Transport(err.to_string().into()))??;
+            catalog.extend_from_slice(&plaintext);
         }
 
         Ok(catalog)
     }
 
-    pub fn read_link(&self, path: &Path) -> Result<PathBuf, PbsError> {
+    pub async fn read_link(&self, path: &Path) -> Result<PathBuf, PbsError> {
         let accessor = self.accessor()?;
-        let root = accessor.open_root().map_err(decode_err)?;
+        let root = accessor.open_root().await.map_err(decode_err)?;
 
         let entry = root
             .lookup(path)
+            .await
             .map_err(decode_err)?
             .ok_or_else(|| PbsError::Decode("symlink not found in archive".into()))?;
 
@@ -248,16 +336,21 @@ impl PbsArchive {
         }
     }
 
-    pub fn open_reader(
+    pub fn read_link_blocking(&self, path: &Path) -> Result<PathBuf, PbsError> {
+        self.handle.block_on(self.read_link(path))
+    }
+
+    pub async fn open_reader(
         &self,
         path: &Path,
         range: Option<(u64, u64)>,
-    ) -> Result<Box<dyn std::io::Read + Send + Sync>, PbsError> {
+    ) -> Result<PbsFileReader, PbsError> {
         let accessor = self.accessor()?;
-        let root = accessor.open_root().map_err(decode_err)?;
+        let root = accessor.open_root().await.map_err(decode_err)?;
 
         let entry = root
             .lookup(path)
+            .await
             .map_err(decode_err)?
             .ok_or_else(|| PbsError::Decode("file not found in archive".into()))?;
 
@@ -268,43 +361,24 @@ impl PbsArchive {
         }
 
         let contents = entry.contents().map_err(decode_err)?;
-        match range {
-            Some((start, len)) => Ok(Box::new(RangedReader::new(contents, start, len))),
-            None => Ok(Box::new(contents)),
-        }
+        let (offset, remaining) = match range {
+            Some((start, len)) => (start, len),
+            None => (0, contents.len()),
+        };
+
+        Ok(PbsFileReader::new(contents, offset, remaining))
     }
-}
 
-struct RangedReader<R> {
-    inner: R,
-    offset: u64,
-    remaining: u64,
-}
+    pub fn open_reader_blocking(
+        &self,
+        path: &Path,
+        range: Option<(u64, u64)>,
+    ) -> Result<SyncPbsFileReader, PbsError> {
+        let reader = self.handle.block_on(self.open_reader(path, range))?;
 
-impl<R: ReadAt> RangedReader<R> {
-    fn new(inner: R, start: u64, len: u64) -> Self {
-        Self {
-            inner,
-            offset: start,
-            remaining: len,
-        }
-    }
-}
-
-impl<R: ReadAt> std::io::Read for RangedReader<R> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        if self.remaining == 0 {
-            return Ok(0);
-        }
-
-        let want = self.remaining.min(buf.len() as u64) as usize;
-        let slice = buf
-            .get_mut(..want)
-            .ok_or_else(|| std::io::Error::other("read buffer too small"))?;
-        let read = self.inner.read_at(self.offset, slice)?;
-        self.offset += read as u64;
-        self.remaining -= read as u64;
-
-        Ok(read)
+        Ok(SyncPbsFileReader {
+            reader,
+            handle: self.handle.clone(),
+        })
     }
 }

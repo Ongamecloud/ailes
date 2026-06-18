@@ -42,7 +42,9 @@ impl PbsBackupReader {
             .transport
             .download("chunk", &[("digest", hex::encode(digest))])
             .await?;
-        datablob::decode_blob(&encoded)
+        tokio::task::spawn_blocking(move || datablob::decode_blob(&encoded))
+            .await
+            .map_err(|err| PbsError::Transport(err.to_string().into()))?
     }
 
     pub async fn archive_chunk_digests(&mut self) -> Result<Vec<[u8; 32]>, PbsError> {

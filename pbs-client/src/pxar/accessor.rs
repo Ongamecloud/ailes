@@ -3,12 +3,20 @@ use super::{
     {Entry, EntryKind, Metadata, Stat, StatxTimestamp, Symlink},
 };
 use crate::osstr::{os_str_as_bytes, os_string_from_bytes};
-use positioned_io::ReadAt;
 use std::{
     ffi::OsStr,
+    future::Future,
     ops::Range,
     path::{Component, Path, PathBuf},
 };
+
+pub trait ReadAt: Send + Sync {
+    fn read_at(
+        &self,
+        offset: u64,
+        buf: &mut [u8],
+    ) -> impl Future<Output = std::io::Result<usize>> + Send;
+}
 
 pub struct Accessor<T> {
     input: T,
@@ -23,8 +31,8 @@ impl<T: ReadAt + Clone> Accessor<T> {
         Ok(Self { input, size })
     }
 
-    pub fn open_root(&self) -> std::io::Result<Directory<T>> {
-        Directory::open_at_end(self.input.clone(), self.size, PathBuf::from("/"))
+    pub async fn open_root(&self) -> std::io::Result<Directory<T>> {
+        Directory::open_at_end(self.input.clone(), self.size, PathBuf::from("/")).await
     }
 }
 
@@ -36,11 +44,13 @@ pub struct Directory<T> {
 }
 
 impl<T: ReadAt + Clone> Directory<T> {
-    fn open_at_end(input: T, end_offset: u64, path: PathBuf) -> std::io::Result<Self> {
+    async fn open_at_end(input: T, end_offset: u64, path: PathBuf) -> std::io::Result<Self> {
         let tail_at = end_offset
             .checked_sub(super::format::GOODBYE_ITEM_SIZE)
             .ok_or_else(|| std::io::Error::other("pxar: goodbye tail does not fit"))?;
-        let tail = super::format::GoodbyeItem::from_le_bytes(&read_array::<24>(&input, tail_at)?)?;
+        let tail = super::format::GoodbyeItem::from_le_bytes(
+            &read_array::<24, _>(&input, tail_at).await?,
+        )?;
         if tail.hash != super::format::PXAR_GOODBYE_TAIL_MARKER {
             return Err(std::io::Error::other("pxar: missing goodbye tail marker"));
         }
@@ -63,7 +73,8 @@ impl<T: ReadAt + Clone> Directory<T> {
             &input,
             table_ofs,
             count as u64 * super::format::GOODBYE_ITEM_SIZE,
-        )?;
+        )
+        .await?;
 
         let mut table = Vec::with_capacity(count);
         for chunk in raw.chunks_exact(super::format::GOODBYE_ITEM_SIZE as usize) {
@@ -78,7 +89,7 @@ impl<T: ReadAt + Clone> Directory<T> {
         })
     }
 
-    pub fn lookup(&self, path: &Path) -> std::io::Result<Option<FileEntry<T>>> {
+    pub async fn lookup(&self, path: &Path) -> std::io::Result<Option<FileEntry<T>>> {
         let names: Vec<&OsStr> = path
             .components()
             .filter_map(|component| match component {
@@ -94,7 +105,7 @@ impl<T: ReadAt + Clone> Directory<T> {
 
         for (index, name) in names.iter().enumerate() {
             let dir = descended.as_ref().unwrap_or(self);
-            let entry = match dir.lookup_component(name)? {
+            let entry = match dir.lookup_component(name).await? {
                 Some(entry) => entry,
                 None => return Ok(None),
             };
@@ -102,14 +113,14 @@ impl<T: ReadAt + Clone> Directory<T> {
             if index + 1 == names.len() {
                 result = Some(entry);
             } else {
-                descended = Some(entry.enter_directory()?);
+                descended = Some(entry.enter_directory().await?);
             }
         }
 
         Ok(result)
     }
 
-    fn lookup_component(&self, name: &OsStr) -> std::io::Result<Option<FileEntry<T>>> {
+    async fn lookup_component(&self, name: &OsStr) -> std::io::Result<Option<FileEntry<T>>> {
         let hash = super::format::hash_filename(&os_str_as_bytes(name));
         let first =
             match super::format::bst_search_by(&self.table, 0, 0, |item| hash.cmp(&item.hash)) {
@@ -126,15 +137,15 @@ impl<T: ReadAt + Clone> Directory<T> {
                 None => return Ok(None),
             };
 
-            let cursor = self.cursor(index)?;
+            let cursor = self.cursor(index).await?;
             if cursor.file_name == *name {
-                return self.decode_cursor(&cursor).map(Some);
+                return self.decode_cursor(&cursor).await.map(Some);
             }
             dup += 1;
         }
     }
 
-    fn cursor(&self, index: usize) -> std::io::Result<Cursor> {
+    async fn cursor(&self, index: usize) -> std::io::Result<Cursor> {
         let item = self
             .table
             .get(index)
@@ -145,7 +156,7 @@ impl<T: ReadAt + Clone> Directory<T> {
             .checked_sub(item.offset)
             .ok_or_else(|| std::io::Error::other("pxar: goodbye item offset out of range"))?;
 
-        let (file_name, entry_ofs) = self.read_filename(file_ofs)?;
+        let (file_name, entry_ofs) = self.read_filename(file_ofs).await?;
         let entry_end = file_ofs
             .checked_add(item.size)
             .ok_or_else(|| std::io::Error::other("pxar: goodbye item size out of range"))?;
@@ -156,13 +167,14 @@ impl<T: ReadAt + Clone> Directory<T> {
         })
     }
 
-    fn read_filename(&self, file_ofs: u64) -> std::io::Result<(std::ffi::OsString, u64)> {
-        let header = read_header(&self.input, file_ofs)?;
+    async fn read_filename(&self, file_ofs: u64) -> std::io::Result<(std::ffi::OsString, u64)> {
+        let header = read_header(&self.input, file_ofs).await?;
         if header.htype != super::format::PXAR_FILENAME {
             return Err(std::io::Error::other("pxar: expected a filename header"));
         }
         let content = header.content_size()?;
-        let mut name = read_data(&self.input, file_ofs + super::format::HEADER_SIZE, content)?;
+        let mut name =
+            read_data(&self.input, file_ofs + super::format::HEADER_SIZE, content).await?;
         if name.pop() != Some(0) {
             return Err(std::io::Error::other(
                 "pxar: file name missing terminating zero",
@@ -173,12 +185,13 @@ impl<T: ReadAt + Clone> Directory<T> {
         Ok((os_string_from_bytes(name), file_ofs + header.full_size))
     }
 
-    fn decode_cursor(&self, cursor: &Cursor) -> std::io::Result<FileEntry<T>> {
+    async fn decode_cursor(&self, cursor: &Cursor) -> std::io::Result<FileEntry<T>> {
         let (metadata, kind) = decode_entry(
             &self.input,
             cursor.entry_range.start,
             cursor.entry_range.end,
-        )?;
+        )
+        .await?;
 
         Ok(FileEntry {
             input: self.input.clone(),
@@ -212,11 +225,11 @@ impl<T: ReadAt + Clone> FileEntry<T> {
         matches!(self.entry.kind, EntryKind::Directory)
     }
 
-    pub fn enter_directory(&self) -> std::io::Result<Directory<T>> {
+    pub async fn enter_directory(&self) -> std::io::Result<Directory<T>> {
         if !self.is_dir() {
             return Err(std::io::Error::other("pxar: entry is not a directory"));
         }
-        Directory::open_at_end(self.input.clone(), self.entry_end, self.entry.path.clone())
+        Directory::open_at_end(self.input.clone(), self.entry_end, self.entry.path.clone()).await
     }
 
     pub fn contents(&self) -> std::io::Result<FileContents<T>> {
@@ -228,7 +241,6 @@ impl<T: ReadAt + Clone> FileEntry<T> {
                 input: self.input.clone(),
                 start: offset,
                 size,
-                at: 0,
             }),
             EntryKind::File { offset: None, .. } => Err(std::io::Error::other(
                 "pxar: file entry has no content offset",
@@ -242,11 +254,18 @@ pub struct FileContents<T> {
     input: T,
     start: u64,
     size: u64,
-    at: u64,
 }
 
 impl<T: ReadAt> FileContents<T> {
-    fn read_window(&self, buf: &mut [u8], offset: u64) -> std::io::Result<usize> {
+    pub fn len(&self) -> u64 {
+        self.size
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.size == 0
+    }
+
+    pub async fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<usize> {
         if offset >= self.size {
             return Ok(0);
         }
@@ -255,41 +274,28 @@ impl<T: ReadAt> FileContents<T> {
         let slice = buf
             .get_mut(..want)
             .ok_or_else(|| std::io::Error::other("pxar: read buffer too small"))?;
-        self.input.read_at(self.start + offset, slice)
+
+        self.input.read_at(self.start + offset, slice).await
     }
 }
 
-impl<T: ReadAt> std::io::Read for FileContents<T> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let got = self.read_window(buf, self.at)?;
-        self.at += got as u64;
-        Ok(got)
-    }
-}
-
-impl<T: ReadAt> ReadAt for FileContents<T> {
-    fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.read_window(buf, offset)
-    }
-}
-
-fn decode_entry<T: ReadAt>(
+async fn decode_entry<T: ReadAt>(
     input: &T,
     start: u64,
     end: u64,
 ) -> std::io::Result<(Metadata, EntryKind)> {
-    let header = read_header(input, start)?;
+    let header = read_header(input, start).await?;
     if header.htype != super::format::PXAR_ENTRY {
         return Err(std::io::Error::other("pxar: expected an entry header"));
     }
-    let metadata = read_metadata(input, start + super::format::HEADER_SIZE, header)?;
+    let metadata = read_metadata(input, start + super::format::HEADER_SIZE, header).await?;
 
     let at = start + header.full_size;
     if at >= end {
         return Ok((metadata, EntryKind::Directory));
     }
 
-    let item = read_header(input, at)?;
+    let item = read_header(input, at).await?;
     match item.htype {
         super::format::PXAR_PAYLOAD => Ok((
             metadata,
@@ -299,7 +305,8 @@ fn decode_entry<T: ReadAt>(
             },
         )),
         super::format::PXAR_SYMLINK => {
-            let data = read_data(input, at + super::format::HEADER_SIZE, item.content_size()?)?;
+            let data =
+                read_data(input, at + super::format::HEADER_SIZE, item.content_size()?).await?;
             Ok((metadata, EntryKind::Symlink(Symlink { data })))
         }
         super::format::PXAR_FILENAME | super::format::PXAR_GOODBYE => {
@@ -309,7 +316,7 @@ fn decode_entry<T: ReadAt>(
     }
 }
 
-fn read_metadata<T: ReadAt>(
+async fn read_metadata<T: ReadAt>(
     input: &T,
     offset: u64,
     header: super::format::Header,
@@ -319,7 +326,7 @@ fn read_metadata<T: ReadAt>(
             "pxar: entry has an unexpected stat size",
         ));
     }
-    let buf = read_array::<40>(input, offset)?;
+    let buf = read_array::<40, _>(input, offset).await?;
 
     Ok(Metadata {
         stat: Stat {
@@ -335,8 +342,8 @@ fn read_metadata<T: ReadAt>(
     })
 }
 
-fn read_header<T: ReadAt>(input: &T, offset: u64) -> std::io::Result<super::format::Header> {
-    let buf = read_array::<16>(input, offset)?;
+async fn read_header<T: ReadAt>(input: &T, offset: u64) -> std::io::Result<super::format::Header> {
+    let buf = read_array::<16, _>(input, offset).await?;
     let header = super::format::Header {
         htype: u64_at(&buf, 0)?,
         full_size: u64_at(&buf, 8)?,
@@ -346,22 +353,26 @@ fn read_header<T: ReadAt>(input: &T, offset: u64) -> std::io::Result<super::form
     Ok(header)
 }
 
-fn read_array<const N: usize>(input: &impl ReadAt, offset: u64) -> std::io::Result<[u8; N]> {
+async fn read_array<const N: usize, T: ReadAt>(input: &T, offset: u64) -> std::io::Result<[u8; N]> {
     let mut buf = [0; N];
-    read_exact_at(input, &mut buf, offset)?;
+    read_exact_at(input, &mut buf, offset).await?;
     Ok(buf)
 }
 
-fn read_data(input: &impl ReadAt, offset: u64, size: u64) -> std::io::Result<Vec<u8>> {
+async fn read_data<T: ReadAt>(input: &T, offset: u64, size: u64) -> std::io::Result<Vec<u8>> {
     let size = usize::try_from(size).map_err(std::io::Error::other)?;
     let mut buf = vec![0; size];
-    read_exact_at(input, &mut buf, offset)?;
+    read_exact_at(input, &mut buf, offset).await?;
     Ok(buf)
 }
 
-fn read_exact_at(input: &impl ReadAt, mut buf: &mut [u8], mut offset: u64) -> std::io::Result<()> {
+async fn read_exact_at<T: ReadAt>(
+    input: &T,
+    mut buf: &mut [u8],
+    mut offset: u64,
+) -> std::io::Result<()> {
     while !buf.is_empty() {
-        match input.read_at(offset, buf)? {
+        match input.read_at(offset, buf).await? {
             0 => return Err(std::io::Error::other("pxar: unexpected EOF")),
             got => {
                 let rest = std::mem::take(&mut buf);

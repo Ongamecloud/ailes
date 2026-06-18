@@ -1347,24 +1347,14 @@ impl VirtualReadableFilesystem for PbsVirtualFilesystem {
                     entry_wanted_notifier.notified().await;
 
                     if file_type.is_file() {
-                        let (reader, writer) = tokio::io::simplex(crate::BUFFER_SIZE);
+                        let reader = archive.open_reader(&entry_path, None).await?;
                         entry_channel_tx
                             .send(Ok((
                                 file_type,
-                                entry_path.clone(),
+                                entry_path,
                                 Box::new(reader) as AsyncReadableFileStream,
                             )))
                             .await?;
-
-                        let archive = Arc::clone(&archive);
-                        tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
-                            let mut reader = archive.open_reader(&entry_path, None)?;
-                            let mut writer = SyncIoBridge::new(writer);
-                            std::io::copy(&mut reader, &mut writer)?;
-                            writer.shutdown()?;
-                            Ok(())
-                        })
-                        .await??;
                     } else {
                         entry_channel_tx
                             .send(Ok((
@@ -1403,7 +1393,7 @@ impl VirtualReadableFilesystem for PbsVirtualFilesystem {
         }
 
         let (window, size, reader_range) = resolve_range(range, meta.size);
-        let reader = self.archive.open_reader(path.as_ref(), window)?;
+        let reader = self.archive.open_reader_blocking(path.as_ref(), window)?;
 
         Ok(FileRead {
             size,
@@ -1426,17 +1416,7 @@ impl VirtualReadableFilesystem for PbsVirtualFilesystem {
         }
 
         let (window, size, reader_range) = resolve_range(range, meta.size);
-        let archive = Arc::clone(&self.archive);
-        let path = path.as_ref().to_path_buf();
-
-        let (reader, writer) = tokio::io::simplex(crate::BUFFER_SIZE);
-        crate::spawn_blocking_handled(move || -> Result<(), anyhow::Error> {
-            let mut reader = archive.open_reader(&path, window)?;
-            let mut writer = SyncIoBridge::new(writer);
-            std::io::copy(&mut reader, &mut writer)?;
-            writer.shutdown()?;
-            Ok(())
-        });
+        let reader = self.archive.open_reader(path.as_ref(), window).await?;
 
         Ok(AsyncFileRead {
             size,
@@ -1454,7 +1434,7 @@ impl VirtualReadableFilesystem for PbsVirtualFilesystem {
         match self.tree.lookup_file(path) {
             Some(meta) if meta.file_type.is_symlink() => match &meta.symlink {
                 Some(target) => Ok(target.clone()),
-                None => Ok(self.archive.read_link(path)?),
+                None => Ok(self.archive.read_link_blocking(path)?),
             },
             _ => Err(anyhow::anyhow!(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
@@ -1470,10 +1450,7 @@ impl VirtualReadableFilesystem for PbsVirtualFilesystem {
         match self.tree.lookup_file(&path) {
             Some(meta) if meta.file_type.is_symlink() => match &meta.symlink {
                 Some(target) => Ok(target.clone()),
-                None => {
-                    let archive = Arc::clone(&self.archive);
-                    Ok(tokio::task::spawn_blocking(move || archive.read_link(&path)).await??)
-                }
+                None => Ok(self.archive.read_link(&path).await?),
             },
             _ => Err(anyhow::anyhow!(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
@@ -1550,7 +1527,8 @@ impl VirtualReadableFilesystem for PbsVirtualFilesystem {
                             }
                             FileType::File => {
                                 zip.start_file(name, options)?;
-                                let mut reader = archive.open_reader(&entry.archive_path, None)?;
+                                let mut reader =
+                                    archive.open_reader_blocking(&entry.archive_path, None)?;
                                 let mut buffer = vec![0; crate::BUFFER_SIZE];
                                 loop {
                                     let read = reader.read(&mut buffer)?;
@@ -1600,13 +1578,14 @@ impl VirtualReadableFilesystem for PbsVirtualFilesystem {
                             FileType::File => {
                                 header.set_entry_type(tar::EntryType::Regular);
                                 header.set_size(entry.size);
-                                let reader = archive.open_reader(&entry.archive_path, None)?;
+                                let reader =
+                                    archive.open_reader_blocking(&entry.archive_path, None)?;
                                 let reader: Box<dyn Read> = match &bytes_archived {
                                     Some(counter) => Box::new(CountingReader::new_with_bytes_read(
                                         reader,
                                         counter.clone(),
                                     )),
-                                    None => reader,
+                                    None => Box::new(reader),
                                 };
                                 let mut reader =
                                     FixedReader::new_with_fixed_bytes(reader, entry.size as usize);
@@ -1697,13 +1676,14 @@ impl VirtualReadableFilesystem for PbsVirtualFilesystem {
                                 dir_stack.push(name.clone());
                             }
                             FileType::File => {
-                                let reader = archive.open_reader(&entry.archive_path, None)?;
+                                let reader =
+                                    archive.open_reader_blocking(&entry.archive_path, None)?;
                                 let reader: Box<dyn Read> = match &bytes_archived {
                                     Some(counter) => Box::new(CountingReader::new_with_bytes_read(
                                         reader,
                                         counter.clone(),
                                     )),
-                                    None => reader,
+                                    None => Box::new(reader),
                                 };
                                 let mut reader =
                                     FixedReader::new_with_fixed_bytes(reader, entry.size as usize);

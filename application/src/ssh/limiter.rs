@@ -50,6 +50,7 @@ impl SshLimiter {
                         now.duration_since(ratelimit.last_attempt).as_secs()
                             < config.load().system.sftp.limits.authentication_cooldown
                     });
+                    drop(ratelimits);
 
                     let mut user_sessions = user_sessions.lock();
                     user_sessions.retain(|_, session_count| *session_count > 0);

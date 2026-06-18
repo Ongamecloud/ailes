@@ -555,14 +555,24 @@ async fn main_rt() {
                             "generating new sftp host key"
                         );
 
-                        let key = match russh::keys::PrivateKey::random(
-                            &mut rand::rngs::ThreadRng::default(),
-                            match state.config.load().system.sftp.key_algorithm.parse() {
-                                Ok(alg) => alg,
-                                Err(_) => exit_error!("invalid sftp host key algorithm configured"),
-                            },
-                        ) {
-                            Ok(key) => key,
+                        let algorithm = match state.config.load().system.sftp.key_algorithm.parse()
+                        {
+                            Ok(alg) => alg,
+                            Err(_) => exit_error!("invalid sftp host key algorithm configured"),
+                        };
+
+                        let key = match tokio::task::spawn_blocking(move || {
+                            russh::keys::PrivateKey::random(
+                                &mut rand::rngs::ThreadRng::default(),
+                                algorithm,
+                            )
+                        })
+                        .await
+                        {
+                            Ok(Ok(key)) => key,
+                            Ok(Err(err)) => {
+                                exit_error!("failed to generate sftp host key: {:?}", err)
+                            }
                             Err(err) => exit_error!("failed to generate sftp host key: {:?}", err),
                         };
 
