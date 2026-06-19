@@ -373,6 +373,20 @@ impl DockerExecutor {
         Self { docker, app_config }
     }
 
+    async fn image_exists(&self, image_name: &str) -> bool {
+        self.docker
+            .list_images(Some(bollard::query_parameters::ListImagesOptions {
+                all: true,
+                filters: Some(HashMap::from([(
+                    "reference".to_string(),
+                    vec![image_name.to_string()],
+                )])),
+                ..Default::default()
+            }))
+            .await
+            .is_ok_and(|images| !images.is_empty())
+    }
+
     async fn pull_image(
         &self,
         image: &str,
@@ -380,6 +394,77 @@ impl DockerExecutor {
         quiet: bool,
     ) -> Result<(), anyhow::Error> {
         if image.ends_with('~') {
+            return Ok(());
+        }
+
+        let (image_name, tag) = image.split_once(':').unwrap_or((image, "latest"));
+
+        let pull_cache = {
+            type InnerMap = HashMap<
+                compact_str::CompactString,
+                Arc<tokio::sync::Mutex<Option<std::time::Instant>>>,
+            >;
+            static IMAGE_PULL_CACHE: std::sync::OnceLock<Arc<parking_lot::Mutex<InnerMap>>> =
+                std::sync::OnceLock::new();
+
+            IMAGE_PULL_CACHE.get_or_init(|| {
+                let cache = Arc::new(parking_lot::Mutex::new(HashMap::new()));
+
+                tokio::spawn({
+                    let cache = Arc::clone(&cache);
+                    let config = Arc::clone(&self.app_config);
+
+                    async move {
+                        loop {
+                            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+
+                            let mut cache = cache.lock();
+                            let now = std::time::Instant::now();
+                            let duration = config.load().docker.registry_image_fetch_cache.duration;
+                            cache.retain(
+                                |_,
+                                 timestamp: &mut Arc<
+                                    tokio::sync::Mutex<Option<std::time::Instant>>,
+                                >| {
+                                    timestamp.try_lock().is_ok_and(|t| {
+                                        now.duration_since(t.unwrap_or(std::time::Instant::now()))
+                                            .as_secs()
+                                            < duration
+                                    })
+                                },
+                            );
+                        }
+                    }
+                });
+
+                cache
+            })
+        };
+
+        let cache_config = self.app_config.load().docker.registry_image_fetch_cache;
+
+        let mut last_pull = if cache_config.enabled {
+            let entry = {
+                let mut cache = pull_cache.lock();
+                Arc::clone(cache.entry(image.into()).or_default())
+            };
+
+            Some(entry.lock_owned().await)
+        } else {
+            None
+        };
+
+        if let Some(guard) = &last_pull
+            && let Some(pulled_at) = **guard
+            && pulled_at.elapsed().as_secs() < cache_config.duration
+            && self.image_exists(image_name).await
+        {
+            tracing::debug!(
+                server = %server.uuid,
+                image = %image_name,
+                "image pull skipped, cached as recently pulled"
+            );
+
             return Ok(());
         }
 
@@ -401,8 +486,6 @@ impl DockerExecutor {
                 break;
             }
         }
-
-        let (image_name, tag) = image.split_once(':').unwrap_or((image, "latest"));
 
         let mut stream = self.docker.create_image(
             Some(bollard::query_parameters::CreateImageOptions {
@@ -506,20 +589,7 @@ impl DockerExecutor {
                         server.log_daemon_error(&format!("failed to pull image: {err}"));
                     }
 
-                    let exists = self
-                        .docker
-                        .list_images(Some(bollard::query_parameters::ListImagesOptions {
-                            all: true,
-                            filters: Some(HashMap::from([(
-                                "reference".to_string(),
-                                vec![image_name.to_string()],
-                            )])),
-                            ..Default::default()
-                        }))
-                        .await
-                        .is_ok_and(|images| !images.is_empty());
-
-                    if !exists {
+                    if !self.image_exists(image_name).await {
                         return Err(err.into());
                     }
 
@@ -530,6 +600,10 @@ impl DockerExecutor {
                     );
                 }
             }
+        }
+
+        if let Some(guard) = &mut last_pull {
+            **guard = Some(std::time::Instant::now());
         }
 
         if !quiet {

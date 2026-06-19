@@ -414,6 +414,13 @@ fn docker_network_interfaces_v6_gateway() -> String {
     "fdba:17c8:6c94::1011".to_string()
 }
 
+fn docker_registry_image_fetch_cache_enabled() -> bool {
+    true
+}
+fn docker_registry_image_fetch_cache_duration() -> u64 {
+    5 * 60
+}
+
 fn docker_tmpfs_size() -> u64 {
     100
 }
@@ -919,6 +926,14 @@ nestify::nest! {
                 pub username: String,
                 pub password: String,
             }>,
+            #[serde(default)]
+            #[schema(inline)]
+            pub registry_image_fetch_cache: #[derive(Clone, Copy, ToSchema, Deserialize, Serialize, DefaultFromSerde)] #[serde(default)] pub struct DockerRegistryImageFetchCache {
+                #[serde(default = "docker_registry_image_fetch_cache_enabled")]
+                pub enabled: bool,
+                #[serde(default = "docker_registry_image_fetch_cache_duration")]
+                pub duration: u64,
+            },
 
             #[serde(default = "docker_tmpfs_size")]
             pub tmpfs_size: u64,

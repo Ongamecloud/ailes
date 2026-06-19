@@ -199,6 +199,12 @@ docker:
     # whether to disable binding to a specific ip
     disable_interface_binding: false
 
+  registry_image_fetch_cache:
+    # whether to enable caching of docker registry image fetches (pulls)
+    enabled: true
+    # how long in seconds to cache docker registry image fetches (pulls)
+    duration: 300
+
   installer_limits:
     # how long in seconds to wait until an install container is considered failed, 0 means no limit
     timeout: 1800
