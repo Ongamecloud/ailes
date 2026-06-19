@@ -43,7 +43,7 @@ mod get {
             }
         };
 
-        if let Err(err) = payload.validate(&state.config.jwt, Some("transfer")).await {
+        if let Err(err) = payload.validate(&state.config.jwt, Some("transfer")) {
             return ApiResponse::error(&format!("invalid token: {err}"))
                 .with_status(StatusCode::UNAUTHORIZED)
                 .ok();

@@ -284,7 +284,7 @@ pub async fn handle_ws(
                                             }
                                         };
 
-                                        if let Err(err) = socket_jwt.base.validate(&state.config.jwt, Some("websocket")).await {
+                                        if let Err(err) = socket_jwt.base.validate(&state.config.jwt, Some("websocket")) {
                                             tracing::debug!(
                                                 server = %server.uuid,
                                                 "invalid jwt when receiving targeted websocket message: {}",

@@ -1,7 +1,6 @@
 use serde::Serialize;
 use std::{path::Path, sync::Arc};
 use sysinfo::{Disks, Networks, System};
-use tokio::sync::RwLockReadGuard;
 use utoipa::ToSchema;
 
 #[derive(ToSchema, Serialize, Default)]
@@ -53,19 +52,19 @@ pub struct SystemStats {
 }
 
 pub struct StatsManager {
-    stats: Arc<tokio::sync::RwLock<SystemStats>>,
+    stats: Arc<arc_swap::ArcSwap<SystemStats>>,
 }
 
 impl StatsManager {
     #[inline]
-    pub async fn get_stats(&self) -> RwLockReadGuard<'_, SystemStats> {
-        self.stats.read().await
+    pub fn get_stats(&self) -> Arc<SystemStats> {
+        self.stats.load_full()
     }
 }
 
 impl Default for StatsManager {
     fn default() -> Self {
-        let stats = Arc::new(tokio::sync::RwLock::new(SystemStats::default()));
+        let stats = Arc::new(arc_swap::ArcSwap::new(Arc::new(SystemStats::default())));
 
         std::thread::spawn({
             let stats = Arc::clone(&stats);
@@ -144,7 +143,7 @@ impl Default for StatsManager {
                         .first()
                         .map_or_else(|| "unknown".to_string(), |cpu| cpu.brand().to_string());
 
-                    *stats.blocking_write() = SystemStats {
+                    stats.store(Arc::new(SystemStats {
                         cpu: SystemCpuStats {
                             used: cpu_usage,
                             threads: cpu_threads,
@@ -164,7 +163,7 @@ impl Default for StatsManager {
                             written: total_disk_write,
                             writing_rate: disk_write_rate,
                         },
-                    };
+                    }));
                 }
             }
         });

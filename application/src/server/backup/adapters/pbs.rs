@@ -688,7 +688,7 @@ impl BackupExt for PbsBackup {
 
         tokio::try_join!(fetch_task, extract_task)?;
 
-        server.filesystem.rerun_disk_checker().await;
+        server.filesystem.rerun_disk_checker();
 
         Ok(())
     }

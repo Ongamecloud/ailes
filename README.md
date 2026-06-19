@@ -68,7 +68,7 @@ system:
   # none, btrfs_subvolume, zfs_dataset, xfs_quota, (experimental) fuse_quota
   disk_limiter_mode: none
   # use inotify to selectively rescan disk usage instead of forcing full rescans
-  system_disk_check_use_inotify: true
+  disk_check_use_inotify: true
 
   # use multiple threads to run chown on server startup
   check_permissions_on_boot_threads: 4

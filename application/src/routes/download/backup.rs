@@ -60,7 +60,6 @@ mod get {
         if let Err(err) = payload
             .base
             .validate(&state.config.jwt, Some("backup-download"))
-            .await
         {
             return ApiResponse::error(&format!("invalid token: {err}"))
                 .with_status(StatusCode::UNAUTHORIZED)

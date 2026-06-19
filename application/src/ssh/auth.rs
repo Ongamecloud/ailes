@@ -133,19 +133,16 @@ impl russh::server::Handler for SshSession {
             .user_permissions
             .set_permissions(user, permissions, Some(&ignored_files));
         if self.state.config.load().system.sftp.activity.log_logins {
-            server
-                .activity
-                .log_activity(Activity {
-                    event: ActivityEvent::SftpLogin,
-                    user: Some(user),
-                    ip: Some(self.user_ip),
-                    metadata: Some(json!({
-                        "method": "password",
-                    })),
-                    schedule: None,
-                    timestamp: chrono::Utc::now(),
-                })
-                .await;
+            server.activity.log_activity(Activity {
+                event: ActivityEvent::SftpLogin,
+                user: Some(user),
+                ip: Some(self.user_ip),
+                metadata: Some(json!({
+                    "method": "password",
+                })),
+                schedule: None,
+                timestamp: chrono::Utc::now(),
+            });
         }
         self.server = Some(server);
 
@@ -219,19 +216,16 @@ impl russh::server::Handler for SshSession {
             .user_permissions
             .set_permissions(user, permissions, Some(&ignored_files));
         if self.state.config.load().system.sftp.activity.log_logins {
-            server
-                .activity
-                .log_activity(Activity {
-                    event: ActivityEvent::SftpLogin,
-                    user: Some(user),
-                    ip: Some(self.user_ip),
-                    metadata: Some(json!({
-                        "method": "public_key",
-                    })),
-                    schedule: None,
-                    timestamp: chrono::Utc::now(),
-                })
-                .await;
+            server.activity.log_activity(Activity {
+                event: ActivityEvent::SftpLogin,
+                user: Some(user),
+                ip: Some(self.user_ip),
+                metadata: Some(json!({
+                    "method": "public_key",
+                })),
+                schedule: None,
+                timestamp: chrono::Utc::now(),
+            });
         }
         self.server = Some(server);
 

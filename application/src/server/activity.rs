@@ -168,7 +168,7 @@ impl ActivityManager {
     }
 
     #[inline]
-    pub async fn log_activity(&self, activity: Activity) {
+    pub fn log_activity(&self, activity: Activity) {
         if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) = self.sender.try_send(activity)
         {
             tracing::warn!("activity channel full, dropping activity");

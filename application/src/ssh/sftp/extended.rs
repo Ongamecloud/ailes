@@ -400,20 +400,16 @@ pub async fn handle_extended(
                 .await
                 .map_err(|_| StatusCode::NoSuchFile)?;
 
-            sftp_session
-                .server
-                .activity
-                .log_activity(Activity {
-                    event: ActivityEvent::SftpCreate,
-                    user: Some(sftp_session.user_uuid),
-                    ip: Some(sftp_session.user_ip),
-                    metadata: Some(serde_json::json!({
-                        "files": [sftp_session.server.filesystem.relative_path(destination_path)],
-                    })),
-                    schedule: None,
-                    timestamp: chrono::Utc::now(),
-                })
-                .await;
+            sftp_session.server.activity.log_activity(Activity {
+                event: ActivityEvent::SftpCreate,
+                user: Some(sftp_session.user_uuid),
+                ip: Some(sftp_session.user_ip),
+                metadata: Some(serde_json::json!({
+                    "files": [sftp_session.server.filesystem.relative_path(destination_path)],
+                })),
+                schedule: None,
+                timestamp: chrono::Utc::now(),
+            });
 
             Ok(russh_sftp::protocol::Packet::Status(Status {
                 id,
@@ -645,20 +641,16 @@ pub async fn handle_extended(
                 return Err(StatusCode::Failure);
             }
 
-            sftp_session
-                .server
-                .activity
-                .log_activity(Activity {
-                    event: ActivityEvent::SftpCreate,
-                    user: Some(sftp_session.user_uuid),
-                    ip: Some(sftp_session.user_ip),
-                    metadata: Some(serde_json::json!({
-                        "files": [sftp_session.server.filesystem.relative_path(&linkpath)],
-                    })),
-                    schedule: None,
-                    timestamp: chrono::Utc::now(),
-                })
-                .await;
+            sftp_session.server.activity.log_activity(Activity {
+                event: ActivityEvent::SftpCreate,
+                user: Some(sftp_session.user_uuid),
+                ip: Some(sftp_session.user_ip),
+                metadata: Some(serde_json::json!({
+                    "files": [sftp_session.server.filesystem.relative_path(&linkpath)],
+                })),
+                schedule: None,
+                timestamp: chrono::Utc::now(),
+            });
 
             Ok(russh_sftp::protocol::Packet::Status(Status {
                 id,
@@ -956,7 +948,7 @@ pub async fn handle_extended(
                 }
             }
 
-            sftp_session.server.activity.log_activity(activity).await;
+            sftp_session.server.activity.log_activity(activity);
 
             Ok(russh_sftp::protocol::Packet::Status(Status {
                 id,

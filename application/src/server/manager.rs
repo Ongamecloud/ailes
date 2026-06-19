@@ -141,7 +141,7 @@ impl ServerManager {
                         );
 
                         if let Err(err) = installer.attach().await {
-                            tracing::error!(
+                            tracing::warn!(
                                 server = %server.uuid,
                                 "failed to attach installation container: {:#?}",
                                 err
@@ -152,6 +152,8 @@ impl ServerManager {
                             return;
                         }
 
+                        tracing::info!(server = %server.uuid, "installation container attached successfully");
+
                         server.installer.write().await.replace(installer);
                     }
                 });
@@ -160,10 +162,10 @@ impl ServerManager {
             } else {
                 match server.attach_container().await {
                     Ok(_) => {
-                        tracing::debug!(server = %server.uuid, "server attached successfully");
+                        tracing::info!(server = %server.uuid, "server attached successfully");
                     }
                     Err(err) => {
-                        tracing::error!(
+                        tracing::warn!(
                             server = %server.uuid,
                             error = %err,
                             "failed to attach server container"

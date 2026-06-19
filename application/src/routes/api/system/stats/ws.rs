@@ -22,11 +22,11 @@ pub async fn handle_ws(ws: WebSocketUpgrade, state: GetState) -> Response {
 
                 async move {
                     loop {
-                        let stats = state.stats_manager.get_stats().await;
+                        let stats = state.stats_manager.get_stats();
                         let stats_json = match serde_json::to_string(&*stats) {
                             Ok(json) => json,
                             Err(err) => {
-                                tracing::error!("Failed to serialize stats to JSON: {}", err);
+                                tracing::error!("failed to serialize stats to JSON: {}", err);
                                 continue;
                             }
                         };

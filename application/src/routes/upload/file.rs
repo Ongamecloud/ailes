@@ -115,7 +115,6 @@ mod post {
                 if let Err(err) = payload
                     .base
                     .validate(&state.config.jwt, Some("file-upload"))
-                    .await
                 {
                     return ApiResponse::error(&format!("invalid token: {err}"))
                         .with_status(StatusCode::UNAUTHORIZED)
@@ -250,7 +249,6 @@ mod post {
                 if let Err(err) = payload
                     .base
                     .validate(&state.config.jwt, Some("file-upload"))
-                    .await
                 {
                     return ApiResponse::error(&format!("invalid token: {err}"))
                         .with_status(StatusCode::UNAUTHORIZED)
@@ -358,20 +356,17 @@ mod post {
                     let mut written_size = 0;
                     let mut writer = filesystem.async_create_file(&path).await?;
 
-                    server
-                        .activity
-                        .log_activity(Activity {
-                            event: ActivityEvent::FileUploaded,
-                            user: Some(payload.user_uuid),
-                            ip: user_ip,
-                            metadata: Some(json!({
-                                "files": [filename],
-                                "directory": server.filesystem.relative_path(&directory),
-                            })),
-                            schedule: None,
-                            timestamp: chrono::Utc::now(),
-                        })
-                        .await;
+                    server.activity.log_activity(Activity {
+                        event: ActivityEvent::FileUploaded,
+                        user: Some(payload.user_uuid),
+                        ip: user_ip,
+                        metadata: Some(json!({
+                            "files": [filename],
+                            "directory": server.filesystem.relative_path(&directory),
+                        })),
+                        schedule: None,
+                        timestamp: chrono::Utc::now(),
+                    });
 
                     while let Some(chunk) = field.chunk().await? {
                         let config = state.config.load();

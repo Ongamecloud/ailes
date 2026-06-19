@@ -345,17 +345,14 @@ impl ScheduleAction {
                             }
                         }
                     } else {
-                        server
-                            .activity
-                            .log_activity(Activity {
-                                event: ActivityEvent::PowerStart,
-                                user: None,
-                                ip: None,
-                                metadata: None,
-                                schedule: Some(execution_context.schedule_uuid),
-                                timestamp: chrono::Utc::now(),
-                            })
-                            .await;
+                        server.activity.log_activity(Activity {
+                            event: ActivityEvent::PowerStart,
+                            user: None,
+                            ip: None,
+                            metadata: None,
+                            schedule: Some(execution_context.schedule_uuid),
+                            timestamp: chrono::Utc::now(),
+                        });
                     }
                 }
                 crate::models::ServerPowerAction::Restart => {
@@ -392,17 +389,14 @@ impl ScheduleAction {
                             }
                         }
                     } else {
-                        server
-                            .activity
-                            .log_activity(Activity {
-                                event: ActivityEvent::PowerRestart,
-                                user: None,
-                                ip: None,
-                                metadata: None,
-                                schedule: Some(execution_context.schedule_uuid),
-                                timestamp: chrono::Utc::now(),
-                            })
-                            .await;
+                        server.activity.log_activity(Activity {
+                            event: ActivityEvent::PowerRestart,
+                            user: None,
+                            ip: None,
+                            metadata: None,
+                            schedule: Some(execution_context.schedule_uuid),
+                            timestamp: chrono::Utc::now(),
+                        });
                     }
                 }
                 crate::models::ServerPowerAction::Stop => {
@@ -443,17 +437,14 @@ impl ScheduleAction {
                             }
                         }
                     } else {
-                        server
-                            .activity
-                            .log_activity(Activity {
-                                event: ActivityEvent::PowerStop,
-                                user: None,
-                                ip: None,
-                                metadata: None,
-                                schedule: Some(execution_context.schedule_uuid),
-                                timestamp: chrono::Utc::now(),
-                            })
-                            .await;
+                        server.activity.log_activity(Activity {
+                            event: ActivityEvent::PowerStop,
+                            user: None,
+                            ip: None,
+                            metadata: None,
+                            schedule: Some(execution_context.schedule_uuid),
+                            timestamp: chrono::Utc::now(),
+                        });
                     }
                 }
                 crate::models::ServerPowerAction::Kill => {
@@ -470,17 +461,14 @@ impl ScheduleAction {
 
                         return Err("an unexpected error occurred while killing the server.".into());
                     } else {
-                        server
-                            .activity
-                            .log_activity(Activity {
-                                event: ActivityEvent::PowerKill,
-                                user: None,
-                                ip: None,
-                                metadata: None,
-                                schedule: Some(execution_context.schedule_uuid),
-                                timestamp: chrono::Utc::now(),
-                            })
-                            .await;
+                        server.activity.log_activity(Activity {
+                            event: ActivityEvent::PowerKill,
+                            user: None,
+                            ip: None,
+                            metadata: None,
+                            schedule: Some(execution_context.schedule_uuid),
+                            timestamp: chrono::Utc::now(),
+                        });
                     }
                 }
             },
@@ -501,19 +489,16 @@ impl ScheduleAction {
                     .await
                     .is_ok()
                 {
-                    server
-                        .activity
-                        .log_activity(Activity {
-                            event: ActivityEvent::ConsoleCommand,
-                            user: None,
-                            ip: None,
-                            metadata: Some(serde_json::json!({
-                                "command": command,
-                            })),
-                            schedule: Some(execution_context.schedule_uuid),
-                            timestamp: chrono::Utc::now(),
-                        })
-                        .await;
+                    server.activity.log_activity(Activity {
+                        event: ActivityEvent::ConsoleCommand,
+                        user: None,
+                        ip: None,
+                        metadata: Some(serde_json::json!({
+                            "command": command,
+                        })),
+                        schedule: Some(execution_context.schedule_uuid),
+                        timestamp: chrono::Utc::now(),
+                    });
                 }
             }
             ScheduleAction::CreateBackup {
@@ -631,20 +616,17 @@ impl ScheduleAction {
                     return Err("failed to create directory".into());
                 }
 
-                server
-                    .activity
-                    .log_activity(Activity {
-                        event: ActivityEvent::FileCreateDirectory,
-                        user: None,
-                        ip: None,
-                        metadata: Some(serde_json::json!({
-                            "directory": raw_root,
-                            "name": name,
-                        })),
-                        schedule: Some(execution_context.schedule_uuid),
-                        timestamp: chrono::Utc::now(),
-                    })
-                    .await;
+                server.activity.log_activity(Activity {
+                    event: ActivityEvent::FileCreateDirectory,
+                    user: None,
+                    ip: None,
+                    metadata: Some(serde_json::json!({
+                        "directory": raw_root,
+                        "name": name,
+                    })),
+                    schedule: Some(execution_context.schedule_uuid),
+                    timestamp: chrono::Utc::now(),
+                });
             }
             ScheduleAction::WriteFile {
                 file: file_path,
@@ -750,19 +732,16 @@ impl ScheduleAction {
                     return Err("failed to shutdown file".into());
                 }
 
-                server
-                    .activity
-                    .log_activity(Activity {
-                        event: ActivityEvent::FileWrite,
-                        user: None,
-                        ip: None,
-                        metadata: Some(serde_json::json!({
-                            "file": file_path,
-                        })),
-                        schedule: Some(execution_context.schedule_uuid),
-                        timestamp: chrono::Utc::now(),
-                    })
-                    .await;
+                server.activity.log_activity(Activity {
+                    event: ActivityEvent::FileWrite,
+                    user: None,
+                    ip: None,
+                    metadata: Some(serde_json::json!({
+                        "file": file_path,
+                    })),
+                    schedule: Some(execution_context.schedule_uuid),
+                    timestamp: chrono::Utc::now(),
+                });
             }
             ScheduleAction::CopyFile {
                 foreground,
@@ -915,20 +894,17 @@ impl ScheduleAction {
                     }
                 }
 
-                server
-                    .activity
-                    .log_activity(Activity {
-                        event: ActivityEvent::FileCopy,
-                        user: None,
-                        ip: None,
-                        metadata: Some(serde_json::json!({
-                            "file": file,
-                            "name": destination,
-                        })),
-                        schedule: Some(execution_context.schedule_uuid),
-                        timestamp: chrono::Utc::now(),
-                    })
-                    .await;
+                server.activity.log_activity(Activity {
+                    event: ActivityEvent::FileCopy,
+                    user: None,
+                    ip: None,
+                    metadata: Some(serde_json::json!({
+                        "file": file,
+                        "name": destination,
+                    })),
+                    schedule: Some(execution_context.schedule_uuid),
+                    timestamp: chrono::Utc::now(),
+                });
             }
             ScheduleAction::DeleteFiles { root, files } => {
                 let raw_root = match execution_context.resolve_parameter(root) {
@@ -969,20 +945,17 @@ impl ScheduleAction {
                     }
                 }
 
-                server
-                    .activity
-                    .log_activity(Activity {
-                        event: ActivityEvent::FileDelete,
-                        user: None,
-                        ip: None,
-                        metadata: Some(serde_json::json!({
-                            "directory": raw_root,
-                            "files": files,
-                        })),
-                        schedule: Some(execution_context.schedule_uuid),
-                        timestamp: chrono::Utc::now(),
-                    })
-                    .await;
+                server.activity.log_activity(Activity {
+                    event: ActivityEvent::FileDelete,
+                    user: None,
+                    ip: None,
+                    metadata: Some(serde_json::json!({
+                        "directory": raw_root,
+                        "files": files,
+                    })),
+                    schedule: Some(execution_context.schedule_uuid),
+                    timestamp: chrono::Utc::now(),
+                });
             }
             ScheduleAction::RenameFiles { root, files } => {
                 let raw_root = match execution_context.resolve_parameter(root) {
@@ -1042,20 +1015,17 @@ impl ScheduleAction {
                     }
                 }
 
-                server
-                    .activity
-                    .log_activity(Activity {
-                        event: ActivityEvent::FileRename,
-                        user: None,
-                        ip: None,
-                        metadata: Some(serde_json::json!({
-                            "directory": raw_root,
-                            "files": files,
-                        })),
-                        schedule: Some(execution_context.schedule_uuid),
-                        timestamp: chrono::Utc::now(),
-                    })
-                    .await;
+                server.activity.log_activity(Activity {
+                    event: ActivityEvent::FileRename,
+                    user: None,
+                    ip: None,
+                    metadata: Some(serde_json::json!({
+                        "directory": raw_root,
+                        "files": files,
+                    })),
+                    schedule: Some(execution_context.schedule_uuid),
+                    timestamp: chrono::Utc::now(),
+                });
             }
             ScheduleAction::CompressFiles {
                 foreground,
@@ -1233,21 +1203,18 @@ impl ScheduleAction {
                     )
                     .await;
 
-                server
-                    .activity
-                    .log_activity(Activity {
-                        event: ActivityEvent::FileCompress,
-                        user: None,
-                        ip: None,
-                        metadata: Some(serde_json::json!({
-                            "directory": raw_root,
-                            "name": name,
-                            "files": files,
-                        })),
-                        schedule: Some(execution_context.schedule_uuid),
-                        timestamp: chrono::Utc::now(),
-                    })
-                    .await;
+                server.activity.log_activity(Activity {
+                    event: ActivityEvent::FileCompress,
+                    user: None,
+                    ip: None,
+                    metadata: Some(serde_json::json!({
+                        "directory": raw_root,
+                        "name": name,
+                        "files": files,
+                    })),
+                    schedule: Some(execution_context.schedule_uuid),
+                    timestamp: chrono::Utc::now(),
+                });
 
                 if *foreground {
                     match task.await {
@@ -1336,20 +1303,17 @@ impl ScheduleAction {
 
                 let thread = tokio::spawn(archive.extract(root.clone(), None, None));
 
-                server
-                    .activity
-                    .log_activity(Activity {
-                        event: ActivityEvent::FileDecompress,
-                        user: None,
-                        ip: None,
-                        metadata: Some(serde_json::json!({
-                            "directory": root.display().to_string(),
-                            "file": file,
-                        })),
-                        schedule: Some(execution_context.schedule_uuid),
-                        timestamp: chrono::Utc::now(),
-                    })
-                    .await;
+                server.activity.log_activity(Activity {
+                    event: ActivityEvent::FileDecompress,
+                    user: None,
+                    ip: None,
+                    metadata: Some(serde_json::json!({
+                        "directory": root.display().to_string(),
+                        "file": file,
+                    })),
+                    schedule: Some(execution_context.schedule_uuid),
+                    timestamp: chrono::Utc::now(),
+                });
 
                 if *foreground && let Ok(Err(err)) = thread.await {
                     tracing::error!(path = %source.display(), "failed to decompress file: {:?}", err);

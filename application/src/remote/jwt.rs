@@ -47,7 +47,7 @@ pub struct BasePayload {
 }
 
 impl BasePayload {
-    pub async fn validate(
+    pub fn validate(
         &self,
         client: &JwtClient,
         scope: Option<&str>,

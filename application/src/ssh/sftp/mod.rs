@@ -492,19 +492,16 @@ impl russh_sftp::server::Handler for SftpSession {
                 tracing::error!("failed to forget file from diff storage: {:?}", err);
             }
 
-            self.server
-                .activity
-                .log_activity(Activity {
-                    event: ActivityEvent::SftpDelete,
-                    user: Some(self.user_uuid),
-                    ip: Some(self.user_ip),
-                    metadata: Some(json!({
-                        "files": [self.server.filesystem.relative_path(&path)],
-                    })),
-                    schedule: None,
-                    timestamp: chrono::Utc::now(),
-                })
-                .await;
+            self.server.activity.log_activity(Activity {
+                event: ActivityEvent::SftpDelete,
+                user: Some(self.user_uuid),
+                ip: Some(self.user_ip),
+                metadata: Some(json!({
+                    "files": [self.server.filesystem.relative_path(&path)],
+                })),
+                schedule: None,
+                timestamp: chrono::Utc::now(),
+            });
         }
 
         Ok(Status {
@@ -548,19 +545,16 @@ impl russh_sftp::server::Handler for SftpSession {
                 return Err(StatusCode::NoSuchFile);
             }
 
-            self.server
-                .activity
-                .log_activity(Activity {
-                    event: ActivityEvent::SftpDelete,
-                    user: Some(self.user_uuid),
-                    ip: Some(self.user_ip),
-                    metadata: Some(json!({
-                        "files": [self.server.filesystem.relative_path(&path)],
-                    })),
-                    schedule: None,
-                    timestamp: chrono::Utc::now(),
-                })
-                .await;
+            self.server.activity.log_activity(Activity {
+                event: ActivityEvent::SftpDelete,
+                user: Some(self.user_uuid),
+                ip: Some(self.user_ip),
+                metadata: Some(json!({
+                    "files": [self.server.filesystem.relative_path(&path)],
+                })),
+                schedule: None,
+                timestamp: chrono::Utc::now(),
+            });
         }
 
         Ok(Status {
@@ -633,19 +627,16 @@ impl russh_sftp::server::Handler for SftpSession {
             return Err(StatusCode::Failure);
         }
 
-        self.server
-            .activity
-            .log_activity(Activity {
-                event: ActivityEvent::SftpCreateDirectory,
-                user: Some(self.user_uuid),
-                ip: Some(self.user_ip),
-                metadata: Some(json!({
-                    "files": [self.server.filesystem.relative_path(path)],
-                })),
-                schedule: None,
-                timestamp: chrono::Utc::now(),
-            })
-            .await;
+        self.server.activity.log_activity(Activity {
+            event: ActivityEvent::SftpCreateDirectory,
+            user: Some(self.user_uuid),
+            ip: Some(self.user_ip),
+            metadata: Some(json!({
+                "files": [self.server.filesystem.relative_path(path)],
+            })),
+            schedule: None,
+            timestamp: chrono::Utc::now(),
+        });
 
         Ok(Status {
             id,
@@ -782,7 +773,7 @@ impl russh_sftp::server::Handler for SftpSession {
             }
         }
 
-        self.server.activity.log_activity(activity).await;
+        self.server.activity.log_activity(activity);
 
         Ok(Status {
             id,
@@ -1050,19 +1041,16 @@ impl russh_sftp::server::Handler for SftpSession {
             tracing::warn!("failed to chown new symlink: {:?}", err);
         }
 
-        self.server
-            .activity
-            .log_activity(Activity {
-                event: ActivityEvent::SftpCreate,
-                user: Some(self.user_uuid),
-                ip: Some(self.user_ip),
-                metadata: Some(json!({
-                    "files": [self.server.filesystem.relative_path(&linkpath)],
-                })),
-                schedule: None,
-                timestamp: chrono::Utc::now(),
-            })
-            .await;
+        self.server.activity.log_activity(Activity {
+            event: ActivityEvent::SftpCreate,
+            user: Some(self.user_uuid),
+            ip: Some(self.user_ip),
+            metadata: Some(json!({
+                "files": [self.server.filesystem.relative_path(&linkpath)],
+            })),
+            schedule: None,
+            timestamp: chrono::Utc::now(),
+        });
 
         Ok(Status {
             id,
@@ -1237,19 +1225,16 @@ impl russh_sftp::server::Handler for SftpSession {
         let path_components = self.server.filesystem.path_to_components(&path);
 
         if let Some(event) = activity_event {
-            self.server
-                .activity
-                .log_activity(Activity {
-                    event,
-                    user: Some(self.user_uuid),
-                    ip: Some(self.user_ip),
-                    metadata: Some(json!({
-                        "files": [self.server.filesystem.relative_path(&path)],
-                    })),
-                    schedule: None,
-                    timestamp: chrono::Utc::now(),
-                })
-                .await;
+            self.server.activity.log_activity(Activity {
+                event,
+                user: Some(self.user_uuid),
+                ip: Some(self.user_ip),
+                metadata: Some(json!({
+                    "files": [self.server.filesystem.relative_path(&path)],
+                })),
+                schedule: None,
+                timestamp: chrono::Utc::now(),
+            });
         }
 
         if pflags.contains(OpenFlags::TRUNCATE)

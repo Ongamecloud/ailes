@@ -92,17 +92,14 @@ impl ShellSession {
                                 }
                             }
                         } else {
-                            self.server
-                                .activity
-                                .log_activity(Activity {
-                                    event: ActivityEvent::PowerStart,
-                                    user: Some(self.user_uuid),
-                                    ip: Some(self.user_ip),
-                                    metadata: None,
-                                    schedule: None,
-                                    timestamp: chrono::Utc::now(),
-                                })
-                                .await;
+                            self.server.activity.log_activity(Activity {
+                                event: ActivityEvent::PowerStart,
+                                user: Some(self.user_uuid),
+                                ip: Some(self.user_ip),
+                                metadata: None,
+                                schedule: None,
+                                timestamp: chrono::Utc::now(),
+                            });
                         }
                     } else {
                         writeln("You are missing the `control.start` permission to do this.").await;
@@ -144,17 +141,14 @@ impl ShellSession {
                                 }
                             }
                         } else {
-                            self.server
-                                .activity
-                                .log_activity(Activity {
-                                    event: ActivityEvent::PowerRestart,
-                                    user: Some(self.user_uuid),
-                                    ip: Some(self.user_ip),
-                                    metadata: None,
-                                    schedule: None,
-                                    timestamp: chrono::Utc::now(),
-                                })
-                                .await;
+                            self.server.activity.log_activity(Activity {
+                                event: ActivityEvent::PowerRestart,
+                                user: Some(self.user_uuid),
+                                ip: Some(self.user_ip),
+                                metadata: None,
+                                schedule: None,
+                                timestamp: chrono::Utc::now(),
+                            });
                         }
                     } else {
                         writeln("You are missing the `control.restart` permission to do this.")
@@ -197,17 +191,14 @@ impl ShellSession {
                                 }
                             }
                         } else {
-                            self.server
-                                .activity
-                                .log_activity(Activity {
-                                    event: ActivityEvent::PowerStop,
-                                    user: Some(self.user_uuid),
-                                    ip: Some(self.user_ip),
-                                    metadata: None,
-                                    schedule: None,
-                                    timestamp: chrono::Utc::now(),
-                                })
-                                .await;
+                            self.server.activity.log_activity(Activity {
+                                event: ActivityEvent::PowerStop,
+                                user: Some(self.user_uuid),
+                                ip: Some(self.user_ip),
+                                metadata: None,
+                                schedule: None,
+                                timestamp: chrono::Utc::now(),
+                            });
                         }
                     } else {
                         writeln("You are missing the `control.stop` permission to do this.").await;
@@ -232,17 +223,14 @@ impl ShellSession {
                             writeln("An unexpected error occurred while killing the server. Please contact an Administrator.")
                                         .await;
                         } else {
-                            self.server
-                                .activity
-                                .log_activity(Activity {
-                                    event: ActivityEvent::PowerKill,
-                                    user: Some(self.user_uuid),
-                                    ip: Some(self.user_ip),
-                                    metadata: None,
-                                    schedule: None,
-                                    timestamp: chrono::Utc::now(),
-                                })
-                                .await;
+                            self.server.activity.log_activity(Activity {
+                                event: ActivityEvent::PowerKill,
+                                user: Some(self.user_uuid),
+                                ip: Some(self.user_ip),
+                                metadata: None,
+                                schedule: None,
+                                timestamp: chrono::Utc::now(),
+                            });
                         }
                     } else {
                         writeln("You are missing the `control.stop` permission to do this.").await;
@@ -490,19 +478,16 @@ impl ShellSession {
                                     } else {
                                         data_writer.write_all(b"\r").await.unwrap_or_default();
 
-                                        self.server
-                                            .activity
-                                            .log_activity(Activity {
-                                                event: ActivityEvent::ConsoleCommand,
-                                                user: Some(self.user_uuid),
-                                                ip: Some(self.user_ip),
-                                                metadata: Some(json!({
-                                                    "command": line,
-                                                })),
-                                                schedule: None,
-                                                timestamp: chrono::Utc::now(),
-                                            })
-                                            .await;
+                                        self.server.activity.log_activity(Activity {
+                                            event: ActivityEvent::ConsoleCommand,
+                                            user: Some(self.user_uuid),
+                                            ip: Some(self.user_ip),
+                                            metadata: Some(json!({
+                                                "command": line,
+                                            })),
+                                            schedule: None,
+                                            timestamp: chrono::Utc::now(),
+                                        });
                                     }
                                 } else {
                                     let prelude = self.state.config.daemon_prelude();

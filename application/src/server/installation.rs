@@ -160,7 +160,7 @@ impl ServerInstaller {
             );
         }
 
-        self.server.filesystem.rerun_disk_checker().await;
+        self.server.filesystem.rerun_disk_checker();
 
         Ok(())
     }

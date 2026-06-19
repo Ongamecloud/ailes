@@ -991,7 +991,7 @@ impl Server {
                                 server.log_daemon_with_prelude(
                                     "Recalculating disk usage before startup, this may take a moment...",
                                 );
-                                server.filesystem.rerun_disk_checker().await;
+                                server.filesystem.rerun_disk_checker();
                                 let _ = tokio::time::timeout(
                                     std::time::Duration::from_secs(
                                         server.app_state.config.load().system.disk_check_interval.min(30),

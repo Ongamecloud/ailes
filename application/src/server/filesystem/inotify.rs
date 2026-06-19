@@ -1,4 +1,5 @@
 use notify::Watcher;
+use parking_lot::Mutex;
 use std::{
     collections::HashMap,
     path::PathBuf,
@@ -7,12 +8,11 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
-use tokio::sync::Mutex;
 
 type ServerNotifiers = Arc<Mutex<HashMap<uuid::Uuid, InotifyServerNotifier>>>;
 
 pub struct InotifyManager {
-    watcher: Arc<parking_lot::Mutex<notify::RecommendedWatcher>>,
+    watcher: Arc<Mutex<notify::RecommendedWatcher>>,
     server_notifiers: ServerNotifiers,
 }
 
@@ -32,7 +32,7 @@ impl InotifyManager {
 
                         for path in event.paths {
                             let notifier = {
-                                let notifiers = server_notifiers.blocking_lock();
+                                let notifiers = server_notifiers.lock();
                                 notifiers
                                     .values()
                                     .find(|n| path.starts_with(&n.path))
@@ -50,7 +50,7 @@ impl InotifyManager {
                                 err
                             );
 
-                            for notifier in server_notifiers.blocking_lock().values() {
+                            for notifier in server_notifiers.lock().values() {
                                 notifier.is_trusted.store(false, Ordering::Relaxed);
                             }
                         }
@@ -73,22 +73,23 @@ impl InotifyManager {
     ) -> Result<(), anyhow::Error> {
         let base_path = notifier.path.clone();
         let watcher = Arc::clone(&self.watcher);
+        let server_notifiers = Arc::clone(&self.server_notifiers);
 
         tokio::task::spawn_blocking(move || {
             watcher
                 .lock()
                 .watch(&base_path, notify::RecursiveMode::Recursive)?;
+            server_notifiers.lock().insert(uuid, notifier);
+
             Ok::<_, anyhow::Error>(())
         })
         .await??;
-
-        self.server_notifiers.lock().await.insert(uuid, notifier);
 
         Ok(())
     }
 
     pub async fn unregister_server(&self, uuid: uuid::Uuid) {
-        if let Some(notifier) = self.server_notifiers.lock().await.remove(&uuid) {
+        if let Some(notifier) = self.server_notifiers.lock().remove(&uuid) {
             crate::spawn_blocking_handled({
                 let path = notifier.path.clone();
                 let watcher = Arc::clone(&self.watcher);
@@ -118,7 +119,7 @@ impl InotifyServerNotifier {
     fn add_path(&self, path: PathBuf) {
         const MAX_PATHS_BEFORE_DEDUP: usize = 512;
 
-        let mut paths = self.modified_paths.blocking_lock();
+        let mut paths = self.modified_paths.lock();
         if paths.first() == Some(&self.path) {
             return;
         }
@@ -139,13 +140,13 @@ impl InotifyServerNotifier {
         self.is_trusted.load(Ordering::Relaxed)
     }
 
-    pub async fn clear_modified_paths(&self) {
-        let mut paths = self.modified_paths.lock().await;
+    pub fn clear_modified_paths(&self) {
+        let mut paths = self.modified_paths.lock();
         paths.clear();
     }
 
-    pub async fn take_modified_paths(&self) -> Vec<PathBuf> {
-        let mut paths = self.modified_paths.lock().await;
+    pub fn take_modified_paths(&self) -> Vec<PathBuf> {
+        let mut paths = self.modified_paths.lock();
         crate::utils::deduplicate_paths(std::mem::take(&mut *paths))
     }
 }

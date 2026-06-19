@@ -72,20 +72,17 @@ impl ExecSession {
                             )
                             .await?;
 
-                            self.server
-                                .activity
-                                .log_activity(Activity {
-                                    event: ActivityEvent::FileDecompress,
-                                    user: Some(self.user_uuid),
-                                    ip: Some(self.user_ip),
-                                    metadata: Some(json!({
-                                        "directory": destination.trim(),
-                                        "file": path.trim(),
-                                    })),
-                                    schedule: None,
-                                    timestamp: chrono::Utc::now(),
-                                })
-                                .await;
+                            self.server.activity.log_activity(Activity {
+                                event: ActivityEvent::FileDecompress,
+                                user: Some(self.user_uuid),
+                                ip: Some(self.user_ip),
+                                metadata: Some(json!({
+                                    "directory": destination.trim(),
+                                    "file": path.trim(),
+                                })),
+                                schedule: None,
+                                timestamp: chrono::Utc::now(),
+                            });
 
                             archive
                                 .extract(PathBuf::from(destination.trim()), None, None)
@@ -152,8 +149,7 @@ impl ExecSession {
                                     })),
                                     schedule: None,
                                     timestamp: chrono::Utc::now(),
-                                })
-                                .await;
+                                });
 
                             let writer = tokio::task::spawn_blocking({
                                 let server = self.server.clone();
@@ -229,19 +225,16 @@ impl ExecSession {
                                 err
                             );
                         } else {
-                            self.server
-                                .activity
-                                .log_activity(Activity {
-                                    event: ActivityEvent::ConsoleCommand,
-                                    user: Some(self.user_uuid),
-                                    ip: Some(self.user_ip),
-                                    metadata: Some(json!({
-                                        "command": command,
-                                    })),
-                                    schedule: None,
-                                    timestamp: chrono::Utc::now(),
-                                })
-                                .await;
+                            self.server.activity.log_activity(Activity {
+                                event: ActivityEvent::ConsoleCommand,
+                                user: Some(self.user_uuid),
+                                ip: Some(self.user_ip),
+                                metadata: Some(json!({
+                                    "command": command,
+                                })),
+                                schedule: None,
+                                timestamp: chrono::Utc::now(),
+                            });
                         }
                     } else {
                         channel

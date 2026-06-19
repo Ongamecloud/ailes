@@ -185,8 +185,8 @@ impl Filesystem {
     }
 
     #[inline]
-    pub async fn rerun_disk_checker(&self) {
-        self.server_notifier.clear_modified_paths().await;
+    pub fn rerun_disk_checker(&self) {
+        self.server_notifier.clear_modified_paths();
         self.disk_checker_rescan.notify_one();
     }
 

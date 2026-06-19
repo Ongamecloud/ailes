@@ -267,7 +267,7 @@ pub async fn run(ctx: DiskCheckerContext) {
             {
                 None
             } else if use_server_notifier.load(Ordering::Relaxed) && server_notifier.is_trusted() {
-                let paths = server_notifier.take_modified_paths().await;
+                let paths = server_notifier.take_modified_paths();
 
                 tracing::debug!(
                     path = %cap_filesystem.base_path.display(),

@@ -678,7 +678,7 @@ impl BackupExt for KopiaBackup {
         }
 
         progress.store(total.load(Ordering::SeqCst), Ordering::SeqCst);
-        server.filesystem.rerun_disk_checker().await;
+        server.filesystem.rerun_disk_checker();
 
         Ok(())
     }
