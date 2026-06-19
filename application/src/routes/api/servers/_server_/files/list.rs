@@ -16,15 +16,15 @@ mod get {
     #[derive(ToSchema, Deserialize)]
     pub struct Params {
         #[serde(default, alias = "directory")]
-        pub root: compact_str::CompactString,
+        root: compact_str::CompactString,
         #[serde(default)]
-        pub ignored: Vec<compact_str::CompactString>,
+        ignored: Vec<compact_str::CompactString>,
 
-        pub per_page: Option<usize>,
-        pub page: Option<usize>,
+        per_page: Option<usize>,
+        page: Option<usize>,
 
         #[serde(default)]
-        pub sort: crate::models::DirectorySortingMode,
+        sort: crate::models::DirectorySortingMode,
     }
 
     #[derive(ToSchema, Serialize)]

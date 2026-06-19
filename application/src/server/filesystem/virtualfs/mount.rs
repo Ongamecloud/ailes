@@ -89,11 +89,8 @@ impl VirtualReadableFilesystem for VirtualMountFilesystem {
     ) -> Result<FileMetadata, anyhow::Error> {
         match self.inner.metadata(path) {
             Ok(m) => Ok(m),
-            Err(e) if self.is_virtual_dir(path.as_ref()) => {
-                let _ = e;
-                Ok(Self::virtual_dir_metadata())
-            }
-            Err(e) => Err(e),
+            Err(_) if self.is_virtual_dir(path.as_ref()) => Ok(Self::virtual_dir_metadata()),
+            Err(err) => Err(err),
         }
     }
 
@@ -104,7 +101,7 @@ impl VirtualReadableFilesystem for VirtualMountFilesystem {
         match self.inner.async_metadata(path).await {
             Ok(m) => Ok(m),
             Err(_) if self.is_virtual_dir(path.as_ref()) => Ok(Self::virtual_dir_metadata()),
-            Err(e) => Err(e),
+            Err(err) => Err(err),
         }
     }
 
@@ -115,7 +112,7 @@ impl VirtualReadableFilesystem for VirtualMountFilesystem {
         match self.inner.symlink_metadata(path) {
             Ok(m) => Ok(m),
             Err(_) if self.is_virtual_dir(path.as_ref()) => Ok(Self::virtual_dir_metadata()),
-            Err(e) => Err(e),
+            Err(err) => Err(err),
         }
     }
 
@@ -126,7 +123,7 @@ impl VirtualReadableFilesystem for VirtualMountFilesystem {
         match self.inner.async_symlink_metadata(path).await {
             Ok(m) => Ok(m),
             Err(_) if self.is_virtual_dir(path.as_ref()) => Ok(Self::virtual_dir_metadata()),
-            Err(e) => Err(e),
+            Err(err) => Err(err),
         }
     }
 
@@ -139,7 +136,7 @@ impl VirtualReadableFilesystem for VirtualMountFilesystem {
             Err(_) if self.is_virtual_dir(path.as_ref()) => {
                 Ok(Self::virtual_dir_entry(path.as_ref()))
             }
-            Err(e) => Err(e),
+            Err(err) => Err(err),
         }
     }
 
@@ -153,7 +150,7 @@ impl VirtualReadableFilesystem for VirtualMountFilesystem {
             Err(_) if self.is_virtual_dir(path.as_ref()) => {
                 Ok(Self::virtual_dir_entry(path.as_ref()))
             }
-            Err(e) => Err(e),
+            Err(err) => Err(err),
         }
     }
 

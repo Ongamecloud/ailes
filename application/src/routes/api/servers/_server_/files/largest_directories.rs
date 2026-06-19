@@ -17,6 +17,8 @@ mod get {
     pub struct Params {
         #[serde(default)]
         directory: compact_str::CompactString,
+        #[serde(default)]
+        ignored: Vec<compact_str::CompactString>,
     }
 
     #[utoipa::path(get, path = "/", responses(
@@ -33,8 +35,24 @@ mod get {
             "directory" = String, Query,
             description = "The directory to analyze",
         ),
+        (
+            "ignored" = Vec<String>, Query,
+            description = "Additional ignored files",
+        ),
     ))]
     pub async fn route(server: GetServer, Query(data): Query<Params>) -> ApiResponseResult {
+        let ignore = if data.ignored.is_empty() {
+            None
+        } else {
+            let mut ignore_builder = ignore::gitignore::GitignoreBuilder::new("/");
+
+            for line in data.ignored {
+                ignore_builder.add_line(None, &line).ok();
+            }
+
+            ignore_builder.build().ok()
+        };
+
         let (root, filesystem) = server
             .filesystem
             .resolve_readable_fs(&server, Path::new(&data.directory))
@@ -45,6 +63,16 @@ mod get {
                 .with_status(StatusCode::EXPECTATION_FAILED)
                 .ok();
         }
+
+        let is_ignored = match ignore {
+            Some(ignore) => vec![server.filesystem.get_ignored(), ignore],
+            None => vec![server.filesystem.get_ignored()],
+        };
+        let is_path_ignored = |path: &Path, is_dir: bool| {
+            is_ignored
+                .iter()
+                .any(|gi| gi.matched(path, is_dir).is_ignore())
+        };
 
         let mut entries = Vec::new();
         let directories = server.filesystem.disk_usage.read().await;
@@ -60,6 +88,10 @@ mod get {
 
         while let Some((usage_path, usage)) = stack.pop() {
             if !usage_path.as_os_str().is_empty() {
+                if is_path_ignored(&root.join(&usage_path), true) {
+                    continue;
+                }
+
                 let self_size = usage.space.get_logical().saturating_sub(
                     usage
                         .get_entries()
