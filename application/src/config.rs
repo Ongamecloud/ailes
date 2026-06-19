@@ -14,6 +14,7 @@ use std::{
 };
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::{
+    filter::Targets,
     fmt::writer::MakeWriterExt,
     layer::{Layered, SubscriberExt},
     util::SubscriberInitExt,
@@ -1093,10 +1094,21 @@ pub struct ConfigGuard(
 );
 
 pub type ConfigSnapshot = arc_swap::Guard<Arc<InnerConfig>>;
-type ReloadHandle = tracing_subscriber::reload::Handle<
-    LevelFilter,
-    Layered<LevelFilter, tracing_subscriber::Registry>,
->;
+type ReloadHandle =
+    tracing_subscriber::reload::Handle<Targets, Layered<LevelFilter, tracing_subscriber::Registry>>;
+
+fn log_filter(debug: bool) -> Targets {
+    let crate_level = if debug {
+        LevelFilter::DEBUG
+    } else {
+        LevelFilter::INFO
+    };
+
+    Targets::new()
+        .with_default(LevelFilter::INFO)
+        .with_target("wings_rs", crate_level)
+        .with_target("pbs_client", crate_level)
+}
 
 pub struct Config {
     inner: ArcSwap<InnerConfig>,
@@ -1157,13 +1169,9 @@ impl Config {
         Self::validate_inner(&inner)?;
         Self::save_to(path, &inner)?;
 
-        let initial_level = if inner.debug && !ignore_debug {
-            LevelFilter::DEBUG
-        } else {
-            LevelFilter::INFO
-        };
+        let initial_filter = log_filter(inner.debug && !ignore_debug);
         let (reload_layer, log_reload_handle) =
-            tracing_subscriber::reload::Layer::new(initial_level);
+            tracing_subscriber::reload::Layer::new(initial_filter);
 
         let fmt_layer = tracing_subscriber::fmt::layer()
             .with_timer(tracing_subscriber::fmt::time::ChronoLocal::new(
@@ -1216,14 +1224,8 @@ impl Config {
         self.inner.store(Arc::new(new));
 
         if old_debug != new_debug {
-            let new_level = if new_debug {
-                LevelFilter::DEBUG
-            } else {
-                LevelFilter::INFO
-            };
-
             self.log_reload_handle
-                .modify(|filter| *filter = new_level)
+                .modify(|filter| *filter = log_filter(new_debug))
                 .context("failed to reload tracing level filter")?;
         }
 
