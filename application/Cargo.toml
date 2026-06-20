@@ -102,6 +102,9 @@ tikv-jemallocator = "0.6.0"
 [target.'cfg(target_arch = "riscv64gc")'.dependencies]
 libz-ng-sys = "=1.1.23" # temporary pin due to riscv64 issues
 
+[dev-dependencies]
+tokio-test = "0.4.5"
+
 [build-dependencies]
 ureq = { version = "3.3.0", default-features = false, features = ["rustls"] }
 serde = { workspace = true }
