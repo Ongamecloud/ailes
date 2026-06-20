@@ -189,3 +189,163 @@ fn parse_ini_path(path: &str) -> (compact_str::CompactString, compact_str::Compa
         (section, key)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{super::*, *};
+    use serde_json::json;
+
+    fn rep(
+        m: &str,
+        value: serde_json::Value,
+        insert_new: Option<bool>,
+        update_existing: bool,
+    ) -> ServerConfigurationFileReplacement {
+        ServerConfigurationFileReplacement {
+            r#match: m.into(),
+            if_value: None,
+            insert_new,
+            update_existing,
+            replace_with: value,
+        }
+    }
+
+    fn run(content: &str, replace: Vec<ServerConfigurationFileReplacement>) -> String {
+        tokio_test::block_on(async {
+            let state = crate::routes::AppState::mock();
+            let server = crate::server::Server::mock(uuid::Uuid::new_v4(), state);
+            let config = ServerConfigurationFile {
+                file: "test.ini".into(),
+                create_new: true,
+                parser: ServerConfigurationFileParser::Ini,
+                replace,
+            };
+            let bytes = IniFileParser::process_file(content, &config, &server)
+                .await
+                .unwrap();
+            String::from_utf8(bytes).unwrap()
+        })
+    }
+
+    // parse_ini_path
+
+    #[test]
+    fn parse_ini_path_splits() {
+        assert_eq!(parse_ini_path("key"), ("".into(), "key".into()));
+        assert_eq!(parse_ini_path("sec.key"), ("sec".into(), "key".into()));
+        // brackets are stripped from the section
+        assert_eq!(parse_ini_path("[sec].key"), ("sec".into(), "key".into()));
+        // dots inside brackets stay in the section name
+        assert_eq!(parse_ini_path("[a.b].key"), ("a.b".into(), "key".into()));
+        // only the first unbracketed dot splits; the rest is the key
+        assert_eq!(
+            parse_ini_path("sec.sub.key"),
+            ("sec".into(), "sub.key".into())
+        );
+    }
+
+    // rewrite_property
+
+    #[test]
+    fn rewrite_property_preserves_layout() {
+        assert_eq!(rewrite_property("key=old", "key", "new"), "key=new");
+        // spacing around '=' is kept, old value and trailing content dropped
+        assert_eq!(rewrite_property("  k  =  v ; c", "k", "new"), "  k  =  new");
+        // no '=' falls back to a freshly formatted line
+        assert_eq!(rewrite_property("noeq", "key", "new"), "key=new");
+    }
+
+    // IniFileParser
+
+    #[test]
+    fn updates_existing_value() {
+        assert_eq!(
+            run("[a]\nx=1\n", vec![rep("a.x", json!("9"), None, true)]),
+            "[a]\nx=9\n"
+        );
+    }
+
+    #[test]
+    fn update_existing_false_leaves_value_and_skips_insert() {
+        assert_eq!(
+            run("[a]\nx=1\n", vec![rep("a.x", json!("9"), None, false)]),
+            "[a]\nx=1\n"
+        );
+    }
+
+    #[test]
+    fn inserts_into_existing_section() {
+        assert_eq!(
+            run(
+                "[a]\nx=1\n[b]\ny=2\n",
+                vec![rep("a.z", json!("3"), Some(true), true)]
+            ),
+            "[a]\nx=1\nz=3\n[b]\ny=2\n"
+        );
+    }
+
+    #[test]
+    fn creates_missing_section() {
+        assert_eq!(
+            run("[a]\nx=1\n", vec![rep("b.y", json!("2"), Some(true), true)]),
+            "[a]\nx=1\n\n[b]\ny=2\n"
+        );
+    }
+
+    #[test]
+    fn insert_new_false_does_nothing_when_absent() {
+        assert_eq!(
+            run(
+                "[a]\nx=1\n",
+                vec![rep("a.z", json!("3"), Some(false), true)]
+            ),
+            "[a]\nx=1\n"
+        );
+    }
+
+    #[test]
+    fn matches_only_target_section() {
+        assert_eq!(
+            run(
+                "[a]\nx=1\n[b]\nx=1\n",
+                vec![rep("b.x", json!("9"), None, true)]
+            ),
+            "[a]\nx=1\n[b]\nx=9\n"
+        );
+    }
+
+    #[test]
+    fn detects_crlf_newlines() {
+        assert_eq!(
+            run("[a]\r\nx=1\r\n", vec![rep("a.x", json!("9"), None, true)]),
+            "[a]\r\nx=9\r\n"
+        );
+    }
+
+    #[test]
+    fn preserves_comments_and_blanks() {
+        assert_eq!(
+            run(
+                "# hi\n[a]\n\nx=1\n",
+                vec![rep("a.x", json!("9"), None, true)]
+            ),
+            "# hi\n[a]\n\nx=9\n"
+        );
+    }
+
+    #[test]
+    fn sectionless_key_updates_top_level() {
+        assert_eq!(
+            run("x=1\n", vec![rep("x", json!("9"), None, true)]),
+            "x=9\n"
+        );
+    }
+
+    #[test]
+    fn sectionless_insert_goes_above_first_section() {
+        assert_eq!(
+            run("[a]\nx=1\n", vec![rep("g", json!("1"), Some(true), true)]),
+            "g=1\n[a]\nx=1\n"
+        );
+    }
+}

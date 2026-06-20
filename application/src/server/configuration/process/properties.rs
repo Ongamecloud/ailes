@@ -318,3 +318,170 @@ impl<R: std::io::Read> Iterator for PropertiesParser<R> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{super::*, *};
+    use serde_json::json;
+
+    fn rep(
+        m: &str,
+        value: serde_json::Value,
+        insert_new: Option<bool>,
+        update_existing: bool,
+    ) -> ServerConfigurationFileReplacement {
+        ServerConfigurationFileReplacement {
+            r#match: m.into(),
+            if_value: None,
+            insert_new,
+            update_existing,
+            replace_with: value,
+        }
+    }
+
+    fn rep_if(
+        m: &str,
+        value: serde_json::Value,
+        if_value: &str,
+        update_existing: bool,
+    ) -> ServerConfigurationFileReplacement {
+        ServerConfigurationFileReplacement {
+            r#match: m.into(),
+            if_value: Some(if_value.into()),
+            insert_new: None,
+            update_existing,
+            replace_with: value,
+        }
+    }
+
+    fn run(content: &str, replace: Vec<ServerConfigurationFileReplacement>) -> String {
+        tokio_test::block_on(async {
+            let state = crate::routes::AppState::mock();
+            let server = crate::server::Server::mock(uuid::Uuid::new_v4(), state);
+            let config = ServerConfigurationFile {
+                file: "server.properties".into(),
+                create_new: true,
+                parser: ServerConfigurationFileParser::Properties,
+                replace,
+            };
+            let bytes = PropertiesFileParser::process_file(content, &config, &server)
+                .await
+                .unwrap();
+            String::from_utf8(bytes).unwrap()
+        })
+    }
+
+    fn lines(content: &str) -> Vec<String> {
+        PropertiesParser::new(content.as_bytes())
+            .map(|l| match l {
+                PropertyLine::Pair(k, v) => format!("P {k}={v}"),
+                PropertyLine::Comment(c) => format!("C {c}"),
+                PropertyLine::Blank => "B".to_string(),
+                PropertyLine::Raw(r) => format!("R {r}"),
+                PropertyLine::Error(_) => "E".to_string(),
+            })
+            .collect()
+    }
+
+    // PropertiesParser
+
+    #[test]
+    fn parses_each_separator_form() {
+        assert_eq!(lines("a=b"), ["P a=b"]);
+        assert_eq!(lines("a:b"), ["P a=b"]);
+        assert_eq!(lines("a b"), ["P a=b"]);
+        assert_eq!(lines("a = b"), ["P a=b"]);
+        assert_eq!(lines("key   =   value"), ["P key=value"]);
+    }
+
+    #[test]
+    fn classifies_comments_and_blanks() {
+        assert_eq!(lines("# c"), ["C # c"]);
+        assert_eq!(lines("! c"), ["C ! c"]);
+        assert_eq!(lines("\n"), ["B"]);
+        assert_eq!(lines("   "), ["B"]);
+    }
+
+    #[test]
+    fn joins_line_continuations() {
+        assert_eq!(lines("a=b\\\nc"), ["P a=bc"]);
+    }
+
+    #[test]
+    fn unescapes_values() {
+        assert_eq!(lines("a=\\u00e9"), ["P a=\u{00e9}"]);
+        assert_eq!(lines("a=x\\ty"), ["P a=x\ty"]);
+    }
+
+    // quote_to_ascii
+
+    #[test]
+    fn quote_to_ascii_escapes_specials_and_unicode() {
+        assert_eq!(quote_to_ascii("plain text"), "plain text");
+        assert_eq!(quote_to_ascii("a\"b\\c"), "a\\\"b\\\\c");
+        assert_eq!(quote_to_ascii("x\ny\tz"), "x\\ny\\tz");
+        assert_eq!(quote_to_ascii("caf\u{00e9}"), "caf\\u00e9");
+        // astral plane (e.g. an emoji in a MOTD) uses \U with 8 hex digits
+        assert_eq!(quote_to_ascii("\u{1F3AE}"), "\\U0001f3ae");
+    }
+
+    // PropertiesFileParser
+
+    #[test]
+    fn replaces_existing_value() {
+        assert_eq!(
+            run(
+                "max-players=20\n",
+                vec![rep("max-players", json!("100"), None, true)]
+            ),
+            "max-players=100\n"
+        );
+    }
+
+    #[test]
+    fn if_value_gates_replacement() {
+        // current value does not match the guard, so nothing changes
+        assert_eq!(
+            run(
+                "difficulty=easy\n",
+                vec![rep_if("difficulty", json!("peaceful"), "hard", true)]
+            ),
+            "difficulty=easy\n"
+        );
+        // guard matches, replacement applies
+        assert_eq!(
+            run(
+                "difficulty=easy\n",
+                vec![rep_if("difficulty", json!("peaceful"), "easy", true)]
+            ),
+            "difficulty=peaceful\n"
+        );
+    }
+
+    #[test]
+    fn appends_missing_keys() {
+        assert_eq!(
+            run("a=1\n", vec![rep("b", json!("2"), None, true)]),
+            "a=1\nb=2\n"
+        );
+    }
+
+    #[test]
+    fn update_existing_false_keeps_value_and_skips_append() {
+        assert_eq!(
+            run("a=1\n", vec![rep("a", json!("2"), Some(true), false)]),
+            "a=1\n"
+        );
+    }
+
+    #[test]
+    fn normalizes_pair_spacing_but_keeps_comments() {
+        assert_eq!(run("# note\na = 1\n", vec![]), "# note\na=1\n");
+    }
+
+    #[test]
+    fn round_trips_unicode_through_escapes() {
+        // value is decoded on read and re-encoded canonically on write
+        assert_eq!(run("motd=Caf\\u00e9\n", vec![]), "motd=Caf\\u00e9\n");
+    }
+}

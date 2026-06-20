@@ -520,3 +520,148 @@ fn decode_with_dictionary(payload: &[u8], dict: &[u8]) -> Result<Vec<u8>, anyhow
 
     Ok(out)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn storage() -> (TempDir, Storage) {
+        let dir = TempDir::new().unwrap();
+        let s = Storage::open(&dir.path().join("t.db"), 3).unwrap();
+        (dir, s)
+    }
+
+    // Storage
+
+    #[test]
+    fn snapshot_reconstruct_round_trip() {
+        let (_d, mut s) = storage();
+        let f = s.upsert_file("a").unwrap();
+        let content = b"hello world".to_vec();
+        let id = s.insert_snapshot(f, None, &content, 1).unwrap();
+        assert_eq!(s.reconstruct(id).unwrap(), content);
+    }
+
+    #[test]
+    fn delta_chain_reconstruct_round_trip() {
+        let (_d, mut s) = storage();
+        let f = s.upsert_file("a").unwrap();
+        let a = b"the quick brown fox".to_vec();
+        let b = b"the quick brown fox jumps".to_vec();
+        let c = b"the quick brown fox jumps over the lazy dog".to_vec();
+        let id1 = s.insert_snapshot(f, None, &a, 1).unwrap();
+        let id2 = s.insert_delta(f, id1, id1, &a, None, &b, 2).unwrap();
+        let id3 = s.insert_delta(f, id2, id1, &b, None, &c, 3).unwrap();
+        assert_eq!(s.reconstruct(id1).unwrap(), a);
+        assert_eq!(s.reconstruct(id2).unwrap(), b);
+        assert_eq!(s.reconstruct(id3).unwrap(), c);
+    }
+
+    #[test]
+    fn upsert_file_is_idempotent() {
+        let (_d, mut s) = storage();
+        let a = s.upsert_file("p").unwrap();
+        assert_eq!(s.upsert_file("p").unwrap(), a);
+        assert_ne!(s.upsert_file("q").unwrap(), a);
+        assert_eq!(s.find_file("p").unwrap(), Some(a));
+        assert_eq!(s.find_file("missing").unwrap(), None);
+    }
+
+    #[test]
+    fn delete_file_cascades_revisions() {
+        let (_d, mut s) = storage();
+        let f = s.upsert_file("d").unwrap();
+        s.insert_snapshot(f, None, b"x", 1).unwrap();
+        assert!(s.file_payload_bytes(f).unwrap() > 0);
+        s.delete_file("d").unwrap();
+        assert_eq!(s.find_file("d").unwrap(), None);
+        assert_eq!(s.file_payload_bytes(f).unwrap(), 0);
+    }
+
+    #[test]
+    fn prune_old_chains_keeps_newest() {
+        let (_d, mut s) = storage();
+        let f = s.upsert_file("a").unwrap();
+        let id1 = s.insert_snapshot(f, None, b"1", 1).unwrap();
+        let _id2 = s.insert_snapshot(f, None, b"2", 2).unwrap();
+        let id3 = s.insert_snapshot(f, None, b"3", 3).unwrap();
+        assert_eq!(s.chain_count(f).unwrap(), 3);
+        s.prune_old_chains(f, 2).unwrap();
+        assert_eq!(s.chain_count(f).unwrap(), 2);
+        assert!(s.reconstruct(id1).is_err());
+        assert_eq!(s.reconstruct(id3).unwrap(), b"3");
+    }
+
+    #[test]
+    fn prune_old_chains_noop_when_under_limit() {
+        let (_d, mut s) = storage();
+        let f = s.upsert_file("a").unwrap();
+        s.insert_snapshot(f, None, b"1", 1).unwrap();
+        s.insert_snapshot(f, None, b"2", 2).unwrap();
+        assert_eq!(s.prune_old_chains(f, 5).unwrap(), 0);
+        assert_eq!(s.chain_count(f).unwrap(), 2);
+    }
+
+    #[test]
+    fn drop_oldest_chain_respects_protection_and_min_keep() {
+        let (_d, mut s) = storage();
+        let f = s.upsert_file("a").unwrap();
+        let id1 = s.insert_snapshot(f, None, b"1", 1).unwrap();
+        let _id2 = s.insert_snapshot(f, None, b"2", 2).unwrap();
+        let id3 = s.insert_snapshot(f, None, b"3", 3).unwrap();
+        let freed = s.drop_oldest_chain(f, Some(id3), 1).unwrap();
+        assert!(freed > 0);
+        assert_eq!(s.chain_count(f).unwrap(), 2);
+        assert!(s.reconstruct(id1).is_err());
+        assert_eq!(s.reconstruct(id3).unwrap(), b"3");
+        assert_eq!(s.drop_oldest_chain(f, Some(id3), 5).unwrap(), 0);
+    }
+
+    #[test]
+    fn drop_globally_oldest_chain_never_empties_single_chain_file() {
+        let (_d, mut s) = storage();
+        let f1 = s.upsert_file("f1").unwrap();
+        let f2 = s.upsert_file("f2").unwrap();
+        let a1 = s.insert_snapshot(f1, None, b"a", 1).unwrap();
+        let _a2 = s.insert_snapshot(f1, None, b"b", 2).unwrap();
+        let b1 = s.insert_snapshot(f2, None, b"c", 0).unwrap();
+
+        let freed = s.drop_globally_oldest_chain(None).unwrap();
+        assert!(freed > 0);
+        // f2 is single-chain and older, but must stay intact
+        assert_eq!(s.chain_count(f2).unwrap(), 1);
+        assert_eq!(s.reconstruct(b1).unwrap(), b"c");
+        assert_eq!(s.chain_count(f1).unwrap(), 1);
+        assert!(s.reconstruct(a1).is_err());
+        assert_eq!(s.drop_globally_oldest_chain(None).unwrap(), 0);
+    }
+
+    #[test]
+    fn reconstruct_missing_revision_errors() {
+        let (_d, s) = storage();
+        assert!(s.reconstruct(999_999).is_err());
+    }
+
+    #[test]
+    fn rename_file_moves_history() {
+        let (_d, mut s) = storage();
+        let f = s.upsert_file("old").unwrap();
+        s.insert_snapshot(f, None, b"x", 1).unwrap();
+        s.rename_file("old", "new").unwrap();
+        assert_eq!(s.find_file("old").unwrap(), None);
+        assert_eq!(s.find_file("new").unwrap(), Some(f));
+    }
+
+    // encode_with_dictionary
+
+    #[test]
+    fn dictionary_round_trip() {
+        let dict = b"shared prefix between consecutive revisions";
+        let content = b"shared prefix between consecutive revisions plus a trailing change";
+        let enc = encode_with_dictionary(content, dict, 3).unwrap();
+        assert_eq!(decode_with_dictionary(&enc, dict).unwrap(), content);
+        let enc_empty = encode_with_dictionary(content, &[], 3).unwrap();
+        assert_eq!(decode_with_dictionary(&enc_empty, &[]).unwrap(), content);
+    }
+}

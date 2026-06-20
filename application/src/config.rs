@@ -1209,6 +1209,23 @@ impl Config {
         Ok((config, ConfigGuard(guard, stdout_guard)))
     }
 
+    #[cfg(test)]
+    pub fn mock() -> Self {
+        let inner = InnerConfig::default();
+        let client = crate::remote::client::Client::new(&inner, true);
+        let jwt = crate::remote::jwt::JwtClient::new(&inner);
+
+        Self {
+            inner: ArcSwap::new(Arc::new(inner)),
+            log_reload_handle: tracing_subscriber::reload::Layer::new(log_filter(false)).1,
+            path: String::new(),
+            ignore_certificate_errors: false,
+            disk_check_concurrency_semaphore: tokio::sync::Semaphore::new(1),
+            client,
+            jwt,
+        }
+    }
+
     #[inline]
     pub fn load(&self) -> ConfigSnapshot {
         self.inner.load()

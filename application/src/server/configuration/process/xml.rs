@@ -177,25 +177,19 @@ fn update_xml_wildcard(
     let mut stack: Vec<(&mut xmltree::Element, &[&str])> = vec![(element, path)];
 
     while let Some((element, path)) = stack.pop() {
-        let Some(&tag) = path.first() else {
+        let Some((&tag, rest)) = path.split_first() else {
             continue;
         };
-
-        let subpath = match path.get(1..) {
-            Some(p) if !p.is_empty() => p,
-            _ => continue,
-        };
-
-        let should_check_insertion = tag != "*" && insert_new;
+        let is_leaf = rest.is_empty();
 
         let found_match = element.children.iter().any(
             |child| matches!(child, xmltree::XMLNode::Element(e) if tag == "*" || e.name == tag),
         );
 
         if !found_match {
-            if should_check_insertion {
+            if tag != "*" && insert_new {
                 let mut new_child = xmltree::Element::new(tag);
-                if path.len() == 1 {
+                if is_leaf {
                     new_child
                         .children
                         .push(xmltree::XMLNode::Text(value.to_string()));
@@ -215,7 +209,7 @@ fn update_xml_wildcard(
                 continue;
             }
 
-            if path.len() == 1 {
+            if is_leaf {
                 if update_existing {
                     child_elem.children.clear();
                     child_elem
@@ -223,7 +217,129 @@ fn update_xml_wildcard(
                         .push(xmltree::XMLNode::Text(value.to_string()));
                 }
             } else {
-                stack.push((child_elem, subpath));
+                stack.push((child_elem, rest));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{super::*, *};
+    use serde_json::json;
+
+    fn rep(
+        m: &str,
+        value: serde_json::Value,
+        insert_new: Option<bool>,
+        update_existing: bool,
+    ) -> ServerConfigurationFileReplacement {
+        ServerConfigurationFileReplacement {
+            r#match: m.into(),
+            if_value: None,
+            insert_new,
+            update_existing,
+            replace_with: value,
+        }
+    }
+
+    fn run(content: &str, replace: Vec<ServerConfigurationFileReplacement>) -> xmltree::Element {
+        tokio_test::block_on(async {
+            let state = crate::routes::AppState::mock();
+            let server = crate::server::Server::mock(uuid::Uuid::new_v4(), state);
+            let config = ServerConfigurationFile {
+                file: "config.xml".into(),
+                create_new: true,
+                parser: ServerConfigurationFileParser::Xml,
+                replace,
+            };
+            let bytes = XmlFileParser::process_file(content, &config, &server)
+                .await
+                .unwrap();
+            xmltree::Element::parse(bytes.as_slice()).unwrap()
+        })
+    }
+
+    fn text<'a>(el: &'a xmltree::Element, child: &str) -> Option<String> {
+        el.get_child(child)
+            .and_then(|c| c.get_text())
+            .map(|c| c.into_owned())
+    }
+
+    // XmlFileParser
+
+    #[test]
+    fn updates_element_text() {
+        let root = run(
+            "<server><port>25565</port></server>",
+            vec![rep("port", json!("25577"), None, true)],
+        );
+        assert_eq!(text(&root, "port").as_deref(), Some("25577"));
+    }
+
+    #[test]
+    fn inserts_missing_child() {
+        let root = run(
+            "<server></server>",
+            vec![rep("motd", json!("Hello"), Some(true), true)],
+        );
+        assert_eq!(text(&root, "motd").as_deref(), Some("Hello"));
+    }
+
+    #[test]
+    fn sets_attribute_with_at_syntax() {
+        let root = run(
+            "<server></server>",
+            vec![rep("feature", json!("@enabled=true"), Some(true), true)],
+        );
+        let feature = root.get_child("feature").unwrap();
+        assert_eq!(
+            feature.attributes.get("enabled").map(String::as_str),
+            Some("true")
+        );
+    }
+
+    #[test]
+    fn creates_nested_chain() {
+        let root = run(
+            "<server></server>",
+            vec![rep("db.host", json!("localhost"), Some(true), true)],
+        );
+        let db = root.get_child("db").unwrap();
+        assert_eq!(
+            db.get_child("host")
+                .and_then(|h| h.get_text())
+                .map(|c| c.into_owned())
+                .as_deref(),
+            Some("localhost")
+        );
+    }
+
+    #[test]
+    fn update_existing_false_keeps_text() {
+        let root = run(
+            "<server><port>1</port></server>",
+            vec![rep("port", json!("2"), Some(false), false)],
+        );
+        assert_eq!(text(&root, "port").as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn wildcard_updates_matching_leaves() {
+        let root = run(
+            "<servers><server><motd>a</motd></server><server><motd>b</motd></server></servers>",
+            vec![rep("*.motd", json!("z"), None, true)],
+        );
+        for node in &root.children {
+            if let xmltree::XMLNode::Element(server) = node {
+                assert_eq!(
+                    server
+                        .get_child("motd")
+                        .and_then(|m| m.get_text())
+                        .map(|c| c.into_owned())
+                        .as_deref(),
+                    Some("z")
+                );
             }
         }
     }

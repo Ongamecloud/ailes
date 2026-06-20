@@ -173,3 +173,102 @@ pub fn set_nested_value(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{super::*, *};
+    use serde_json::json;
+    use toml_edit::DocumentMut;
+
+    fn rep(
+        m: &str,
+        value: serde_json::Value,
+        insert_new: Option<bool>,
+        update_existing: bool,
+    ) -> ServerConfigurationFileReplacement {
+        ServerConfigurationFileReplacement {
+            r#match: m.into(),
+            if_value: None,
+            insert_new,
+            update_existing,
+            replace_with: value,
+        }
+    }
+
+    fn run(content: &str, replace: Vec<ServerConfigurationFileReplacement>) -> DocumentMut {
+        tokio_test::block_on(async {
+            let state = crate::routes::AppState::mock();
+            let server = crate::server::Server::mock(uuid::Uuid::new_v4(), state);
+            let config = ServerConfigurationFile {
+                file: "config.toml".into(),
+                create_new: true,
+                parser: ServerConfigurationFileParser::Toml,
+                replace,
+            };
+            let bytes = TomlFileParser::process_file(content, &config, &server)
+                .await
+                .unwrap();
+            String::from_utf8(bytes)
+                .unwrap()
+                .parse::<DocumentMut>()
+                .unwrap()
+        })
+    }
+
+    // TomlFileParser
+
+    #[test]
+    fn sets_top_level_string() {
+        let doc = run("", vec![rep("name", json!("lobby"), None, true)]);
+        assert_eq!(doc["name"].as_str(), Some("lobby"));
+    }
+
+    #[test]
+    fn string_values_coerce_to_toml_scalars() {
+        let doc = run(
+            "",
+            vec![
+                rep("a", json!("100"), None, true),
+                rep("b", json!("true"), None, true),
+                rep("c", json!("text"), None, true),
+            ],
+        );
+        assert_eq!(doc["a"].as_integer(), Some(100));
+        assert_eq!(doc["b"].as_bool(), Some(true));
+        assert_eq!(doc["c"].as_str(), Some("text"));
+    }
+
+    #[test]
+    fn creates_nested_table() {
+        let doc = run("", vec![rep("server.port", json!(25565), None, true)]);
+        assert_eq!(doc["server"]["port"].as_integer(), Some(25565));
+    }
+
+    #[test]
+    fn sets_array_value_leaf() {
+        let doc = run("", vec![rep("ports[0]", json!(25565), None, true)]);
+        assert_eq!(doc["ports"][0].as_integer(), Some(25565));
+    }
+
+    #[test]
+    fn builds_array_of_tables() {
+        let doc = run("", vec![rep("servers[0].name", json!("lobby"), None, true)]);
+        let aot = doc["servers"].as_array_of_tables().unwrap();
+        assert_eq!(
+            aot.get(0).unwrap().get("name").and_then(|i| i.as_str()),
+            Some("lobby")
+        );
+    }
+
+    #[test]
+    fn respects_flags() {
+        let doc = run(
+            "name = \"old\"\n",
+            vec![rep("name", json!("new"), Some(true), false)],
+        );
+        assert_eq!(doc["name"].as_str(), Some("old"));
+
+        let doc = run("", vec![rep("missing", json!("x"), Some(false), true)]);
+        assert!(doc.get("missing").is_none());
+    }
+}

@@ -138,6 +138,60 @@ impl ServerConfigurationBuild {
 }
 
 impl ServerConfiguration {
+    #[cfg(test)]
+    pub fn mock(uuid: uuid::Uuid) -> Self {
+        Self {
+            uuid,
+            start_on_completion: None,
+            meta: ServerConfigurationMeta {
+                name: "Example Server".into(),
+                description: "This is an example server configuration.".into(),
+            },
+            suspended: false,
+            invocation: "java -Xmx{{SERVER_MEMORY}}M -jar server.jar".into(),
+            skip_egg_scripts: false,
+            entrypoint: None,
+            environment: HashMap::new(),
+            labels: HashMap::new(),
+            backups: Vec::new(),
+            schedules: Vec::new(),
+            allocations: ServerConfigurationAllocations {
+                force_outgoing_ip: false,
+                default: None,
+                mappings: HashMap::new(),
+            },
+            build: ServerConfigurationBuild {
+                memory_limit: 2048,
+                overhead_memory: 256,
+                swap: 1024,
+                io_weight: Some(500),
+                cpu_limit: 2,
+                disk_space: 10240,
+                threads: None,
+                oom_disabled: false,
+            },
+            mounts: Vec::new(),
+            egg: ServerConfigurationEgg {
+                id: uuid::Uuid::new_v4(),
+                file_denylist: Vec::new(),
+            },
+            container: ServerConfigurationContainer {
+                image: "example/image:latest".into(),
+                timezone: None,
+                hugepages_passthrough_enabled: false,
+                kvm_passthrough_enabled: false,
+                seccomp: ServerConfigurationContainerSeccomp {
+                    remove_allowed: Vec::new(),
+                },
+            },
+            auto_kill: ServerConfigurationAutoKill {
+                enabled: false,
+                seconds: 0,
+            },
+            auto_start_behavior: crate::models::ServerAutoStartBehavior::default(),
+        }
+    }
+
     fn machine_id_path(&self, config: &crate::config::Config) -> PathBuf {
         config.vmount_path(self.uuid).join("machine-id")
     }

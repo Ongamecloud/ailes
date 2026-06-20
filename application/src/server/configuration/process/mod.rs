@@ -345,6 +345,15 @@ nestify::nest! {
 }
 
 impl ProcessConfiguration {
+    #[cfg(test)]
+    pub fn mock() -> Self {
+        Self {
+            startup: ProcessConfigurationStartup::default(),
+            stop: ProcessConfigurationStop::default(),
+            configs: Vec::new(),
+        }
+    }
+
     pub async fn update_files(&self, server: &crate::server::Server) -> Result<(), anyhow::Error> {
         tracing::info!(
             server = %server.uuid,

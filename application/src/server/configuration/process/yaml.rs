@@ -48,3 +48,92 @@ impl super::ProcessConfigurationFileParser for YamlFileParser {
         Ok(serde_norway::to_string(&json)?.into_bytes())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{super::*, *};
+    use serde_json::json;
+
+    fn rep(
+        m: &str,
+        value: serde_json::Value,
+        insert_new: Option<bool>,
+        update_existing: bool,
+    ) -> ServerConfigurationFileReplacement {
+        ServerConfigurationFileReplacement {
+            r#match: m.into(),
+            if_value: None,
+            insert_new,
+            update_existing,
+            replace_with: value,
+        }
+    }
+
+    fn run(content: &str, replace: Vec<ServerConfigurationFileReplacement>) -> serde_json::Value {
+        tokio_test::block_on(async {
+            let state = crate::routes::AppState::mock();
+            let server = crate::server::Server::mock(uuid::Uuid::new_v4(), state);
+            let config = ServerConfigurationFile {
+                file: "config.yml".into(),
+                create_new: true,
+                parser: ServerConfigurationFileParser::Yaml,
+                replace,
+            };
+            let bytes = YamlFileParser::process_file(content, &config, &server)
+                .await
+                .unwrap();
+            serde_norway::from_str(&String::from_utf8(bytes).unwrap()).unwrap()
+        })
+    }
+
+    // YamlFileParser
+
+    #[test]
+    fn empty_content_starts_from_mapping() {
+        assert_eq!(
+            run("", vec![rep("server.port", json!(25565), None, true)]),
+            json!({"server": {"port": 25565}})
+        );
+    }
+
+    #[test]
+    fn string_values_coerce_when_parseable() {
+        let out = run(
+            "",
+            vec![
+                rep("a", json!("true"), None, true),
+                rep("b", json!("42"), None, true),
+                rep("c", json!("text"), None, true),
+            ],
+        );
+        assert_eq!(out, json!({"a": true, "b": 42, "c": "text"}));
+    }
+
+    #[test]
+    fn updates_existing_mapping() {
+        assert_eq!(
+            run("name: old\n", vec![rep("name", json!("new"), None, true)]),
+            json!({"name": "new"})
+        );
+    }
+
+    #[test]
+    fn respects_flags() {
+        assert_eq!(
+            run("a: 1\n", vec![rep("a", json!(2), None, false)]),
+            json!({"a": 1})
+        );
+        assert_eq!(
+            run("a: 1\n", vec![rep("b", json!(2), Some(false), true)]),
+            json!({"a": 1})
+        );
+    }
+
+    #[test]
+    fn preserves_unrelated_keys() {
+        assert_eq!(
+            run("keep: 1\n", vec![rep("add", json!(2), None, true)]),
+            json!({"keep": 1, "add": 2})
+        );
+    }
+}

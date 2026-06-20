@@ -154,6 +154,15 @@ impl Server {
         }))
     }
 
+    #[cfg(test)]
+    pub fn mock(uuid: uuid::Uuid, app_state: crate::routes::State) -> Self {
+        Self::new(
+            configuration::ServerConfiguration::mock(uuid),
+            configuration::process::ProcessConfiguration::mock(),
+            app_state,
+        )
+    }
+
     pub async fn initialize_schedules(&self) {
         self.schedules.update_schedules(self.clone()).await;
     }

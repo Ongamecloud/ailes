@@ -137,6 +137,27 @@ pub struct AppState {
     pub mime_cache: moka::future::Cache<MimeCacheKey, MimeCacheValue>,
 }
 
+impl AppState {
+    #[cfg(test)]
+    pub fn mock() -> State {
+        Arc::new(Self {
+            start_time: Instant::now(),
+            container_type: AppContainerType::None,
+            version: "0.0.0".to_string(),
+            config: Arc::new(crate::config::Config::mock()),
+            executor: Arc::new(crate::server::executor::noop::NoopExecutor),
+            stats_manager: Arc::new(crate::stats::StatsManager::default()),
+            server_manager: Arc::new(crate::server::manager::ServerManager::new(&[])),
+            backup_manager: Arc::new(crate::server::backup::manager::BackupManager::default()),
+            inotify_manager: Arc::new(
+                crate::server::filesystem::inotify::InotifyManager::new()
+                    .expect("Creating inotify manager failed"),
+            ),
+            mime_cache: moka::future::Cache::builder().build(),
+        })
+    }
+}
+
 #[derive(ToSchema, Serialize, Deserialize)]
 pub struct ApiError<'a> {
     pub error: &'a str,

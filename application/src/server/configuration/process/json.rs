@@ -181,3 +181,155 @@ pub fn set_nested_value(
         path = tail;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{super::*, *};
+    use serde_json::json;
+
+    fn rep(
+        m: &str,
+        value: serde_json::Value,
+        insert_new: Option<bool>,
+        update_existing: bool,
+    ) -> ServerConfigurationFileReplacement {
+        ServerConfigurationFileReplacement {
+            r#match: m.into(),
+            if_value: None,
+            insert_new,
+            update_existing,
+            replace_with: value,
+        }
+    }
+
+    fn run(content: &str, replace: Vec<ServerConfigurationFileReplacement>) -> serde_json::Value {
+        tokio_test::block_on(async {
+            let state = crate::routes::AppState::mock();
+            let server = crate::server::Server::mock(uuid::Uuid::new_v4(), state);
+            let config = ServerConfigurationFile {
+                file: "test.json".into(),
+                create_new: true,
+                parser: ServerConfigurationFileParser::Json,
+                replace,
+            };
+            let bytes = JsonFileParser::process_file(content, &config, &server)
+                .await
+                .unwrap();
+            serde_json::from_slice(&bytes).unwrap()
+        })
+    }
+
+    fn segs(raw: &str) -> Vec<String> {
+        parse_path(raw)
+            .into_iter()
+            .map(|s| match s {
+                PathSegment::Key(k) => k.to_string(),
+                PathSegment::Index(i) => format!("#{i}"),
+            })
+            .collect()
+    }
+
+    fn set(
+        json: &mut serde_json::Value,
+        path: &str,
+        value: serde_json::Value,
+        insert_new: bool,
+        update_existing: bool,
+    ) {
+        set_nested_value(json, &parse_path(path), value, insert_new, update_existing);
+    }
+
+    // parse_path
+
+    #[test]
+    fn parse_path_keys_and_indices() {
+        assert_eq!(segs("a.b.c"), ["a", "b", "c"]);
+        assert_eq!(segs("a[0]"), ["a", "#0"]);
+        assert_eq!(segs("a[0][1]"), ["a", "#0", "#1"]);
+        assert_eq!(segs("a.b[2].c"), ["a", "b", "#2", "c"]);
+        // empty segments from leading or doubled dots are skipped
+        assert_eq!(segs("a..b"), ["a", "b"]);
+        assert_eq!(segs("[3]"), ["#3"]);
+        // non-numeric bracket content is dropped, the key survives
+        assert_eq!(segs("a[x]"), ["a"]);
+    }
+
+    // set_nested_value
+
+    #[test]
+    fn set_nested_value_inserts_then_updates() {
+        let mut j = json!({});
+        set(&mut j, "a.b", json!(1), true, true);
+        assert_eq!(j, json!({"a": {"b": 1}}));
+        set(&mut j, "a.b", json!(2), true, true);
+        assert_eq!(j, json!({"a": {"b": 2}}));
+    }
+
+    #[test]
+    fn set_nested_value_respects_flags() {
+        let mut j = json!({"a": 1});
+        set(&mut j, "a", json!(2), true, false);
+        assert_eq!(j, json!({"a": 1}));
+        set(&mut j, "b", json!(2), false, true);
+        assert_eq!(j, json!({"a": 1}));
+    }
+
+    #[test]
+    fn set_nested_value_grows_array_with_nulls() {
+        let mut j = json!({});
+        set(&mut j, "a[0]", json!("x"), true, true);
+        set(&mut j, "a[2]", json!("z"), true, true);
+        assert_eq!(j, json!({"a": ["x", null, "z"]}));
+    }
+
+    #[test]
+    fn set_nested_value_updates_array_index() {
+        let mut j = json!({"a": [1, 2, 3]});
+        set(&mut j, "a[1]", json!(9), true, true);
+        assert_eq!(j, json!({"a": [1, 9, 3]}));
+    }
+
+    #[test]
+    fn set_nested_value_overwrites_incompatible_scalar() {
+        // descending a key into a non-object clobbers it with a fresh object
+        let mut j = json!({"a": 5});
+        set(&mut j, "a.b", json!(1), true, true);
+        assert_eq!(j, json!({"a": {"b": 1}}));
+    }
+
+    // JsonFileParser
+
+    #[test]
+    fn empty_content_starts_from_object() {
+        let out = run(
+            "",
+            vec![rep("settings.max-players", json!(100), None, true)],
+        );
+        assert_eq!(out, json!({"settings": {"max-players": 100}}));
+    }
+
+    #[test]
+    fn string_values_are_parsed_as_json_when_possible() {
+        let out = run(
+            "{}",
+            vec![
+                rep("a", json!("true"), None, true),
+                rep("b", json!("42"), None, true),
+                rep("c", json!("hello"), None, true),
+            ],
+        );
+        assert_eq!(out, json!({"a": true, "b": 42, "c": "hello"}));
+    }
+
+    #[test]
+    fn non_string_values_are_used_verbatim() {
+        let out = run("{}", vec![rep("a", json!({"nested": [1, 2]}), None, true)]);
+        assert_eq!(out, json!({"a": {"nested": [1, 2]}}));
+    }
+
+    #[test]
+    fn preserves_unrelated_keys() {
+        let out = run(r#"{"keep": 1}"#, vec![rep("add", json!(2), None, true)]);
+        assert_eq!(out, json!({"keep": 1, "add": 2}));
+    }
+}
