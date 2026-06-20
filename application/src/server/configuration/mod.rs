@@ -387,6 +387,8 @@ impl ServerConfiguration {
             resources.cpu_quota = Some(self.build.cpu_limit * 1000);
             resources.cpu_period = Some(100000);
             resources.cpu_shares = Some(1024);
+        } else {
+            resources.cpu_quota = Some(-1);
         }
 
         resources

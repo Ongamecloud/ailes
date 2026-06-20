@@ -920,6 +920,15 @@ impl DockerProcessHandle {
                                 .num_milliseconds()
                                 .max(0) as u64;
                             state_usage.write().uptime = uptime;
+                            if let Some(host_config) = inspect.host_config
+                                && let Some(cpu_quota) = host_config.cpu_quota
+                                && cpu_quota > 0
+                            {
+                                state_usage.write().cpu_limit_absolute = (cpu_quota / 1000) as u32;
+                            } else {
+                                state_usage.write().cpu_limit_absolute =
+                                    rayon::current_num_threads() as u32 * 100;
+                            }
                         }
                         super::ProcessStatus::Running
                     }
