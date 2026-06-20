@@ -183,7 +183,7 @@ impl Drop for ActivityManager {
 }
 
 fn merge_activities(activities: Vec<Activity>) -> Vec<Activity> {
-    let mut merged: Vec<Activity> = Vec::with_capacity(activities.len());
+    let mut merged = Vec::with_capacity(activities.len());
 
     type SftpKey = (ActivityEvent, Option<uuid::Uuid>);
     type UploadKey = (Option<uuid::Uuid>, String);
@@ -273,7 +273,6 @@ fn merge_activities(activities: Vec<Activity>) -> Vec<Activity> {
     merged
 }
 
-#[inline]
 fn extract_files(activity: &Activity) -> Vec<serde_json::Value> {
     activity
         .metadata
@@ -284,7 +283,6 @@ fn extract_files(activity: &Activity) -> Vec<serde_json::Value> {
         .unwrap_or_default()
 }
 
-#[inline]
 fn finalize_files(activity: &mut Activity, files: Vec<serde_json::Value>) {
     if files.is_empty() {
         return;
@@ -293,5 +291,315 @@ fn finalize_files(activity: &mut Activity, files: Vec<serde_json::Value>) {
         && let Some(files_field) = metadata.get_mut("files")
     {
         *files_field = serde_json::Value::Array(files);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn ts(secs: i64) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::<chrono::Utc>::from_timestamp(1_700_000_000, 0).unwrap()
+            + chrono::Duration::seconds(secs)
+    }
+
+    fn act(
+        event: ActivityEvent,
+        user: Option<uuid::Uuid>,
+        secs: i64,
+        metadata: Option<serde_json::Value>,
+    ) -> Activity {
+        Activity {
+            user,
+            event,
+            metadata,
+            ip: None,
+            schedule: None,
+            timestamp: ts(secs),
+        }
+    }
+
+    fn files_of(a: &Activity) -> Vec<String> {
+        a.metadata
+            .as_ref()
+            .and_then(|m| m.get("files"))
+            .and_then(|f| f.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    // merge_activities
+
+    #[test]
+    fn empty_input_returns_empty() {
+        assert!(merge_activities(vec![]).is_empty());
+    }
+
+    #[test]
+    fn non_mergeable_events_pass_through_in_order() {
+        let out = merge_activities(vec![
+            act(ActivityEvent::PowerStart, None, 0, None),
+            act(
+                ActivityEvent::ConsoleCommand,
+                None,
+                1,
+                Some(json!({"command": "say hi"})),
+            ),
+        ]);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].event, ActivityEvent::PowerStart);
+        assert_eq!(out[1].event, ActivityEvent::ConsoleCommand);
+    }
+
+    #[test]
+    fn merges_sftp_writes_within_window() {
+        let user = Some(uuid::Uuid::new_v4());
+        let out = merge_activities(vec![
+            act(
+                ActivityEvent::SftpWrite,
+                user,
+                0,
+                Some(json!({"files": ["a.txt"]})),
+            ),
+            act(
+                ActivityEvent::SftpWrite,
+                user,
+                30,
+                Some(json!({"files": ["b.txt"]})),
+            ),
+        ]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].event, ActivityEvent::SftpWrite);
+        assert_eq!(out[0].user, user);
+        assert_eq!(out[0].timestamp, ts(0)); // base keeps the first event's timestamp
+        assert_eq!(files_of(&out[0]), ["a.txt", "b.txt"]);
+    }
+
+    #[test]
+    fn sftp_window_is_anchored_to_first_event() {
+        // 0 and 50 merge against the base at 0; 100 is >60s from the base so it
+        // starts a new group rather than chaining off the 50s event
+        let user = Some(uuid::Uuid::new_v4());
+        let out = merge_activities(vec![
+            act(
+                ActivityEvent::SftpWrite,
+                user,
+                0,
+                Some(json!({"files": ["a"]})),
+            ),
+            act(
+                ActivityEvent::SftpWrite,
+                user,
+                50,
+                Some(json!({"files": ["b"]})),
+            ),
+            act(
+                ActivityEvent::SftpWrite,
+                user,
+                100,
+                Some(json!({"files": ["c"]})),
+            ),
+        ]);
+        assert_eq!(out.len(), 2);
+        assert_eq!(files_of(&out[0]), ["a", "b"]);
+        assert_eq!(files_of(&out[1]), ["c"]);
+    }
+
+    #[test]
+    fn sftp_events_outside_window_are_not_merged() {
+        let user = Some(uuid::Uuid::new_v4());
+        let out = merge_activities(vec![
+            act(
+                ActivityEvent::SftpWrite,
+                user,
+                0,
+                Some(json!({"files": ["a"]})),
+            ),
+            act(
+                ActivityEvent::SftpWrite,
+                user,
+                120,
+                Some(json!({"files": ["b"]})),
+            ),
+        ]);
+        assert_eq!(out.len(), 2);
+        assert_eq!(files_of(&out[0]), ["a"]);
+        assert_eq!(files_of(&out[1]), ["b"]);
+    }
+
+    #[test]
+    fn different_sftp_event_types_are_not_merged() {
+        let user = Some(uuid::Uuid::new_v4());
+        let out = merge_activities(vec![
+            act(
+                ActivityEvent::SftpWrite,
+                user,
+                0,
+                Some(json!({"files": ["a"]})),
+            ),
+            act(
+                ActivityEvent::SftpDelete,
+                user,
+                5,
+                Some(json!({"files": ["b"]})),
+            ),
+        ]);
+        assert_eq!(out.len(), 2);
+        assert!(
+            out.iter()
+                .any(|a| a.event == ActivityEvent::SftpWrite && files_of(a) == ["a"])
+        );
+        assert!(
+            out.iter()
+                .any(|a| a.event == ActivityEvent::SftpDelete && files_of(a) == ["b"])
+        );
+    }
+
+    #[test]
+    fn different_users_are_not_merged() {
+        let u1 = Some(uuid::Uuid::new_v4());
+        let u2 = Some(uuid::Uuid::new_v4());
+        let out = merge_activities(vec![
+            act(
+                ActivityEvent::SftpWrite,
+                u1,
+                0,
+                Some(json!({"files": ["a"]})),
+            ),
+            act(
+                ActivityEvent::SftpWrite,
+                u2,
+                5,
+                Some(json!({"files": ["b"]})),
+            ),
+        ]);
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().any(|a| a.user == u1 && files_of(a) == ["a"]));
+        assert!(out.iter().any(|a| a.user == u2 && files_of(a) == ["b"]));
+    }
+
+    #[test]
+    fn sftp_events_without_files_pass_through() {
+        let user = Some(uuid::Uuid::new_v4());
+        let out = merge_activities(vec![
+            act(ActivityEvent::SftpWrite, user, 0, None),
+            act(ActivityEvent::SftpRead, user, 1, Some(json!({"path": "x"}))),
+        ]);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].event, ActivityEvent::SftpWrite);
+        assert_eq!(out[1].event, ActivityEvent::SftpRead);
+    }
+
+    #[test]
+    fn lone_sftp_event_with_files_is_kept() {
+        let user = Some(uuid::Uuid::new_v4());
+        let out = merge_activities(vec![act(
+            ActivityEvent::SftpWrite,
+            user,
+            0,
+            Some(json!({"files": ["a", "b"]})),
+        )]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(files_of(&out[0]), ["a", "b"]);
+    }
+
+    #[test]
+    fn merges_file_uploads_to_same_directory_within_window() {
+        let user = Some(uuid::Uuid::new_v4());
+        let out = merge_activities(vec![
+            act(
+                ActivityEvent::FileUploaded,
+                user,
+                0,
+                Some(json!({"directory": "/plugins", "files": ["a.jar"]})),
+            ),
+            act(
+                ActivityEvent::FileUploaded,
+                user,
+                20,
+                Some(json!({"directory": "/plugins", "files": ["b.jar"]})),
+            ),
+        ]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(files_of(&out[0]), ["a.jar", "b.jar"]);
+    }
+
+    #[test]
+    fn file_uploads_to_different_directories_are_not_merged() {
+        let user = Some(uuid::Uuid::new_v4());
+        let out = merge_activities(vec![
+            act(
+                ActivityEvent::FileUploaded,
+                user,
+                0,
+                Some(json!({"directory": "/plugins", "files": ["a"]})),
+            ),
+            act(
+                ActivityEvent::FileUploaded,
+                user,
+                5,
+                Some(json!({"directory": "/mods", "files": ["b"]})),
+            ),
+        ]);
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn file_uploads_outside_window_are_not_merged() {
+        let user = Some(uuid::Uuid::new_v4());
+        let out = merge_activities(vec![
+            act(
+                ActivityEvent::FileUploaded,
+                user,
+                0,
+                Some(json!({"directory": "/p", "files": ["a"]})),
+            ),
+            act(
+                ActivityEvent::FileUploaded,
+                user,
+                120,
+                Some(json!({"directory": "/p", "files": ["b"]})),
+            ),
+        ]);
+        assert_eq!(out.len(), 2);
+        assert_eq!(files_of(&out[0]), ["a"]);
+        assert_eq!(files_of(&out[1]), ["b"]);
+    }
+
+    #[test]
+    fn file_uploaded_without_directory_passes_through() {
+        let user = Some(uuid::Uuid::new_v4());
+        let out = merge_activities(vec![act(
+            ActivityEvent::FileUploaded,
+            user,
+            0,
+            Some(json!({"files": ["a.jar"]})),
+        )]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(files_of(&out[0]), ["a.jar"]);
+    }
+
+    #[test]
+    fn merged_events_are_emitted_after_passthrough_events() {
+        // a merged sftp group is drained at the end, so it loses its original
+        // position relative to later non-merged events
+        let user = Some(uuid::Uuid::new_v4());
+        let out = merge_activities(vec![
+            act(
+                ActivityEvent::SftpWrite,
+                user,
+                0,
+                Some(json!({"files": ["a"]})),
+            ),
+            act(ActivityEvent::PowerStart, None, 1, None),
+        ]);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].event, ActivityEvent::PowerStart);
+        assert_eq!(out[1].event, ActivityEvent::SftpWrite);
     }
 }

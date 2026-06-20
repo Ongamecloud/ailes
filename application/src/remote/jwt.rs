@@ -84,7 +84,7 @@ impl BasePayload {
         }
 
         if let Some(scope) = scope
-            && self.scope != scope
+            && self.scope.split(',').all(|s| s.trim() != scope)
         {
             return Err(JwtValidateError::Denied);
         }

@@ -322,3 +322,243 @@ impl<'de> Deserialize<'de> for Permissions {
         deserializer.deserialize_seq(PermissionsVisitor(PhantomData))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::time::Duration;
+
+    const ALL: &[Permission] = &[
+        Permission::All,
+        Permission::MetaCalagopus,
+        Permission::WebsocketConnect,
+        Permission::ControlReadConsole,
+        Permission::ControlConsole,
+        Permission::ControlStart,
+        Permission::ControlStop,
+        Permission::ControlRestart,
+        Permission::AdminWebsocketErrors,
+        Permission::AdminWebsocketInstall,
+        Permission::AdminWebsocketTransfer,
+        Permission::BackupRead,
+        Permission::ScheduleRead,
+        Permission::FileRead,
+        Permission::FileReadContent,
+        Permission::FileCreate,
+        Permission::FileUpdate,
+        Permission::FileDelete,
+        Permission::FileArchive,
+        Permission::FileSftp,
+    ];
+
+    fn perms(list: &[Permission]) -> Permissions {
+        let mut p = Permissions::default();
+        for &x in list {
+            p.insert(x);
+        }
+        p
+    }
+
+    // Permission
+
+    #[test]
+    fn is_admin_only_for_admin_variants() {
+        assert!(Permission::AdminWebsocketErrors.is_admin());
+        assert!(Permission::AdminWebsocketInstall.is_admin());
+        assert!(Permission::AdminWebsocketTransfer.is_admin());
+        assert!(!Permission::All.is_admin());
+        assert!(!Permission::FileRead.is_admin());
+        assert!(!Permission::ControlStart.is_admin());
+    }
+
+    #[test]
+    fn to_str_matches_serde_rename_and_round_trips() {
+        for &p in ALL {
+            assert_eq!(serde_json::to_value(p).unwrap(), json!(p.to_str()));
+            let back: Permission = serde_json::from_value(json!(p.to_str())).unwrap();
+            assert_eq!(back, p);
+        }
+    }
+
+    #[test]
+    fn deserialize_accepts_aliases() {
+        assert_eq!(
+            serde_json::from_value::<Permission>(json!("files.read")).unwrap(),
+            Permission::FileRead
+        );
+        assert_eq!(
+            serde_json::from_value::<Permission>(json!("backups.read")).unwrap(),
+            Permission::BackupRead
+        );
+        assert_eq!(
+            serde_json::from_value::<Permission>(json!("schedules.read")).unwrap(),
+            Permission::ScheduleRead
+        );
+    }
+
+    // Permissions
+
+    #[test]
+    fn wildcard_grants_everything_except_admin() {
+        let p = perms(&[Permission::All]);
+        assert!(p.has_permission(Permission::FileRead));
+        assert!(p.has_permission(Permission::ControlStart));
+        assert!(!p.has_permission(Permission::AdminWebsocketErrors));
+    }
+
+    #[test]
+    fn admin_permission_requires_explicit_grant() {
+        let p = perms(&[Permission::All, Permission::AdminWebsocketErrors]);
+        assert!(p.has_permission(Permission::AdminWebsocketErrors));
+        // a different admin permission is still not covered by the wildcard
+        assert!(!p.has_permission(Permission::AdminWebsocketInstall));
+    }
+
+    #[test]
+    fn explicit_and_missing_permissions() {
+        let p = perms(&[Permission::FileRead]);
+        assert!(p.has_permission(Permission::FileRead));
+        assert!(!p.has_permission(Permission::FileDelete));
+        assert!(!Permissions::default().has_permission(Permission::FileRead));
+    }
+
+    #[test]
+    fn is_calagopus_checks_meta_marker() {
+        assert!(perms(&[Permission::MetaCalagopus]).is_calagopus());
+        assert!(!perms(&[Permission::FileRead]).is_calagopus());
+    }
+
+    #[test]
+    fn calagopus_permission_or_uses_default_only_for_non_calagopus() {
+        let plain = perms(&[Permission::FileRead]);
+        // not a calagopus user: the default is returned, ignoring the actual grant
+        assert!(!plain.has_calagopus_permission_or(Permission::FileRead, false));
+        assert!(plain.has_calagopus_permission_or(Permission::FileRead, true));
+
+        let calagopus = perms(&[Permission::MetaCalagopus, Permission::FileRead]);
+        // calagopus user: the real grant decides, the default is ignored
+        assert!(calagopus.has_calagopus_permission_or(Permission::FileRead, false));
+        assert!(!calagopus.has_calagopus_permission_or(Permission::FileDelete, true));
+    }
+
+    #[test]
+    fn deserialize_skips_unknown_permissions() {
+        let permissions: Permissions =
+            serde_json::from_value(json!(["file.read", "totally.bogus", "control.start"])).unwrap();
+        assert!(permissions.has_permission(Permission::FileRead));
+        assert!(permissions.has_permission(Permission::ControlStart));
+        assert_eq!(permissions.len(), 2);
+    }
+
+    #[test]
+    fn deserialize_collapses_aliases_and_duplicates() {
+        let permissions: Permissions =
+            serde_json::from_value(json!(["file.read", "files.read", "file.read"])).unwrap();
+        assert_eq!(permissions.len(), 1);
+        assert!(permissions.contains(&Permission::FileRead));
+    }
+
+    #[test]
+    fn deserialize_empty_sequence() {
+        let permissions: Permissions = serde_json::from_value(json!([])).unwrap();
+        assert!(permissions.is_empty());
+    }
+
+    // UserPermissionsMap
+
+    #[test]
+    fn map_set_and_query() {
+        tokio_test::block_on(async {
+            let permissions = UserPermissionsMap::default();
+            let user = uuid::Uuid::new_v4();
+            assert!(!permissions.has_permission(user, Permission::FileRead));
+            permissions.set_permissions(user, perms(&[Permission::FileRead]), None::<&[&str]>);
+            assert!(permissions.has_permission(user, Permission::FileRead));
+            assert!(!permissions.has_permission(user, Permission::FileDelete));
+        });
+    }
+
+    #[test]
+    fn map_empty_permissions_removes_user() {
+        tokio_test::block_on(async {
+            let permissions = UserPermissionsMap::default();
+            let user = uuid::Uuid::new_v4();
+            permissions.set_permissions(user, perms(&[Permission::FileRead]), None::<&[&str]>);
+            permissions.set_permissions(user, Permissions::default(), None::<&[&str]>);
+            assert!(!permissions.has_permission(user, Permission::FileRead));
+        });
+    }
+
+    #[test]
+    fn map_update_replaces_permission_set() {
+        tokio_test::block_on(async {
+            let permissions = UserPermissionsMap::default();
+            let user = uuid::Uuid::new_v4();
+            permissions.set_permissions(user, perms(&[Permission::FileRead]), None::<&[&str]>);
+            permissions.set_permissions(user, perms(&[Permission::FileDelete]), None::<&[&str]>);
+            assert!(!permissions.has_permission(user, Permission::FileRead));
+            assert!(permissions.has_permission(user, Permission::FileDelete));
+        });
+    }
+
+    #[test]
+    fn map_calagopus_permission_or_defaults_for_absent_user() {
+        tokio_test::block_on(async {
+            let permissions = UserPermissionsMap::default();
+            let user = uuid::Uuid::new_v4();
+            assert!(permissions.has_calagopus_permission_or(user, Permission::FileRead, true));
+            assert!(!permissions.has_calagopus_permission_or(user, Permission::FileRead, false));
+        });
+    }
+
+    #[test]
+    fn map_is_ignored_matches_patterns() {
+        tokio_test::block_on(async {
+            let permissions = UserPermissionsMap::default();
+            let user = uuid::Uuid::new_v4();
+            let ignored: &[&str] = &["*.log"];
+            permissions.set_permissions(user, perms(&[Permission::FileRead]), Some(ignored));
+            assert!(permissions.is_ignored(user, "server.log", false));
+            assert!(permissions.is_ignored(user, "sub/server.log", false));
+            assert!(!permissions.is_ignored(user, "server.txt", false));
+            // unknown user is never ignored
+            assert!(!permissions.is_ignored(uuid::Uuid::new_v4(), "server.log", false));
+        });
+    }
+
+    #[test]
+    fn map_update_without_ignored_keeps_existing_overrides() {
+        tokio_test::block_on(async {
+            let permissions = UserPermissionsMap::default();
+            let user = uuid::Uuid::new_v4();
+            let ignored: &[&str] = &["*.log"];
+            permissions.set_permissions(user, perms(&[Permission::FileRead]), Some(ignored));
+            assert!(permissions.is_ignored(user, "x.log", false));
+            permissions.set_permissions(user, perms(&[Permission::FileDelete]), None::<&[&str]>);
+            assert!(permissions.is_ignored(user, "x.log", false));
+        });
+    }
+
+    #[test]
+    fn map_wait_for_removal_resolves_when_cleared() {
+        tokio_test::block_on(async {
+            let permissions = UserPermissionsMap::default();
+            let user = uuid::Uuid::new_v4();
+            permissions.set_permissions(user, perms(&[Permission::FileRead]), None::<&[&str]>);
+
+            let done = tokio::time::timeout(Duration::from_secs(2), async {
+                let removal = permissions.wait_for_removal(user);
+                let trigger = async {
+                    tokio::task::yield_now().await;
+                    permissions.clear_permissions();
+                };
+                tokio::join!(removal, trigger);
+            })
+            .await;
+
+            assert!(done.is_ok(), "wait_for_removal did not resolve");
+            assert!(!permissions.has_permission(user, Permission::FileRead));
+        });
+    }
+}

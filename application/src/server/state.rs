@@ -142,6 +142,12 @@ impl ServerStateLock {
             }
         } else if self.locked.load(Ordering::SeqCst) {
             return Ok(false);
+        } else {
+            aquired = true;
+        }
+
+        if !aquired {
+            return Ok(false);
         }
 
         self.locked.store(true, Ordering::SeqCst);
@@ -159,5 +165,272 @@ impl ServerStateLock {
 
             Ok(true)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+    use tokio::sync::Notify;
+
+    fn lock() -> ServerStateLock {
+        let state = crate::routes::AppState::mock();
+        let schedule_manager = Arc::new(super::super::schedule::manager::ScheduleManager::new(
+            state.config.clone(),
+        ));
+        let (sender, _rx) = tokio::sync::broadcast::channel(16);
+
+        ServerStateLock::new(sender, schedule_manager)
+    }
+
+    // ServerStateLock
+
+    #[test]
+    fn state_round_trips_through_atomic() {
+        tokio_test::block_on(async {
+            let lock = lock();
+            for state in [
+                ServerState::Offline,
+                ServerState::Starting,
+                ServerState::Stopping,
+                ServerState::Running,
+            ] {
+                lock.set_state(state).await;
+                assert_eq!(lock.get_state(), state);
+            }
+        });
+    }
+
+    #[test]
+    fn pending_restart_blocked_while_offline() {
+        tokio_test::block_on(async {
+            let lock = lock();
+            lock.set_pending_restart(true);
+            assert!(!lock.get_pending_restart());
+        });
+    }
+
+    #[test]
+    fn pending_restart_set_and_cleared_while_active() {
+        tokio_test::block_on(async {
+            let lock = lock();
+            lock.set_state(ServerState::Running).await;
+            lock.set_pending_restart(true);
+            assert!(lock.get_pending_restart());
+            lock.set_pending_restart(false);
+            assert!(!lock.get_pending_restart());
+        });
+    }
+
+    #[test]
+    fn entering_offline_clears_pending_restart() {
+        tokio_test::block_on(async {
+            let lock = lock();
+            lock.set_state(ServerState::Running).await;
+            lock.set_pending_restart(true);
+            lock.set_state(ServerState::Offline).await;
+            assert!(!lock.get_pending_restart());
+        });
+    }
+
+    #[test]
+    fn entering_starting_clears_pending_restart() {
+        tokio_test::block_on(async {
+            let lock = lock();
+            lock.set_state(ServerState::Running).await;
+            lock.set_pending_restart(true);
+            lock.set_state(ServerState::Starting).await;
+            assert!(!lock.get_pending_restart());
+        });
+    }
+
+    #[test]
+    fn entering_stopping_keeps_pending_restart() {
+        tokio_test::block_on(async {
+            let lock = lock();
+            lock.set_state(ServerState::Running).await;
+            lock.set_pending_restart(true);
+            lock.set_state(ServerState::Stopping).await;
+            assert!(lock.get_pending_restart());
+        });
+    }
+
+    #[test]
+    fn execute_action_runs_and_sets_state() {
+        tokio_test::block_on(async {
+            let lock = lock();
+            let ran = Arc::new(AtomicBool::new(false));
+            let out = {
+                let ran = ran.clone();
+                lock.execute_action(
+                    ServerState::Running,
+                    move |_| async move {
+                        ran.store(true, Ordering::SeqCst);
+                        anyhow::Ok(())
+                    },
+                    None,
+                )
+                .await
+            };
+            assert!(out.unwrap());
+            assert!(ran.load(Ordering::SeqCst));
+            assert_eq!(lock.get_state(), ServerState::Running);
+        });
+    }
+
+    #[test]
+    fn execute_action_reverts_state_on_error() {
+        tokio_test::block_on(async {
+            let lock = lock();
+            let out = lock
+                .execute_action(
+                    ServerState::Starting,
+                    |_| async move { anyhow::bail!("boom") },
+                    None,
+                )
+                .await;
+            assert!(out.is_err());
+            assert_eq!(lock.get_state(), ServerState::Offline);
+        });
+    }
+
+    #[test]
+    fn execute_action_releases_lock_after_success() {
+        tokio_test::block_on(async {
+            let lock = lock();
+            lock.execute_action(
+                ServerState::Running,
+                |_| async move { anyhow::Ok(()) },
+                None,
+            )
+            .await
+            .unwrap();
+            let out = lock
+                .execute_action(
+                    ServerState::Stopping,
+                    |_| async move { anyhow::Ok(()) },
+                    None,
+                )
+                .await;
+            assert!(out.unwrap());
+            assert_eq!(lock.get_state(), ServerState::Stopping);
+        });
+    }
+
+    #[test]
+    fn execute_action_releases_lock_after_error() {
+        tokio_test::block_on(async {
+            let lock = lock();
+            let _ = lock
+                .execute_action(
+                    ServerState::Starting,
+                    |_| async move { anyhow::bail!("x") },
+                    None,
+                )
+                .await;
+            let out = lock
+                .execute_action(
+                    ServerState::Running,
+                    |_| async move { anyhow::Ok(()) },
+                    None,
+                )
+                .await;
+            assert!(out.unwrap());
+        });
+    }
+
+    #[test]
+    fn execute_action_without_timeout_refuses_when_locked() {
+        tokio_test::block_on(async {
+            let lock = lock();
+            let started = Arc::new(Notify::new());
+            let release = Arc::new(Notify::new());
+
+            let holder = {
+                let started = started.clone();
+                let release = release.clone();
+                lock.execute_action(
+                    ServerState::Running,
+                    move |_| async move {
+                        started.notify_one();
+                        release.notified().await;
+                        anyhow::Ok(())
+                    },
+                    None,
+                )
+            };
+            let contender = {
+                let lock = &lock;
+                let started = started.clone();
+                let release = release.clone();
+                async move {
+                    started.notified().await;
+                    let r = lock
+                        .execute_action(
+                            ServerState::Stopping,
+                            |_| async move { anyhow::Ok(()) },
+                            None,
+                        )
+                        .await;
+                    release.notify_one();
+                    r
+                }
+            };
+
+            let (held, contended) = tokio::join!(holder, contender);
+            assert!(held.unwrap());
+            assert!(!contended.unwrap());
+        });
+    }
+
+    #[test]
+    fn execute_action_with_timeout_refuses_when_lock_stays_held() {
+        tokio_test::block_on(async {
+            let lock = lock();
+            let started = Arc::new(Notify::new());
+            let release = Arc::new(Notify::new());
+            let ran = Arc::new(AtomicBool::new(false));
+
+            let holder = {
+                let started = started.clone();
+                let release = release.clone();
+                lock.execute_action(
+                    ServerState::Running,
+                    move |_| async move {
+                        started.notify_one();
+                        release.notified().await;
+                        anyhow::Ok(())
+                    },
+                    None,
+                )
+            };
+            let contender = {
+                let l = &lock;
+                let started = started.clone();
+                let release = release.clone();
+                let ran = ran.clone();
+                async move {
+                    started.notified().await;
+                    let r = l
+                        .execute_action(
+                            ServerState::Stopping,
+                            move |_| async move {
+                                ran.store(true, Ordering::SeqCst);
+                                anyhow::Ok(())
+                            },
+                            Some(Duration::from_millis(150)),
+                        )
+                        .await;
+                    release.notify_one();
+                    r
+                }
+            };
+
+            let (held, contended) = tokio::join!(holder, contender);
+            assert!(held.unwrap());
+            assert_eq!(contended.unwrap(), false);
+            assert!(!ran.load(Ordering::SeqCst));
+        });
     }
 }

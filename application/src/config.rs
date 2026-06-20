@@ -1256,6 +1256,12 @@ impl Config {
         unsafe { &mut *ptr }
     }
 
+    #[allow(clippy::mut_from_ref)]
+    #[cfg(test)]
+    pub fn mutate_in_place_for_testing(&self) -> &mut InnerConfig {
+        unsafe { self.mutate_in_place() }
+    }
+
     fn save_to(path: &str, inner: &InnerConfig) -> Result<(), anyhow::Error> {
         let mut opts = std::fs::OpenOptions::new();
         opts.create(true).write(true).truncate(true);
