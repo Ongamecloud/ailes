@@ -6,8 +6,10 @@ use super::{
     manifest::{BackupManifest, FileInfo, MANIFEST_BLOB_NAME},
 };
 use bytes::Bytes;
+use futures::StreamExt;
 use sha2::{Digest, Sha256};
-use std::{collections::HashSet, io::Read};
+use std::collections::HashSet;
+use tokio::io::AsyncRead;
 
 pub const ARCHIVE_NAME: &str = "root.pxar.didx";
 pub const ARCHIVE_PXAR_NAME: &str = "root.pxar";
@@ -19,8 +21,8 @@ const MAX_CHUNK_SIZE: usize = 16 * 1024 * 1024;
 
 const INDEX_BATCH_SIZE: usize = 256;
 
-fn stream_chunker<R: Read>(reader: R) -> fastcdc::v2020::StreamCDC<R> {
-    fastcdc::v2020::StreamCDC::new(reader, MIN_CHUNK_SIZE, AVG_CHUNK_SIZE, MAX_CHUNK_SIZE)
+fn stream_chunker<R: AsyncRead + Unpin>(reader: R) -> fastcdc::v2020::AsyncStreamCDC<R> {
+    fastcdc::v2020::AsyncStreamCDC::new(reader, MIN_CHUNK_SIZE, AVG_CHUNK_SIZE, MAX_CHUNK_SIZE)
 }
 
 pub struct UploadedArchive {
@@ -78,7 +80,7 @@ impl PbsBackupWriter {
             .collect())
     }
 
-    pub async fn upload_archive<R: Read + Send + 'static>(
+    pub async fn upload_archive<R: AsyncRead + Send + Unpin + 'static>(
         &mut self,
         reader: R,
         known_chunks: HashSet<[u8; 32]>,
@@ -87,7 +89,7 @@ impl PbsBackupWriter {
             .await
     }
 
-    pub async fn upload_archive_named<R: Read + Send + 'static>(
+    pub async fn upload_archive_named<R: AsyncRead + Unpin>(
         &mut self,
         archive_name: &str,
         reader: R,
@@ -103,10 +105,15 @@ impl PbsBackupWriter {
             .as_u64()
             .ok_or_else(|| PbsError::Decode("dynamic_index did not return a wid".into()))?;
 
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<ChunkMessage, String>>(4);
-        let producer = tokio::task::spawn_blocking(move || {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+
+        let producer = async move {
             let mut known = known_chunks;
-            for chunk in stream_chunker(reader) {
+            let mut chunker = stream_chunker(reader);
+            let stream = chunker.as_stream();
+            tokio::pin!(stream);
+
+            while let Some(chunk) = stream.next().await {
                 let message = match chunk {
                     Ok(chunk) => {
                         let digest = datablob::sha256(&chunk.data);
@@ -123,64 +130,74 @@ impl PbsBackupWriter {
                     Err(err) => Err(err.to_string()),
                 };
                 let failed = message.is_err();
-                if tx.blocking_send(message).is_err() || failed {
+
+                if tx.send(message).await.is_err() || failed {
                     break;
                 }
             }
-        });
 
-        let mut entries: Vec<(u64, [u8; 32])> = Vec::new();
-        let mut digest_list: Vec<String> = Vec::new();
-        let mut offset_list: Vec<u64> = Vec::new();
-        let mut end_offset: u64 = 0;
+            Ok::<_, PbsError>(())
+        };
 
-        while let Some(message) = rx.recv().await {
-            let message = message.map_err(|err| PbsError::Transport(err.into()))?;
-            let start_offset = end_offset;
+        let consumer = async {
+            let mut entries = Vec::new();
+            let mut digest_list = Vec::new();
+            let mut offset_list = Vec::new();
+            let mut end_offset = 0;
 
-            let digest = match message {
-                ChunkMessage::Known { digest, size } => {
-                    end_offset += size;
-                    digest
+            while let Some(message) = rx.recv().await {
+                let message = message.map_err(|err| PbsError::Transport(err.into()))?;
+                let start_offset = end_offset;
+
+                let digest = match message {
+                    ChunkMessage::Known { digest, size } => {
+                        end_offset += size;
+                        digest
+                    }
+                    ChunkMessage::New(blob) => {
+                        end_offset += blob.plaintext_size;
+                        self.transport
+                            .upload(
+                                hyper::Method::POST,
+                                "dynamic_chunk",
+                                &[
+                                    ("wid", wid.to_string()),
+                                    ("digest", hex::encode(blob.digest)),
+                                    ("size", blob.plaintext_size.to_string()),
+                                    ("encoded-size", blob.data.len().to_string()),
+                                ],
+                                "application/octet-stream",
+                                Bytes::from(blob.data),
+                            )
+                            .await?;
+                        blob.digest
+                    }
+                };
+
+                entries.push((end_offset, digest));
+                digest_list.push(hex::encode(digest));
+                offset_list.push(start_offset);
+
+                if digest_list.len() >= INDEX_BATCH_SIZE {
+                    Self::register_chunks(
+                        &mut self.transport,
+                        wid,
+                        &mut digest_list,
+                        &mut offset_list,
+                    )
+                    .await?;
                 }
-                ChunkMessage::New(blob) => {
-                    end_offset += blob.plaintext_size;
-                    self.transport
-                        .upload(
-                            hyper::Method::POST,
-                            "dynamic_chunk",
-                            &[
-                                ("wid", wid.to_string()),
-                                ("digest", hex::encode(blob.digest)),
-                                ("size", blob.plaintext_size.to_string()),
-                                ("encoded-size", blob.data.len().to_string()),
-                            ],
-                            "application/octet-stream",
-                            Bytes::from(blob.data),
-                        )
-                        .await?;
-                    blob.digest
-                }
-            };
+            }
 
-            entries.push((end_offset, digest));
-            digest_list.push(hex::encode(digest));
-            offset_list.push(start_offset);
-
-            if digest_list.len() >= INDEX_BATCH_SIZE {
+            if !digest_list.is_empty() {
                 Self::register_chunks(&mut self.transport, wid, &mut digest_list, &mut offset_list)
                     .await?;
             }
-        }
 
-        producer
-            .await
-            .map_err(|err| PbsError::Transport(err.to_string().into()))?;
+            Ok::<_, PbsError>((entries, end_offset))
+        };
 
-        if !digest_list.is_empty() {
-            Self::register_chunks(&mut self.transport, wid, &mut digest_list, &mut offset_list)
-                .await?;
-        }
+        let (_, (entries, end_offset)) = tokio::try_join!(producer, consumer)?;
 
         let csum = index_csum(&entries);
         self.transport
@@ -257,6 +274,7 @@ impl PbsBackupWriter {
 
         self.upload_blob(MANIFEST_BLOB_NAME, &json).await?;
         self.transport.post("finish", &[]).await?;
+
         Ok(())
     }
 }

@@ -30,7 +30,7 @@ fn crc32(data: &[u8]) -> u32 {
 pub fn encode_blob(plaintext: &[u8]) -> EncodedBlob {
     let digest = sha256(plaintext);
 
-    let compressed = zstd::bulk::compress(plaintext, 1).ok();
+    let compressed = tokio::task::block_in_place(|| zstd::bulk::compress(plaintext, 1).ok());
     let (magic, payload): ([u8; 8], &[u8]) = match &compressed {
         Some(compressed) if compressed.len() < plaintext.len() => {
             (COMPRESSED_BLOB_MAGIC, compressed.as_slice())

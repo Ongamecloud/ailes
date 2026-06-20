@@ -205,7 +205,6 @@ impl BackupCreateExt for PbsBackup {
             let server_uuid = server.uuid;
 
             async move {
-                let reader = SyncIoBridge::new(archive_reader);
                 let mut writer = PbsBackupWriter::connect(&config, &backup_id, backup_time).await?;
 
                 let known_chunks = match writer.previous_archive_digests(ARCHIVE_NAME).await {
@@ -219,7 +218,7 @@ impl BackupCreateExt for PbsBackup {
                     }
                 };
 
-                let archive = writer.upload_archive(reader, known_chunks).await?;
+                let archive = writer.upload_archive(archive_reader, known_chunks).await?;
 
                 let catalog = catalog_rx
                     .await
