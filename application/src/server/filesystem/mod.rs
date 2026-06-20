@@ -1006,7 +1006,7 @@ impl Filesystem {
     }
 
     pub async fn truncate_root(&self) -> Result<(), std::io::Error> {
-        self.disk_usage.write().await.clear();
+        self.disk_usage.write().await.truncate();
         self.disk_usage_cached_logical.store(0, Ordering::Relaxed);
         self.disk_usage_cached_physical.store(0, Ordering::Relaxed);
 

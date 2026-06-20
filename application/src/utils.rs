@@ -32,21 +32,16 @@ pub fn draw_progress_bar(width: usize, current: f64, total: f64) -> String {
     format!("[{bar}] {formatted_percentage}")
 }
 
-#[inline]
-pub fn slice_after_question_mark(s: &str) -> &str {
-    s.split_once('?').map(|(_, after)| after).unwrap_or("")
-}
-
 pub fn parse_content_disposition_filename(header: &str) -> Option<String> {
     static RE_STAR: LazyLock<regex::Regex> = LazyLock::new(|| {
         regex::Regex::new(r"(?i)filename\*=utf-8''([^;]+)").expect("Failed to compile regex")
     });
 
     if let Some(caps) = RE_STAR.captures(header) {
-        let encoded_filename = &caps[1];
+        let encoded_filename = caps.get(1)?.as_str();
 
         if let Ok(decoded) = percent_encoding::percent_decode_str(encoded_filename).decode_utf8() {
-            return Some(slice_after_question_mark(&decoded).to_string());
+            return Some(decoded.into_owned());
         }
     }
 
@@ -55,10 +50,27 @@ pub fn parse_content_disposition_filename(header: &str) -> Option<String> {
     });
 
     if let Some(caps) = RE_LEGACY.captures(header) {
-        return Some(slice_after_question_mark(&caps[1]).to_string());
+        return Some(caps.get(1)?.as_str().into());
     }
 
     None
+}
+
+pub fn detect_utf8_from_mime(mime: &str) -> bool {
+    const ADDITIONAL_TEXT_MIME_TYPES: &[&str] = &[
+        "application/json",
+        "application/javascript",
+        "application/xml",
+        "application/x-yaml",
+        "application/yaml",
+        "application/toml",
+        "application/sql",
+        "application/x-sh",
+        "application/x-httpd-php",
+        "image/svg+xml",
+    ];
+
+    mime.starts_with("text/") || ADDITIONAL_TEXT_MIME_TYPES.contains(&mime)
 }
 
 pub fn detect_inner_utf8(path: &Path, mime: &str) -> bool {
@@ -76,20 +88,7 @@ pub fn detect_inner_utf8(path: &Path, mime: &str) -> bool {
     };
 
     if let Some(stem_mime) = new_mime_guess::from_path(file_stem).first_raw() {
-        const ADDITIONAL_TEXT_MIME_TYPES: &[&str] = &[
-            "application/json",
-            "application/javascript",
-            "application/xml",
-            "application/x-yaml",
-            "application/yaml",
-            "application/toml",
-            "application/sql",
-            "application/x-sh",
-            "application/x-httpd-php",
-            "image/svg+xml",
-        ];
-
-        stem_mime.starts_with("text/") || ADDITIONAL_TEXT_MIME_TYPES.contains(&stem_mime)
+        detect_utf8_from_mime(stem_mime)
     } else {
         false
     }
@@ -109,7 +108,7 @@ pub fn detect_mime_type(path: &Path, buffer: Option<&[u8]>) -> MimeCacheValue {
     } else if let Some(mime) = new_mime_guess::from_path(path).first_raw() {
         MimeCacheValue {
             mime,
-            valid_utf8,
+            valid_utf8: valid_utf8 || detect_utf8_from_mime(mime),
             valid_inner_utf8: detect_inner_utf8(path, mime),
         }
     } else if valid_utf8 {
@@ -385,5 +384,220 @@ impl CmpExt for Path {
                     .iter()
                     .map(|b| b.to_ascii_lowercase()),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cmp::Ordering;
+
+    // draw_progress_bar
+
+    fn bar_inner(s: &str) -> &str {
+        let open = s.find('[').unwrap();
+        let close = s.find(']').unwrap();
+        &s[open + 1..close]
+    }
+
+    #[test]
+    fn progress_bar_exact_renders() {
+        assert_eq!(draw_progress_bar(10, 0.0, 100.0), "[>         ] 0.00%");
+        assert_eq!(draw_progress_bar(10, 50.0, 100.0), "[=====>    ] 50.00%");
+        assert_eq!(draw_progress_bar(10, 100.0, 100.0), "[==========] 100.00%");
+    }
+
+    #[test]
+    fn progress_bar_over_100_clamps_fill_but_not_label() {
+        assert_eq!(draw_progress_bar(10, 150.0, 100.0), "[==========] 150.00%");
+    }
+
+    #[test]
+    fn progress_bar_non_finite_reads_as_zero() {
+        assert_eq!(draw_progress_bar(10, 0.0, 0.0), "[>         ] 0.00%");
+    }
+
+    #[test]
+    fn progress_bar_inner_width_is_constant() {
+        for &(cur, total, width) in &[
+            (0.0, 100.0, 10),
+            (37.0, 100.0, 20),
+            (100.0, 100.0, 8),
+            (250.0, 100.0, 12),
+            (0.0, 0.0, 15),
+        ] {
+            assert_eq!(
+                bar_inner(&draw_progress_bar(width, cur, total))
+                    .chars()
+                    .count(),
+                width
+            );
+        }
+    }
+
+    // parse_content_disposition_filename
+
+    #[test]
+    fn parse_filename_legacy_quoted() {
+        let got = parse_content_disposition_filename("attachment; filename=\"example.txt\"");
+        assert_eq!(got.as_deref(), Some("example.txt"));
+    }
+
+    #[test]
+    fn parse_filename_legacy_unquoted() {
+        let got = parse_content_disposition_filename("attachment; filename=example.txt");
+        assert_eq!(got.as_deref(), Some("example.txt"));
+    }
+
+    #[test]
+    fn parse_filename_rfc5987_percent_decoded() {
+        let got = parse_content_disposition_filename(
+            "attachment; filename*=UTF-8''My%20Report%20%282%29.pdf",
+        );
+        assert_eq!(got.as_deref(), Some("My Report (2).pdf"));
+    }
+
+    #[test]
+    fn parse_filename_star_takes_precedence() {
+        let got = parse_content_disposition_filename(
+            "attachment; filename=\"fallback.txt\"; filename*=utf-8''real.txt",
+        );
+        assert_eq!(got.as_deref(), Some("real.txt"));
+    }
+
+    #[test]
+    fn parse_filename_preserves_question_mark() {
+        let got = parse_content_disposition_filename("attachment; filename=\"a?b.txt\"");
+        assert_eq!(got.as_deref(), Some("a?b.txt"));
+    }
+
+    #[test]
+    fn parse_filename_absent_is_none() {
+        assert_eq!(parse_content_disposition_filename("attachment"), None);
+    }
+
+    // deduplicate_paths
+
+    #[test]
+    fn deduplicate_empty() {
+        assert!(deduplicate_paths(Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn deduplicate_removes_duplicates_and_descendants() {
+        let input = ["/a/b", "/a", "/a/b", "/c"].map(PathBuf::from).to_vec();
+        let got = deduplicate_paths(input);
+        assert_eq!(got, [PathBuf::from("/a"), PathBuf::from("/c")]);
+    }
+
+    #[test]
+    fn deduplicate_keeps_sibling_with_shared_string_prefix() {
+        // "/ab" is not a path-descendant of "/a", so it must survive
+        let got = deduplicate_paths(["/a", "/ab"].map(PathBuf::from).to_vec());
+        assert_eq!(got, [PathBuf::from("/a"), PathBuf::from("/ab")]);
+    }
+
+    #[test]
+    fn deduplicate_keeps_unrelated_siblings() {
+        let got = deduplicate_paths(["/b", "/a"].map(PathBuf::from).to_vec());
+        assert_eq!(got, [PathBuf::from("/a"), PathBuf::from("/b")]);
+    }
+
+    // is_valid_utf8_slice
+
+    #[test]
+    fn valid_utf8_accepts_complete_and_empty() {
+        assert!(is_valid_utf8_slice(b""));
+        assert!(is_valid_utf8_slice("héllo 😀".as_bytes()));
+    }
+
+    #[test]
+    fn valid_utf8_accepts_truncated_trailing_char() {
+        assert!(is_valid_utf8_slice(b"ok\xf0\x9f\x98"));
+    }
+
+    #[test]
+    fn valid_utf8_rejects_mid_sequence_garbage() {
+        assert!(!is_valid_utf8_slice(b"ab\xffcd"));
+        assert!(!is_valid_utf8_slice(b"\xf0\x28"));
+    }
+
+    // strip_paths
+
+    #[test]
+    fn strip_paths_top_level() {
+        let mut v = serde_json::json!({"a": 1, "b": 2});
+        strip_paths(&mut v, &["a"]);
+        assert_eq!(v, serde_json::json!({"b": 2}));
+    }
+
+    #[test]
+    fn strip_paths_nested() {
+        let mut v = serde_json::json!({"a": {"b": 1, "c": 2}});
+        strip_paths(&mut v, &["a.b"]);
+        assert_eq!(v, serde_json::json!({"a": {"c": 2}}));
+    }
+
+    #[test]
+    fn strip_paths_through_non_object_is_noop() {
+        let mut v = serde_json::json!({"a": 5});
+        strip_paths(&mut v, &["a.b"]);
+        assert_eq!(v, serde_json::json!({"a": 5}));
+    }
+
+    #[test]
+    fn strip_paths_missing_intermediate_is_noop() {
+        let mut v = serde_json::json!({"a": {"x": 1}});
+        strip_paths(&mut v, &["a.b.c"]);
+        assert_eq!(v, serde_json::json!({"a": {"x": 1}}));
+    }
+
+    #[test]
+    fn strip_paths_multiple() {
+        let mut v = serde_json::json!({"a": 1, "b": 2, "c": 3});
+        strip_paths(&mut v, &["a", "c"]);
+        assert_eq!(v, serde_json::json!({"b": 2}));
+    }
+
+    // PortablePermissions
+
+    #[test]
+    fn portable_permissions_from_mode_masks_to_lower_nine_bits() {
+        assert_eq!(PortablePermissions::from_mode(0o7755).mode, 0o755);
+        assert_eq!(PortablePermissions::from_mode(0o644).mode, 0o644);
+        assert_eq!(PortablePermissions::from_mode(0o1777).mode, 0o777);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn portable_permissions_into_std_roundtrips_on_unix() {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = PortablePermissions::from_mode(0o640)
+            .into_std_permissions()
+            .unwrap();
+        assert_eq!(perms.mode() & 0o777, 0o640);
+    }
+
+    // CmpExt
+
+    #[test]
+    fn cmp_str_is_case_insensitive() {
+        assert_eq!("ABC".cmp_ascii_case_insensitive("abc"), Ordering::Equal);
+        assert_eq!("abc".cmp_ascii_case_insensitive("abd"), Ordering::Less);
+        assert_eq!("ab".cmp_ascii_case_insensitive("abc"), Ordering::Less);
+        // folding flips the raw byte ordering of 'Z' (0x5A) vs 'a' (0x61)
+        assert_eq!("Z".cmp_ascii_case_insensitive("a"), Ordering::Greater);
+    }
+
+    #[test]
+    fn cmp_path_is_case_insensitive() {
+        assert_eq!(
+            Path::new("FOO/Bar").cmp_ascii_case_insensitive(Path::new("foo/bar")),
+            Ordering::Equal,
+        );
+        assert_eq!(
+            Path::new("a").cmp_ascii_case_insensitive(Path::new("B")),
+            Ordering::Less,
+        );
     }
 }

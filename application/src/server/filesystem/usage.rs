@@ -51,6 +51,14 @@ impl UsedSpace {
         let physical = self.get_physical();
         self.set_physical(physical.saturating_add(val));
     }
+
+    #[inline]
+    fn apply_delta(&mut self, add: UsedSpace, sub: UsedSpace) {
+        self.add_logical(add.get_logical());
+        self.add_physical(add.get_physical());
+        self.sub_logical(sub.get_logical());
+        self.sub_physical(sub.get_physical());
+    }
 }
 
 impl std::ops::Add for UsedSpace {
@@ -185,6 +193,19 @@ impl DiskUsage {
         Some(current)
     }
 
+    pub fn get_path_components(&self, components: &[impl AsRef<str>]) -> Option<&DiskUsage> {
+        let mut current = self;
+        for component in components {
+            let idx = current
+                .entries
+                .binary_search_by(|(n, _)| n.as_str().cmp(component.as_ref()))
+                .ok()?;
+            current = &current.entries.get(idx)?.1;
+        }
+
+        Some(current)
+    }
+
     pub fn update_size(&mut self, path: &Path, delta: SpaceDelta) {
         if delta.logical >= 0 {
             self.space.add_logical(delta.logical as u64);
@@ -298,7 +319,9 @@ impl DiskUsage {
     }
 
     #[inline]
-    pub fn clear(&mut self) {
+    pub fn truncate(&mut self) {
+        self.space.set_logical(0);
+        self.space.set_physical(0);
         self.entries.clear();
     }
 
@@ -316,20 +339,323 @@ impl DiskUsage {
             return false;
         };
 
+        let old = self
+            .get_path_components(target_path)
+            .map(|d| d.space)
+            .unwrap_or_default();
+        let new = source_dir.space;
+
         let mut current = self;
         for component in parents {
             tracing::trace!(?component, "applying path delta");
 
-            current.space.add_logical(source_dir.space.get_logical());
-            current.space.add_physical(source_dir.space.get_physical());
-
+            current.space.apply_delta(new, old);
             current = current.upsert_entry(component.as_ref());
         }
 
-        current.space.add_logical(source_dir.space.get_logical());
-        current.space.add_physical(source_dir.space.get_physical());
+        current.space.apply_delta(new, old);
         *current.upsert_entry(leaf.as_ref()) = source_dir;
 
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn used(logical: u64, physical: u64) -> UsedSpace {
+        let mut s = UsedSpace::default();
+        s.set_logical(logical);
+        s.set_physical(physical);
+        s
+    }
+
+    fn assert_space(s: UsedSpace, logical: u64, physical: u64) {
+        assert_eq!(s.get_logical(), logical);
+        assert_eq!(s.get_physical(), physical);
+    }
+
+    // UsedSpace
+
+    #[test]
+    fn used_space_add_and_sub() {
+        let mut s = UsedSpace::default();
+        s.add_logical(100);
+        s.add_physical(50);
+        assert_space(s, 100, 50);
+
+        s.sub_logical(30);
+        s.sub_physical(20);
+        assert_space(s, 70, 30);
+    }
+
+    #[test]
+    fn used_space_sub_saturates_at_zero() {
+        let mut s = used(10, 10);
+        s.sub_logical(1000);
+        s.sub_physical(1000);
+        assert_space(s, 0, 0);
+    }
+
+    #[test]
+    fn used_space_add_saturates_at_max() {
+        let mut s = used(u64::MAX, u64::MAX);
+        s.add_logical(10);
+        s.add_physical(10);
+        assert_space(s, u64::MAX, u64::MAX);
+    }
+
+    #[test]
+    fn used_space_add_trait_saturates() {
+        assert_space(used(10, 20) + used(5, 7), 15, 27);
+        assert_space(used(u64::MAX, 0) + used(5, 0), u64::MAX, 0);
+    }
+
+    #[test]
+    fn used_space_sum() {
+        let total: UsedSpace = [used(1, 2), used(3, 4), used(5, 6)].into_iter().sum();
+        assert_space(total, 9, 12);
+    }
+
+    // SpaceDelta
+
+    #[test]
+    fn space_delta_constructors() {
+        let d = SpaceDelta::new(3, 5);
+        assert_eq!((d.logical, d.physical), (3, 5));
+
+        let d = SpaceDelta::only_logical(7);
+        assert_eq!((d.logical, d.physical), (7, 0));
+
+        let d = SpaceDelta::from(9);
+        assert_eq!((d.logical, d.physical), (9, 9));
+    }
+
+    // DiskUsage
+
+    #[test]
+    fn update_root_only_for_empty_path() {
+        let mut du = DiskUsage::default();
+        du.update_size(Path::new(""), SpaceDelta::from(100));
+        assert_space(du.space, 100, 100);
+        assert!(du.get_entries().is_empty());
+
+        du.update_size(Path::new("/"), SpaceDelta::from(5));
+        assert_space(du.space, 105, 105);
+        assert!(du.get_entries().is_empty());
+    }
+
+    #[test]
+    fn update_creates_path_and_accumulates() {
+        let mut du = DiskUsage::default();
+        du.update_size(Path::new("a/b"), SpaceDelta::from(100));
+
+        assert_space(du.space, 100, 100);
+        assert_space(du.get_size(Path::new("a")).unwrap(), 100, 100);
+        assert_space(du.get_size(Path::new("a/b")).unwrap(), 100, 100);
+    }
+
+    #[test]
+    fn update_siblings_aggregate_into_parent() {
+        let mut du = DiskUsage::default();
+        du.update_size(Path::new("a/b"), SpaceDelta::from(100));
+        du.update_size(Path::new("a/c"), SpaceDelta::from(50));
+
+        assert_space(du.space, 150, 150);
+        assert_space(du.get_size(Path::new("a")).unwrap(), 150, 150);
+        assert_space(du.get_size(Path::new("a/b")).unwrap(), 100, 100);
+        assert_space(du.get_size(Path::new("a/c")).unwrap(), 50, 50);
+    }
+
+    #[test]
+    fn directory_own_usage_via_subtraction() {
+        let mut du = DiskUsage::default();
+        du.update_size(Path::new("a/b"), SpaceDelta::from(100));
+        du.update_size(Path::new("a/c"), SpaceDelta::from(50));
+
+        let a = du.get_path(Path::new("a")).unwrap();
+        let children: UsedSpace = a.get_entries().iter().map(|(_, d)| d.space).sum();
+        assert_eq!(a.space.get_logical() - children.get_logical(), 0);
+    }
+
+    #[test]
+    fn update_negative_delta_subtracts_and_saturates() {
+        let mut du = DiskUsage::default();
+        du.update_size(Path::new("a"), SpaceDelta::from(100));
+        du.update_size(Path::new("a"), SpaceDelta::from(-30));
+        assert_space(du.get_size(Path::new("a")).unwrap(), 70, 70);
+
+        du.update_size(Path::new("a"), SpaceDelta::from(-1000));
+        assert_space(du.get_size(Path::new("a")).unwrap(), 0, 0);
+        assert_space(du.space, 0, 0);
+    }
+
+    #[test]
+    fn entries_stay_sorted_regardless_of_insert_order() {
+        let mut du = DiskUsage::default();
+        du.update_size(Path::new("c"), SpaceDelta::from(1));
+        du.update_size(Path::new("a"), SpaceDelta::from(1));
+        du.update_size(Path::new("b"), SpaceDelta::from(1));
+
+        let keys: Vec<_> = du.get_entries().iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(keys, ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn update_size_iterator_matches_path_form() {
+        let mut du = DiskUsage::default();
+        du.update_size_iterator(["a", "b"], SpaceDelta::from(100));
+        assert_space(du.space, 100, 100);
+        assert_space(du.get_size(Path::new("a")).unwrap(), 100, 100);
+        assert_space(du.get_size(Path::new("a/b")).unwrap(), 100, 100);
+
+        let mut empty = DiskUsage::default();
+        empty.update_size_iterator(std::iter::empty::<&str>(), SpaceDelta::from(50));
+        assert_space(empty.space, 50, 50);
+        assert!(empty.get_entries().is_empty());
+    }
+
+    #[test]
+    fn get_size_root_for_empty_and_slash() {
+        let mut du = DiskUsage::default();
+        du.update_size(Path::new("a"), SpaceDelta::from(42));
+        assert_space(du.get_size(Path::new("")).unwrap(), 42, 42);
+        assert_space(du.get_size(Path::new("/")).unwrap(), 42, 42);
+    }
+
+    #[test]
+    fn get_size_missing_is_none() {
+        let mut du = DiskUsage::default();
+        du.update_size(Path::new("a"), SpaceDelta::from(10));
+        assert!(du.get_size(Path::new("missing")).is_none());
+        assert!(du.get_size(Path::new("a/missing")).is_none());
+    }
+
+    #[test]
+    fn get_size_absolute_path_does_not_resolve() {
+        let mut du = DiskUsage::default();
+        du.update_size(Path::new("a"), SpaceDelta::from(10));
+        assert!(du.get_size(Path::new("/a")).is_none());
+    }
+
+    #[test]
+    fn get_path_returns_node() {
+        let mut du = DiskUsage::default();
+        du.update_size(Path::new("a/b"), SpaceDelta::from(100));
+
+        let node = du.get_path(Path::new("a")).unwrap();
+        assert_space(node.space, 100, 100);
+        assert_eq!(node.get_entries().len(), 1);
+        assert_eq!(node.get_entries()[0].0.as_str(), "b");
+
+        assert_space(du.get_path(Path::new("")).unwrap().space, 100, 100);
+    }
+
+    #[test]
+    fn remove_leaf_subtracts_from_ancestors() {
+        let mut du = DiskUsage::default();
+        du.update_size(Path::new("a/b"), SpaceDelta::from(100));
+        du.update_size(Path::new("a/c"), SpaceDelta::from(50));
+
+        let removed = du.remove_path(Path::new("a/b")).unwrap();
+        assert_space(removed.space, 100, 100);
+
+        assert_space(du.space, 50, 50);
+        assert_space(du.get_size(Path::new("a")).unwrap(), 50, 50);
+        assert!(du.get_size(Path::new("a/b")).is_none());
+        assert_space(du.get_size(Path::new("a/c")).unwrap(), 50, 50);
+    }
+
+    #[test]
+    fn remove_subtree_takes_children_and_updates_root() {
+        let mut du = DiskUsage::default();
+        du.update_size(Path::new("a/b"), SpaceDelta::from(100));
+        du.update_size(Path::new("x"), SpaceDelta::from(20));
+
+        let removed = du.remove_path(Path::new("a")).unwrap();
+        assert_space(removed.space, 100, 100);
+        assert_space(removed.get_size(Path::new("b")).unwrap(), 100, 100);
+
+        assert_space(du.space, 20, 20);
+        assert!(du.get_size(Path::new("a")).is_none());
+        assert_space(du.get_size(Path::new("x")).unwrap(), 20, 20);
+    }
+
+    #[test]
+    fn remove_missing_is_none_and_leaves_sizes() {
+        let mut du = DiskUsage::default();
+        du.update_size(Path::new("a"), SpaceDelta::from(100));
+
+        assert!(du.remove_path(Path::new("missing")).is_none());
+        assert!(du.remove_path(Path::new("a/missing")).is_none());
+
+        assert_space(du.space, 100, 100);
+        assert_space(du.get_size(Path::new("a")).unwrap(), 100, 100);
+    }
+
+    #[test]
+    fn remove_root_variants_are_none() {
+        let mut du = DiskUsage::default();
+        du.update_size(Path::new("a"), SpaceDelta::from(100));
+        assert!(du.remove_path(Path::new("")).is_none());
+        assert!(du.remove_path(Path::new("/")).is_none());
+        assert_space(du.space, 100, 100);
+    }
+
+    #[test]
+    fn add_directory_empty_target_is_false() {
+        let mut du = DiskUsage::default();
+        let target: [&str; 0] = [];
+        assert!(!du.add_directory(&target, DiskUsage::default()));
+    }
+
+    #[test]
+    fn add_directory_single_leaf() {
+        let mut du = DiskUsage::default();
+        assert!(du.add_directory(&["leaf"], used_dir(100, 80)));
+
+        assert_space(du.space, 100, 80);
+        assert_space(du.get_size(Path::new("leaf")).unwrap(), 100, 80);
+    }
+
+    #[test]
+    fn add_directory_nested_accumulates_ancestors() {
+        let mut du = DiskUsage::default();
+        assert!(du.add_directory(&["a", "b", "leaf"], used_dir(100, 80)));
+
+        assert_space(du.space, 100, 80);
+        assert_space(du.get_size(Path::new("a")).unwrap(), 100, 80);
+        assert_space(du.get_size(Path::new("a/b")).unwrap(), 100, 80);
+        assert_space(du.get_size(Path::new("a/b/leaf")).unwrap(), 100, 80);
+    }
+
+    #[test]
+    fn add_directory_overwrites_leaf_and_reconciles_ancestors() {
+        let mut du = DiskUsage::default();
+        du.update_size(Path::new("a/leaf"), SpaceDelta::from(10));
+        du.add_directory(&["a", "leaf"], used_dir(100, 80));
+
+        assert_space(du.space, 100, 80);
+        assert_space(du.get_size(Path::new("a")).unwrap(), 100, 80);
+        assert_space(du.get_size(Path::new("a/leaf")).unwrap(), 100, 80);
+    }
+
+    #[test]
+    fn add_directory_overwrite_smaller_shrinks_ancestors() {
+        let mut du = DiskUsage::default();
+        du.update_size(Path::new("a/leaf"), SpaceDelta::from(100));
+        du.add_directory(&["a", "leaf"], used_dir(30, 30));
+
+        assert_space(du.space, 30, 30);
+        assert_space(du.get_size(Path::new("a")).unwrap(), 30, 30);
+        assert_space(du.get_size(Path::new("a/leaf")).unwrap(), 30, 30);
+    }
+
+    fn used_dir(logical: u64, physical: u64) -> DiskUsage {
+        let mut d = DiskUsage::default();
+        d.space.set_logical(logical);
+        d.space.set_physical(physical);
+        d
     }
 }

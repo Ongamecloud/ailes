@@ -71,6 +71,10 @@ impl InotifyManager {
         notifier: InotifyServerNotifier,
         uuid: uuid::Uuid,
     ) -> Result<(), anyhow::Error> {
+        if notify::RecommendedWatcher::kind() == notify::WatcherKind::PollWatcher {
+            return Ok(());
+        }
+
         let base_path = notifier.path.clone();
         let watcher = Arc::clone(&self.watcher);
         let server_notifiers = Arc::clone(&self.server_notifiers);
@@ -136,6 +140,7 @@ impl InotifyServerNotifier {
         }
     }
 
+    #[inline]
     pub fn is_trusted(&self) -> bool {
         self.is_trusted.load(Ordering::Relaxed)
     }

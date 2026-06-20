@@ -1,4 +1,5 @@
 use crate::utils::PortablePermissions;
+use positioned_io::ReadAt;
 use std::{
     future::Future,
     io::{Read, Seek, SeekFrom, Write},
@@ -9,7 +10,7 @@ use std::{
 };
 use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite, AsyncWriteExt, ReadBuf};
 
-pub const ALLOCATION_THRESHOLD: i64 = 1024 * 1024;
+pub const ALLOCATION_THRESHOLD: i64 = 1024 * 1024; // 1 MiB
 
 pub struct ServerFile {
     server: crate::server::Server,
@@ -118,7 +119,7 @@ impl ServerFile {
 impl Write for ServerFile {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         let Some(file) = self.file.as_mut() else {
-            return Err(std::io::Error::other("File is not available"));
+            return Err(std::io::Error::other("file is not available"));
         };
 
         let written = file.write(buf)?;
@@ -142,7 +143,7 @@ impl Write for ServerFile {
         self.allocate_accumulated()?;
 
         let Some(file) = self.file.as_mut() else {
-            return Err(std::io::Error::other("File is not available"));
+            return Err(std::io::Error::other("file is not available"));
         };
 
         file.flush()
@@ -154,7 +155,7 @@ impl Seek for ServerFile {
         self.allocate_accumulated()?;
 
         let Some(file) = self.file.as_mut() else {
-            return Err(std::io::Error::other("File is not available"));
+            return Err(std::io::Error::other("file is not available"));
         };
 
         let new_pos = file.seek(pos)?;
@@ -168,10 +169,20 @@ impl Seek for ServerFile {
 impl Read for ServerFile {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let Some(file) = self.file.as_mut() else {
-            return Err(std::io::Error::other("File is not available"));
+            return Err(std::io::Error::other("file is not available"));
         };
 
         file.read(buf)
+    }
+}
+
+impl ReadAt for ServerFile {
+    fn read_at(&self, pos: u64, buf: &mut [u8]) -> std::io::Result<usize> {
+        let Some(file) = self.file.as_ref() else {
+            return Err(std::io::Error::other("file is not available"));
+        };
+
+        file.read_at(pos, buf)
     }
 }
 
@@ -335,7 +346,7 @@ impl AsyncWrite for AsyncServerFile {
         }
 
         let Some(file) = self.file.as_mut() else {
-            return Poll::Ready(Err(std::io::Error::other("File is not available")));
+            return Poll::Ready(Err(std::io::Error::other("file is not available")));
         };
 
         let result = Pin::new(file).poll_write(cx, buf);
@@ -376,7 +387,7 @@ impl AsyncWrite for AsyncServerFile {
         }
 
         let Some(file) = self.file.as_mut() else {
-            return Poll::Ready(Err(std::io::Error::other("File is not available")));
+            return Poll::Ready(Err(std::io::Error::other("file is not available")));
         };
 
         Pin::new(file).poll_flush(cx)
@@ -400,7 +411,7 @@ impl AsyncWrite for AsyncServerFile {
         }
 
         let Some(file) = self.file.as_mut() else {
-            return Poll::Ready(Err(std::io::Error::other("File is not available")));
+            return Poll::Ready(Err(std::io::Error::other("file is not available")));
         };
 
         Pin::new(file).poll_shutdown(cx)
@@ -414,7 +425,7 @@ impl AsyncSeek for AsyncServerFile {
         }
 
         let Some(file) = self.file.as_mut() else {
-            return Err(std::io::Error::other("File is not available"));
+            return Err(std::io::Error::other("file is not available"));
         };
 
         Pin::new(file).start_seek(position)
@@ -428,7 +439,7 @@ impl AsyncSeek for AsyncServerFile {
         }
 
         let Some(file) = self.file.as_mut() else {
-            return Poll::Ready(Err(std::io::Error::other("File is not available")));
+            return Poll::Ready(Err(std::io::Error::other("file is not available")));
         };
 
         let result = Pin::new(file).poll_complete(cx);
@@ -448,7 +459,7 @@ impl AsyncRead for AsyncServerFile {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
         let Some(file) = self.file.as_mut() else {
-            return Poll::Ready(Err(std::io::Error::other("File is not available")));
+            return Poll::Ready(Err(std::io::Error::other("file is not available")));
         };
 
         Pin::new(file).poll_read(cx, buf)
