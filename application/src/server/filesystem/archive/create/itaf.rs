@@ -74,7 +74,10 @@ pub async fn create_itaf<W: Write + Send + 'static>(
 
             let source_metadata = match filesystem.symlink_metadata(&source) {
                 Ok(metadata) => metadata,
-                Err(_) => continue,
+                Err(err) => {
+                    tracing::debug!(path = %source.display(), "skipping source while creating itaf archive, failed to read metadata: {err:#}");
+                    continue;
+                }
             };
 
             let Some(source) = (is_ignored)(source_metadata.file_type().into(), source) else {
@@ -96,7 +99,15 @@ pub async fn create_itaf<W: Write + Send + 'static>(
                     .map(|c| c.to_compact_string())
                     .collect::<Vec<_>>();
 
-                while let Some(Ok((_, path))) = walker.next_entry() {
+                while let Some(entry) = walker.next_entry() {
+                    let (_, path) = match entry {
+                        Ok(entry) => entry,
+                        Err(err) => {
+                            tracing::debug!("failed to read directory entry while creating itaf archive: {err:#}");
+                            break;
+                        }
+                    };
+
                     let rel = match path.strip_prefix(&base) {
                         Ok(r) => r,
                         Err(_) => continue,
@@ -104,7 +115,10 @@ pub async fn create_itaf<W: Write + Send + 'static>(
 
                     let metadata = match filesystem.symlink_metadata(&path) {
                         Ok(m) => m,
-                        Err(_) => continue,
+                        Err(err) => {
+                            tracing::debug!(path = %path.display(), "skipping entry while creating itaf archive, failed to read metadata: {err:#}");
+                            continue;
+                        }
                     };
 
                     let entry_components = path_components(rel);
@@ -253,7 +267,10 @@ pub async fn create_itaf_distributed<W: Write + Send + 'static>(
 
             let metadata = match filesystem.symlink_metadata(&full) {
                 Ok(m) => m,
-                Err(_) => continue,
+                Err(err) => {
+                    tracing::debug!(path = %full.display(), "skipping source while creating itaf archive, failed to read metadata: {err:#}");
+                    continue;
+                }
             };
 
             let meta = itaf_metadata(&metadata);
@@ -427,12 +444,15 @@ fn sync_dir_stack_with_meta<W: Write>(
 
         let meta = match filesystem.symlink_metadata(&dir_path) {
             Ok(m) => itaf_metadata(&m),
-            Err(_) => Metadata {
-                uid: 0,
-                gid: 0,
-                mode: 0o755,
-                modified: std::time::SystemTime::now(),
-            },
+            Err(err) => {
+                tracing::debug!(path = %dir_path.display(), "falling back to default directory metadata while creating itaf archive, failed to read metadata: {err:#}");
+                Metadata {
+                    uid: 0,
+                    gid: 0,
+                    mode: 0o755,
+                    modified: std::time::SystemTime::now(),
+                }
+            }
         };
 
         archive.enter_dir(component, &meta)?;

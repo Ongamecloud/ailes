@@ -175,6 +175,12 @@ impl S3Backup {
         part_size: u64,
         initial_urls: Vec<String>,
     ) -> Result<RawServerBackup, anyhow::Error> {
+        if part_size == 0 {
+            return Err(anyhow::anyhow!(
+                "remote returned a part size of 0 for s3 backup {uuid}, cannot upload backup"
+            ));
+        }
+
         let scratch_path = Self::get_scratch_file_name(&server.app_state.config, uuid);
         let mut scratch = tokio::fs::OpenOptions::new()
             .read(true)
@@ -360,6 +366,12 @@ impl S3Backup {
             );
         }
 
+        if size == 0 {
+            return Err(anyhow::anyhow!(
+                "s3 backup archive is 0 bytes, this should not be possible"
+            ));
+        }
+
         Ok(RawServerBackup {
             checksum,
             checksum_type: "sha256".into(),
@@ -487,12 +499,23 @@ impl S3Backup {
         let (checksum, total_files, _) = tokio::try_join!(checksum_task, total_task, archive_task)?;
 
         let size = file.metadata().await?.len();
+        if size == 0 {
+            return Err(anyhow::anyhow!(
+                "s3 backup archive is 0 bytes, this should not be possible"
+            ));
+        }
+
         let (part_size, part_urls) = server
             .app_state
             .config
             .client
             .backup_upload_urls(uuid, size)
             .await?;
+        if part_size == 0 {
+            return Err(anyhow::anyhow!(
+                "remote returned a part size of 0 for s3 backup {uuid}, cannot upload backup"
+            ));
+        }
 
         let mut remaining_size = size;
         let mut parts = Vec::with_capacity(part_urls.len());

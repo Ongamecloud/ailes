@@ -51,7 +51,10 @@ pub async fn create_tar<W: Write + Send + 'static>(
 
             let source_metadata = match filesystem.symlink_metadata(&source) {
                 Ok(metadata) => metadata,
-                Err(_) => continue,
+                Err(err) => {
+                    tracing::debug!(path = %source.display(), "skipping source while creating tar archive, failed to read metadata: {err:#}");
+                    continue;
+                }
             };
 
             let Some(source) = (is_ignored)(source_metadata.file_type().into(), source) else {
@@ -84,7 +87,15 @@ pub async fn create_tar<W: Write + Send + 'static>(
                 let mut walker = filesystem
                     .walk_dir(source)?
                     .with_is_ignored(is_ignored.clone());
-                while let Some(Ok((_, path))) = walker.next_entry() {
+                while let Some(entry) = walker.next_entry() {
+                    let (_, path) = match entry {
+                        Ok(entry) => entry,
+                        Err(err) => {
+                            tracing::debug!("failed to read directory entry while creating tar archive: {err:#}");
+                            break;
+                        }
+                    };
+
                     let relative = match path.strip_prefix(&base) {
                         Ok(path) => path,
                         Err(_) => continue,
@@ -92,7 +103,10 @@ pub async fn create_tar<W: Write + Send + 'static>(
 
                     let metadata = match filesystem.symlink_metadata(&path) {
                         Ok(metadata) => metadata,
-                        Err(_) => continue,
+                        Err(err) => {
+                            tracing::debug!(path = %path.display(), "skipping entry while creating tar archive, failed to read metadata: {err:#}");
+                            continue;
+                        }
                     };
 
                     let mut header = tar::Header::new_gnu();
@@ -209,7 +223,10 @@ pub async fn create_tar_distributed<W: Write + Send + 'static>(
 
             let source_metadata = match filesystem.symlink_metadata(&source) {
                 Ok(metadata) => metadata,
-                Err(_) => continue,
+                Err(err) => {
+                    tracing::debug!(path = %source.display(), "skipping source while creating tar archive, failed to read metadata: {err:#}");
+                    continue;
+                }
             };
 
             let mut header = tar::Header::new_gnu();
