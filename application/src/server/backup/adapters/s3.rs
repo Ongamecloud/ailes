@@ -22,42 +22,37 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
 };
-use tokio::{
-    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
-    sync::RwLock,
-};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
-static CLIENT: RwLock<Option<Arc<reqwest::Client>>> = RwLock::const_new(None);
+static CLIENT: OnceLock<Arc<reqwest::Client>> = OnceLock::new();
 
-#[inline]
-async fn get_client(server: &crate::server::Server) -> Arc<reqwest::Client> {
-    if let Some(client) = CLIENT.read().await.as_ref() {
-        return Arc::clone(client);
-    }
-
-    let client = Arc::new(
-        reqwest::ClientBuilder::new()
-            .timeout(std::time::Duration::from_secs(
-                server
-                    .app_state
-                    .config
-                    .load()
-                    .system
-                    .backups
-                    .s3
-                    .part_upload_timeout,
-            ))
-            .tls_danger_accept_invalid_certs(server.app_state.config.ignore_certificate_errors)
-            .build()
-            .expect("failed to build HTTP client"),
-    );
-
-    *CLIENT.write().await = Some(Arc::clone(&client));
-    client
+fn get_client(server: &crate::server::Server) -> Arc<reqwest::Client> {
+    CLIENT
+        .get_or_init(|| {
+            Arc::new(
+                reqwest::ClientBuilder::new()
+                    .timeout(std::time::Duration::from_secs(
+                        server
+                            .app_state
+                            .config
+                            .load()
+                            .system
+                            .backups
+                            .s3
+                            .part_upload_timeout,
+                    ))
+                    .tls_danger_accept_invalid_certs(
+                        server.app_state.config.ignore_certificate_errors,
+                    )
+                    .build()
+                    .expect("failed to build HTTP client"),
+            )
+        })
+        .clone()
 }
 
 pub struct S3Backup {
@@ -125,7 +120,6 @@ impl S3Backup {
             ));
 
             match get_client(server)
-                .await
                 .put(url)
                 .header("Content-Length", valid_len)
                 .header("Content-Type", "application/gzip")
@@ -563,7 +557,6 @@ impl S3Backup {
                 ));
 
                 match get_client(server)
-                    .await
                     .put(&url)
                     .header("Content-Length", this_part_size)
                     .header("Content-Type", "application/gzip")
@@ -716,11 +709,7 @@ impl BackupExt for S3Backup {
             }
         };
 
-        let response = get_client(server)
-            .await
-            .get(download_url.as_str())
-            .send()
-            .await?;
+        let response = get_client(server).get(download_url.as_str()).send().await?;
         if let Some(content_length) = response.content_length() {
             total.store(content_length, Ordering::SeqCst);
         }
@@ -745,7 +734,7 @@ impl BackupExt for S3Backup {
             let reader = std::io::BufReader::with_capacity(crate::TRANSFER_BUFFER_SIZE, reader);
 
             let mut archive = tar::Archive::new(reader);
-            let mut directory_entries = Vec::new();
+            let mut directory_entries = chunked_vec::ChunkedVec::new();
             let entries = archive.entries()?;
 
             let mut read_buffer = vec![0; crate::TRANSFER_BUFFER_SIZE];

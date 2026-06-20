@@ -6,7 +6,7 @@ use rustls::{
     pki_types::{CertificateDer, ServerName, UnixTime},
 };
 use sha2::{Digest, Sha256};
-use std::sync::Arc;
+use std::{fmt::Write, sync::Arc};
 
 const FINGERPRINT_ERROR: &str =
     "fingerprint must be a SHA-256 hash (64 hex characters, colons optional)";
@@ -53,12 +53,11 @@ pub fn cert_sha256(der: &[u8]) -> [u8; 32] {
 }
 
 pub fn fingerprint_hex(bytes: &[u8]) -> CompactString {
-    use std::fmt::Write;
-
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
         let _ = write!(out, "{byte:02x}");
     }
+
     out.into()
 }
 

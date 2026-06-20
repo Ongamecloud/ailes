@@ -612,7 +612,7 @@ impl BackupExt for PbsBackup {
             let reader = tokio::io::BufReader::with_capacity(crate::TRANSFER_BUFFER_SIZE, reader);
 
             let mut decoder = AsyncDecoder::from_tokio(reader)?;
-            let mut directory_entries = Vec::new();
+            let mut directory_entries = chunked_vec::ChunkedVec::new();
 
             while let Some(entry) = decoder.next().await {
                 let entry = entry?;

@@ -1,4 +1,4 @@
-use compact_str::CompactString;
+use compact_str::{CompactString, ToCompactString};
 
 #[derive(Debug)]
 pub enum PbsError {
@@ -57,6 +57,6 @@ impl std::error::Error for PbsError {}
 
 impl PbsError {
     pub(super) fn transport(err: reqwest::Error) -> Self {
-        PbsError::Transport(err.to_string().into())
+        PbsError::Transport(err.to_compact_string())
     }
 }
