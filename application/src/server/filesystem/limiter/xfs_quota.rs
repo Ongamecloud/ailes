@@ -11,7 +11,7 @@ use tokio::{
     sync::{Mutex, RwLock},
 };
 
-type DiskUsageMap = HashMap<String, (PathBuf, PathBuf, u32, i64)>;
+type DiskUsageMap = HashMap<uuid::Uuid, (PathBuf, PathBuf, u32, i64)>;
 
 static DISK_USAGE: LazyLock<Arc<RwLock<DiskUsageMap>>> = LazyLock::new(|| {
     let disk_usage: Arc<RwLock<DiskUsageMap>> = Arc::new(RwLock::new(HashMap::new()));
@@ -227,15 +227,16 @@ impl<'a> DiskLimiterExt for XfsQuotaLimiter<'a> {
             )));
         }
 
-        DISK_USAGE.write().await.insert(
-            self.filesystem.uuid.to_string(),
-            (
+        DISK_USAGE
+            .write()
+            .await
+            .entry(self.filesystem.uuid)
+            .or_insert((
                 self.filesystem.base_path.clone(),
                 mount_point,
                 project_id,
                 0,
-            ),
-        );
+            ));
 
         Ok(())
     }
@@ -254,7 +255,7 @@ impl<'a> DiskLimiterExt for XfsQuotaLimiter<'a> {
         };
 
         DISK_USAGE.write().await.insert(
-            self.filesystem.uuid.to_string(),
+            self.filesystem.uuid,
             (
                 self.filesystem.base_path.clone(),
                 mount_point,
@@ -267,7 +268,7 @@ impl<'a> DiskLimiterExt for XfsQuotaLimiter<'a> {
 
     async fn disk_usage(&self) -> Result<u64, std::io::Error> {
         let map = DISK_USAGE.read().await;
-        if let Some(usage) = map.get(&self.filesystem.uuid.to_string())
+        if let Some(usage) = map.get(&self.filesystem.uuid)
             && usage.3 >= 0
         {
             return Ok(usage.3 as u64);
@@ -290,7 +291,7 @@ impl<'a> DiskLimiterExt for XfsQuotaLimiter<'a> {
 
         let mount_point = {
             let map = DISK_USAGE.read().await;
-            match map.get(&self.filesystem.uuid.to_string()) {
+            match map.get(&self.filesystem.uuid) {
                 Some(u) => u.1.clone(),
                 None => self.filesystem.base_path.clone(),
             }
@@ -335,10 +336,7 @@ impl<'a> DiskLimiterExt for XfsQuotaLimiter<'a> {
         atomic_write_etc_projects(project_id, &self.filesystem.base_path, true).await?;
 
         tokio::fs::remove_dir_all(&self.filesystem.base_path).await?;
-        DISK_USAGE
-            .write()
-            .await
-            .remove(&self.filesystem.uuid.to_string());
+        DISK_USAGE.write().await.remove(&self.filesystem.uuid);
 
         Ok(())
     }

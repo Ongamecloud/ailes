@@ -7,7 +7,9 @@ use std::{
 };
 use tokio::{process::Command, sync::RwLock};
 
-type DiskUsageMap = HashMap<String, (PathBuf, PathBuf, u64, i64)>;
+const BTRFS_SUBVOLUME_INODE: u64 = 256;
+
+type DiskUsageMap = HashMap<uuid::Uuid, (PathBuf, PathBuf, u64, i64)>;
 
 static DISK_USAGE: LazyLock<Arc<RwLock<DiskUsageMap>>> = LazyLock::new(|| {
     let disk_usage: Arc<RwLock<DiskUsageMap>> = Arc::new(RwLock::new(HashMap::new()));
@@ -102,8 +104,7 @@ async fn fetch_btrfs_usage(mount_point: &Path) -> Result<HashMap<u64, i64>, Stri
 async fn get_btrfs_subvol_id(path: &Path) -> Result<u64, std::io::Error> {
     let metadata = tokio::fs::metadata(path).await?;
 
-    // btrfs subvolumes always have inode number 256
-    if metadata.ino() != 256 {
+    if metadata.ino() != BTRFS_SUBVOLUME_INODE {
         return Err(std::io::Error::other(format!(
             "Path is not a Btrfs subvolume: {}",
             path.display()
@@ -205,7 +206,7 @@ impl<'a> DiskLimiterExt for BtrfsSubvolumeLimiter<'a> {
         };
 
         DISK_USAGE.write().await.insert(
-            self.filesystem.uuid.to_string(),
+            self.filesystem.uuid,
             (self.filesystem.base_path.clone(), mount_point, subvol_id, 0),
         );
 
@@ -224,17 +225,18 @@ impl<'a> DiskLimiterExt for BtrfsSubvolumeLimiter<'a> {
             Err(_) => self.filesystem.base_path.clone(),
         };
 
-        DISK_USAGE.write().await.insert(
-            self.filesystem.uuid.to_string(),
-            (self.filesystem.base_path.clone(), mount_point, subvol_id, 0),
-        );
+        DISK_USAGE
+            .write()
+            .await
+            .entry(self.filesystem.uuid)
+            .or_insert((self.filesystem.base_path.clone(), mount_point, subvol_id, 0));
 
         Ok(())
     }
 
     async fn disk_usage(&self) -> Result<u64, std::io::Error> {
         let map = DISK_USAGE.read().await;
-        if let Some(usage) = map.get(&self.filesystem.uuid.to_string())
+        if let Some(usage) = map.get(&self.filesystem.uuid)
             && usage.3 >= 0
         {
             return Ok(usage.3 as u64);
@@ -283,11 +285,7 @@ impl<'a> DiskLimiterExt for BtrfsSubvolumeLimiter<'a> {
             "destroying btrfs subvolume"
         );
 
-        if let Some(usage) = DISK_USAGE
-            .read()
-            .await
-            .get(&self.filesystem.uuid.to_string())
-        {
+        if let Some(usage) = DISK_USAGE.read().await.get(&self.filesystem.uuid) {
             let qgroup_id = format!("0/{}", usage.2);
             let _ = Command::new("btrfs")
                 .arg("qgroup")
@@ -309,10 +307,7 @@ impl<'a> DiskLimiterExt for BtrfsSubvolumeLimiter<'a> {
             tokio::fs::remove_dir_all(&self.filesystem.base_path).await?;
         }
 
-        DISK_USAGE
-            .write()
-            .await
-            .remove(&self.filesystem.uuid.to_string());
+        DISK_USAGE.write().await.remove(&self.filesystem.uuid);
 
         Ok(())
     }

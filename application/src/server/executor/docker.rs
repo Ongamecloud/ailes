@@ -1,4 +1,4 @@
-use crate::io::SafeSliceExt;
+use crate::io::{SafeSliceExt, line_buffer::LineBuffer};
 use bollard::errors::Error::DockerResponseServerError;
 use futures::StreamExt;
 use parking_lot::RwLock;
@@ -721,8 +721,7 @@ impl DockerProcessHandle {
             let app_config = Arc::clone(&app_config);
 
             async move {
-                let mut buffer = Vec::with_capacity(1024);
-                let mut line_start = 0;
+                let mut line_buffer = LineBuffer::new();
 
                 let mut ratelimit_counter = 0;
                 let mut ratelimit_start = std::time::Instant::now();
@@ -762,97 +761,27 @@ impl DockerProcessHandle {
                     true
                 };
 
-                while let Some(Ok(data)) = attach.output.next().await {
-                    buffer.extend_from_slice(&data.into_bytes());
-
-                    let mut search_start = line_start;
-
-                    loop {
-                        if let Some(pos) = buffer
-                            .get(search_start..)
-                            .and_then(|slice| slice.iter().position(|&b| b == b'\n'))
-                        {
-                            let newline_pos = search_start + pos;
-
-                            if newline_pos - line_start <= 512 {
-                                let Some(line_slice) = buffer.get(line_start..newline_pos) else {
-                                    break;
-                                };
-                                let line = compact_str::CompactString::from_utf8_lossy(
-                                    line_slice.trim_ascii(),
-                                );
-
-                                let line = Arc::new(line);
-
-                                if allow_ratelimit() {
-                                    stdout_ratelimited_tx.send(Arc::clone(&line)).ok();
-                                }
-                                stdout_tx.send(line).ok();
-
-                                line_start = newline_pos + 1;
-                                search_start = line_start;
-                            } else {
-                                let Some(line_slice) = buffer.get(line_start..line_start + 512)
-                                else {
-                                    break;
-                                };
-                                let line = compact_str::CompactString::from_utf8_lossy(
-                                    line_slice.trim_ascii(),
-                                );
-
-                                let line = Arc::new(line);
-
-                                if allow_ratelimit() {
-                                    stdout_ratelimited_tx.send(Arc::clone(&line)).ok();
-                                }
-                                stdout_tx.send(line).ok();
-
-                                line_start += 512;
-                                search_start = line_start;
-                            }
-                        } else {
-                            let current_line_length = buffer.len() - line_start;
-                            if current_line_length > 512 {
-                                let Some(line_slice) = buffer.get(line_start..line_start + 512)
-                                else {
-                                    break;
-                                };
-                                let line = compact_str::CompactString::from_utf8_lossy(
-                                    line_slice.trim_ascii(),
-                                );
-
-                                let line = Arc::new(line);
-
-                                if allow_ratelimit() {
-                                    stdout_ratelimited_tx.send(Arc::clone(&line)).ok();
-                                }
-                                stdout_tx.send(line).ok();
-
-                                line_start += 512;
-                                search_start = line_start;
-                            } else {
-                                break;
-                            }
-                        }
-                    }
-
-                    if line_start > 1024 && line_start > buffer.len() / 2 {
-                        buffer.drain(0..line_start);
-                        line_start = 0;
-                    }
-                }
-
-                if let Some(line_slice) = buffer.get(line_start..)
-                    && !line_slice.is_empty()
-                {
-                    let line = compact_str::CompactString::from_utf8_lossy(line_slice.trim_ascii());
-
-                    let line = Arc::new(line);
+                let mut emit = |slice: &[u8]| {
+                    let line = Arc::new(compact_str::CompactString::from_utf8_lossy(slice));
 
                     if allow_ratelimit() {
                         stdout_ratelimited_tx.send(Arc::clone(&line)).ok();
                     }
                     stdout_tx.send(line).ok();
+                };
+
+                while let Some(Ok(data)) = attach.output.next().await {
+                    line_buffer.extend(&data.into_bytes());
+
+                    while let Some(line) = line_buffer.next_line() {
+                        emit(line);
+                    }
+
+                    line_buffer.compact();
+                }
+
+                if let Some(line) = line_buffer.flush() {
+                    emit(line);
                 }
 
                 tracing::debug!(server = %server.uuid, "stdout task ended");

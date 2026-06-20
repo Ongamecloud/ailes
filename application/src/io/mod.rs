@@ -12,6 +12,7 @@ pub mod fixed_reader;
 pub mod hash_reader;
 pub mod limited_reader;
 pub mod limited_writer;
+pub mod line_buffer;
 pub mod range_reader;
 pub mod tail;
 
