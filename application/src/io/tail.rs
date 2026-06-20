@@ -144,7 +144,9 @@ mod tests {
     #[test]
     fn tail_zero_lines_seeks_to_end() {
         tokio_test::block_on(async {
-            let r = async_tail(Cursor::new(b"a\nb\nc\n".to_vec()), 0).await.unwrap();
+            let r = async_tail(Cursor::new(b"a\nb\nc\n".to_vec()), 0)
+                .await
+                .unwrap();
             assert_eq!(read_remaining(r).await, b"");
         });
     }
@@ -160,7 +162,9 @@ mod tests {
     #[test]
     fn tail_with_trailing_newline() {
         tokio_test::block_on(async {
-            let r = async_tail(Cursor::new(b"a\nb\nc\nd\n".to_vec()), 2).await.unwrap();
+            let r = async_tail(Cursor::new(b"a\nb\nc\nd\n".to_vec()), 2)
+                .await
+                .unwrap();
             assert_eq!(read_remaining(r).await, b"c\nd\n");
         });
     }
@@ -168,7 +172,9 @@ mod tests {
     #[test]
     fn tail_without_trailing_newline() {
         tokio_test::block_on(async {
-            let r = async_tail(Cursor::new(b"a\nb\nc\nd".to_vec()), 2).await.unwrap();
+            let r = async_tail(Cursor::new(b"a\nb\nc\nd".to_vec()), 2)
+                .await
+                .unwrap();
             assert_eq!(read_remaining(r).await, b"c\nd");
         });
     }
@@ -176,7 +182,9 @@ mod tests {
     #[test]
     fn tail_more_lines_than_present_returns_all() {
         tokio_test::block_on(async {
-            let r = async_tail(Cursor::new(b"a\nb\nc\n".to_vec()), 5).await.unwrap();
+            let r = async_tail(Cursor::new(b"a\nb\nc\n".to_vec()), 5)
+                .await
+                .unwrap();
             assert_eq!(read_remaining(r).await, b"a\nb\nc\n");
         });
     }
@@ -192,7 +200,9 @@ mod tests {
     #[test]
     fn tail_single_line_trailing_newline_not_a_separator() {
         tokio_test::block_on(async {
-            let r = async_tail(Cursor::new(b"hello\n".to_vec()), 1).await.unwrap();
+            let r = async_tail(Cursor::new(b"hello\n".to_vec()), 1)
+                .await
+                .unwrap();
             assert_eq!(read_remaining(r).await, b"hello\n");
         });
     }
@@ -200,7 +210,9 @@ mod tests {
     #[test]
     fn tail_last_of_several() {
         tokio_test::block_on(async {
-            let r = async_tail(Cursor::new(b"hello\nworld\n".to_vec()), 1).await.unwrap();
+            let r = async_tail(Cursor::new(b"hello\nworld\n".to_vec()), 1)
+                .await
+                .unwrap();
             assert_eq!(read_remaining(r).await, b"world\n");
         });
     }
@@ -236,7 +248,9 @@ mod tests {
     #[test]
     fn stream_zero_lines() {
         tokio_test::block_on(async {
-            let c = async_tail_stream(Cursor::new(b"a\nb\n".to_vec()), 0).await.unwrap();
+            let c = async_tail_stream(Cursor::new(b"a\nb\n".to_vec()), 0)
+                .await
+                .unwrap();
             assert_eq!(c.into_inner(), b"");
         });
     }
@@ -244,7 +258,9 @@ mod tests {
     #[test]
     fn stream_keeps_last_lines() {
         tokio_test::block_on(async {
-            let c = async_tail_stream(Cursor::new(b"a\nb\nc\nd\n".to_vec()), 2).await.unwrap();
+            let c = async_tail_stream(Cursor::new(b"a\nb\nc\nd\n".to_vec()), 2)
+                .await
+                .unwrap();
             assert_eq!(c.into_inner(), b"c\nd\n");
         });
     }
@@ -252,7 +268,9 @@ mod tests {
     #[test]
     fn stream_without_trailing_newline() {
         tokio_test::block_on(async {
-            let c = async_tail_stream(Cursor::new(b"a\nb\nc\nd".to_vec()), 2).await.unwrap();
+            let c = async_tail_stream(Cursor::new(b"a\nb\nc\nd".to_vec()), 2)
+                .await
+                .unwrap();
             assert_eq!(c.into_inner(), b"c\nd");
         });
     }
@@ -260,7 +278,9 @@ mod tests {
     #[test]
     fn stream_more_lines_than_present() {
         tokio_test::block_on(async {
-            let c = async_tail_stream(Cursor::new(b"a\nb\nc\n".to_vec()), 5).await.unwrap();
+            let c = async_tail_stream(Cursor::new(b"a\nb\nc\n".to_vec()), 5)
+                .await
+                .unwrap();
             assert_eq!(c.into_inner(), b"a\nb\nc\n");
         });
     }
@@ -276,7 +296,9 @@ mod tests {
     #[test]
     fn stream_blank_lines_are_lines() {
         tokio_test::block_on(async {
-            let c = async_tail_stream(Cursor::new(b"\n\n\n".to_vec()), 2).await.unwrap();
+            let c = async_tail_stream(Cursor::new(b"\n\n\n".to_vec()), 2)
+                .await
+                .unwrap();
             assert_eq!(c.into_inner(), b"\n\n");
         });
     }
@@ -288,7 +310,10 @@ mod tests {
             data.push(b'\n');
             data.extend_from_slice(b"b\n");
 
-            let out = async_tail_stream(Cursor::new(data), 2).await.unwrap().into_inner();
+            let out = async_tail_stream(Cursor::new(data), 2)
+                .await
+                .unwrap()
+                .into_inner();
             assert_eq!(out.len(), MAX_LINE_LENGTH + 3);
             assert!(out[..MAX_LINE_LENGTH].iter().all(|&b| b == b'a'));
             assert_eq!(out[MAX_LINE_LENGTH], b'\n');
@@ -310,7 +335,10 @@ mod tests {
     fn read_line_keeps_its_newline() {
         tokio_test::block_on(async {
             let mut c = Cursor::new(b"abc\n".to_vec());
-            assert_eq!(read_line_capped(&mut c).await.unwrap(), Some(b"abc\n".to_vec()));
+            assert_eq!(
+                read_line_capped(&mut c).await.unwrap(),
+                Some(b"abc\n".to_vec())
+            );
         });
     }
 
@@ -318,7 +346,10 @@ mod tests {
     fn read_line_final_line_has_no_newline() {
         tokio_test::block_on(async {
             let mut c = Cursor::new(b"abc".to_vec());
-            assert_eq!(read_line_capped(&mut c).await.unwrap(), Some(b"abc".to_vec()));
+            assert_eq!(
+                read_line_capped(&mut c).await.unwrap(),
+                Some(b"abc".to_vec())
+            );
         });
     }
 
@@ -326,9 +357,18 @@ mod tests {
     fn read_line_sequential() {
         tokio_test::block_on(async {
             let mut c = Cursor::new(b"l1\nl2\nl3".to_vec());
-            assert_eq!(read_line_capped(&mut c).await.unwrap(), Some(b"l1\n".to_vec()));
-            assert_eq!(read_line_capped(&mut c).await.unwrap(), Some(b"l2\n".to_vec()));
-            assert_eq!(read_line_capped(&mut c).await.unwrap(), Some(b"l3".to_vec()));
+            assert_eq!(
+                read_line_capped(&mut c).await.unwrap(),
+                Some(b"l1\n".to_vec())
+            );
+            assert_eq!(
+                read_line_capped(&mut c).await.unwrap(),
+                Some(b"l2\n".to_vec())
+            );
+            assert_eq!(
+                read_line_capped(&mut c).await.unwrap(),
+                Some(b"l3".to_vec())
+            );
             assert_eq!(read_line_capped(&mut c).await.unwrap(), None);
         });
     }
@@ -372,7 +412,10 @@ mod tests {
             assert_eq!(first.len(), MAX_LINE_LENGTH + 1);
             assert_eq!(first.last(), Some(&b'\n'));
 
-            assert_eq!(read_line_capped(&mut r).await.unwrap(), Some(b"rest".to_vec()));
+            assert_eq!(
+                read_line_capped(&mut r).await.unwrap(),
+                Some(b"rest".to_vec())
+            );
             assert_eq!(read_line_capped(&mut r).await.unwrap(), None);
         });
     }

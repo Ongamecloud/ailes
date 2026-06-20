@@ -162,42 +162,66 @@ mod tests {
 
     #[test]
     fn resolve_unbounded_is_full() {
-        assert_eq!(resolve_range((Bound::Unbounded, Bound::Unbounded), 10).unwrap(), (0, 9));
+        assert_eq!(
+            resolve_range((Bound::Unbounded, Bound::Unbounded), 10).unwrap(),
+            (0, 9)
+        );
     }
 
     #[test]
     fn resolve_inclusive() {
-        assert_eq!(resolve_range((Bound::Included(2), Bound::Included(5)), 10).unwrap(), (2, 5));
+        assert_eq!(
+            resolve_range((Bound::Included(2), Bound::Included(5)), 10).unwrap(),
+            (2, 5)
+        );
     }
 
     #[test]
     fn resolve_excluded_start() {
-        assert_eq!(resolve_range((Bound::Excluded(2), Bound::Included(5)), 10).unwrap(), (3, 5));
+        assert_eq!(
+            resolve_range((Bound::Excluded(2), Bound::Included(5)), 10).unwrap(),
+            (3, 5)
+        );
     }
 
     #[test]
     fn resolve_excluded_end() {
-        assert_eq!(resolve_range((Bound::Included(2), Bound::Excluded(5)), 10).unwrap(), (2, 4));
+        assert_eq!(
+            resolve_range((Bound::Included(2), Bound::Excluded(5)), 10).unwrap(),
+            (2, 4)
+        );
     }
 
     #[test]
     fn resolve_inclusive_end_clamped_to_last() {
-        assert_eq!(resolve_range((Bound::Included(0), Bound::Included(100)), 10).unwrap(), (0, 9));
+        assert_eq!(
+            resolve_range((Bound::Included(0), Bound::Included(100)), 10).unwrap(),
+            (0, 9)
+        );
     }
 
     #[test]
     fn resolve_excluded_end_clamped_to_last() {
-        assert_eq!(resolve_range((Bound::Included(0), Bound::Excluded(100)), 10).unwrap(), (0, 9));
+        assert_eq!(
+            resolve_range((Bound::Included(0), Bound::Excluded(100)), 10).unwrap(),
+            (0, 9)
+        );
     }
 
     #[test]
     fn resolve_single_byte_file() {
-        assert_eq!(resolve_range((Bound::Unbounded, Bound::Unbounded), 1).unwrap(), (0, 0));
+        assert_eq!(
+            resolve_range((Bound::Unbounded, Bound::Unbounded), 1).unwrap(),
+            (0, 0)
+        );
     }
 
     #[test]
     fn resolve_last_byte() {
-        assert_eq!(resolve_range((Bound::Included(9), Bound::Unbounded), 10).unwrap(), (9, 9));
+        assert_eq!(
+            resolve_range((Bound::Included(9), Bound::Unbounded), 10).unwrap(),
+            (9, 9)
+        );
     }
 
     #[test]
@@ -305,12 +329,14 @@ mod tests {
 
     #[test]
     fn range_reader_new_rejects_invalid() {
-        assert!(RangeReader::new(
-            Cursor::new(b"0123456789".to_vec()),
-            (Bound::Included(5), Bound::Included(2)),
-            10,
-        )
-        .is_err());
+        assert!(
+            RangeReader::new(
+                Cursor::new(b"0123456789".to_vec()),
+                (Bound::Included(5), Bound::Included(2)),
+                10,
+            )
+            .is_err()
+        );
     }
 
     // AsyncRangeReader

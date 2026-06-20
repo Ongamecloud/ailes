@@ -4,7 +4,7 @@ use crate::{
         compression::{CompressionLevel, writer::CompressionWriter},
         counting_reader::CountingReader,
         fixed_reader::FixedReader,
-        limited_reader::LimitedReader,
+        limited_reader::AsyncLimitedReader,
         limited_writer::LimitedWriter,
     },
     models::{DirectoryEntry, DirectorySortingMode},
@@ -16,7 +16,7 @@ use crate::{
         filesystem::{
             archive::{StreamableArchiveFormat, create::CreatePxarOptions},
             cap::FileType,
-            file::ServerFile,
+            file::AsyncServerFile,
             virtualfs::{
                 AsyncFileRead, AsyncReadableFileStream, ByteRange, DirectoryListing,
                 DirectoryStreamWalk, DirectoryWalk, FileMetadata, FileRead, IsIgnoredFn,
@@ -33,7 +33,10 @@ use pbs_client::{
     accessor::{ArchiveEntry, ArchiveEntryKind, PbsArchive},
     config::PbsConfig,
     manifest::{BackupManifest, MANIFEST_BLOB_NAME},
-    pxar::{EntryKind, decoder::Decoder},
+    pxar::{
+        EntryKind,
+        decoder::{AsyncDecoder, Decoder},
+    },
     reader::PbsBackupReader,
     rest::PbsClient,
     writer::{ARCHIVE_NAME, META_BLOB_NAME, PbsBackupWriter},
@@ -585,105 +588,110 @@ impl BackupExt for PbsBackup {
 
         let (pxar_reader, pxar_writer) = tokio::io::simplex(crate::BUFFER_SIZE);
 
-        let fetch_task = {
-            let progress = Arc::clone(&progress);
-            async move {
-                let mut pxar_writer = pxar_writer;
-                reader
-                    .reassemble_archive(&mut pxar_writer, Some(progress))
-                    .await?;
-                pxar_writer.shutdown().await?;
-                Ok::<_, anyhow::Error>(())
-            }
+        let fetch_task = async move {
+            let mut pxar_writer = pxar_writer;
+            reader
+                .reassemble_archive(&mut pxar_writer, Some(progress))
+                .await?;
+            pxar_writer.shutdown().await?;
+
+            Ok::<_, anyhow::Error>(())
         };
 
-        let extract_task = {
-            let server = server.clone();
-            async move {
-                tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
-                    let reader = SyncIoBridge::new(pxar_reader);
-                    let reader = LimitedReader::new_with_bytes_per_second(
-                        reader,
-                        server
-                            .app_state
-                            .config
-                            .load()
-                            .system
-                            .backups
-                            .read_limit
-                            .as_bytes(),
-                    );
-                    let reader =
-                        std::io::BufReader::with_capacity(crate::TRANSFER_BUFFER_SIZE, reader);
+        let extract_task = async move {
+            let reader = AsyncLimitedReader::new_with_bytes_per_second(
+                pxar_reader,
+                server
+                    .app_state
+                    .config
+                    .load()
+                    .system
+                    .backups
+                    .read_limit
+                    .as_bytes(),
+            );
+            let reader = tokio::io::BufReader::with_capacity(crate::TRANSFER_BUFFER_SIZE, reader);
 
-                    let mut decoder = Decoder::from_std(reader)?;
-                    let mut directory_entries = Vec::new();
-                    let mut read_buffer = vec![0; crate::TRANSFER_BUFFER_SIZE];
+            let mut decoder = AsyncDecoder::from_tokio(reader)?;
+            let mut directory_entries = Vec::new();
 
-                    while let Some(entry) = decoder.next() {
-                        let entry = entry?;
-                        let Some(path) = relative_archive_path(entry.path()) else {
-                            continue;
-                        };
+            while let Some(entry) = decoder.next().await {
+                let entry = entry?;
+                let Some(path) = relative_archive_path(entry.path()) else {
+                    continue;
+                };
 
-                        let stat = entry.metadata().stat;
-                        let mode = (stat.mode & 0o7777) as u32;
-                        let mtime = std::time::UNIX_EPOCH
-                            + std::time::Duration::from_secs(stat.mtime.secs.max(0) as u64);
+                let stat = entry.metadata().stat;
+                let mode = (stat.mode & 0o7777) as u32;
+                let mtime = std::time::UNIX_EPOCH
+                    + std::time::Duration::from_secs(stat.mtime.secs.max(0) as u64);
 
-                        match entry.kind() {
-                            EntryKind::Directory => {
-                                server.filesystem.create_chowned_dir_all(path.as_path())?;
-                                server.filesystem.set_permissions(
-                                    path.as_path(),
-                                    PortablePermissions::from_mode(mode),
-                                )?;
-                                directory_entries.push((path, mtime));
-                            }
-                            EntryKind::File { .. } => {
-                                server.log_daemon(compact_str::format_compact!(
-                                    "(restoring): {}",
-                                    path.display()
-                                ));
-
-                                if let Some(parent) = path.parent() {
-                                    server.filesystem.create_chowned_dir_all(parent)?;
-                                }
-
-                                let mut writer = ServerFile::new(
-                                    server.clone(),
-                                    &path,
-                                    Some(PortablePermissions::from_mode(mode)),
-                                    Some(mtime),
-                                )?;
-
-                                if let Some(mut contents) = decoder.contents()? {
-                                    crate::io::copy_shared(&mut read_buffer, &mut contents, &mut writer)?;
-                                }
-                                writer.flush()?;
-                            }
-                            EntryKind::Symlink(target) => {
-                                if let Err(err) =
-                                    server.filesystem.symlink(target.as_os_str(), path.as_path())
-                                {
-                                    tracing::debug!(path = %path.display(), "failed to create symlink from PBS backup: {:?}", err);
-                                } else {
-                                    server.filesystem.set_times(path.as_path(), mtime, None)?;
-                                }
-                            }
-                        }
-                    }
-
-                    for (destination_path, modified_time) in directory_entries {
+                match entry.kind() {
+                    EntryKind::Directory => {
                         server
                             .filesystem
-                            .set_times(&destination_path, modified_time, None)?;
+                            .async_create_chowned_dir_all(path.as_path())
+                            .await?;
+                        server
+                            .filesystem
+                            .async_set_permissions(
+                                path.as_path(),
+                                PortablePermissions::from_mode(mode),
+                            )
+                            .await?;
+                        directory_entries.push((path, mtime));
                     }
+                    EntryKind::File { .. } => {
+                        server.log_daemon(compact_str::format_compact!(
+                            "(restoring): {}",
+                            path.display()
+                        ));
 
-                    Ok(())
-                })
-                .await?
+                        if let Some(parent) = path.parent() {
+                            server
+                                .filesystem
+                                .async_create_chowned_dir_all(parent)
+                                .await?;
+                        }
+
+                        let mut writer = AsyncServerFile::new(
+                            server.clone(),
+                            &path,
+                            Some(PortablePermissions::from_mode(mode)),
+                            Some(mtime),
+                        )
+                        .await?;
+
+                        if let Some(mut contents) = decoder.contents()? {
+                            tokio::io::copy(&mut contents, &mut writer).await?;
+                        }
+                        writer.flush().await?;
+                    }
+                    EntryKind::Symlink(target) => {
+                        if let Err(err) = server
+                            .filesystem
+                            .async_symlink(target.as_os_str(), path.as_path())
+                            .await
+                        {
+                            tracing::debug!(path = %path.display(), "failed to create symlink from PBS backup: {:?}", err);
+                        } else {
+                            server
+                                .filesystem
+                                .async_set_times(path.as_path(), mtime, None)
+                                .await?;
+                        }
+                    }
+                }
             }
+
+            for (destination_path, modified_time) in directory_entries {
+                server
+                    .filesystem
+                    .async_set_times(&destination_path, modified_time, None)
+                    .await?;
+            }
+
+            Ok(())
         };
 
         tokio::try_join!(fetch_task, extract_task)?;
