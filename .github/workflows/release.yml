@@ -231,10 +231,10 @@ jobs:
           sbom-path: sbom/sbom-source.cyclonedx.json
           push-to-registry: true
 
-      - name: Attach source SBOM attestation to image (Docker Hub)
-        uses: actions/attest@v4
-        with:
-          subject-name: ${{ env.DOCKERHUB_IMAGE }}
-          subject-digest: ${{ steps.build.outputs.digest }}
-          sbom-path: sbom/sbom-source.cyclonedx.json
-          push-to-registry: true
+      #- name: Attach source SBOM attestation to image (Docker Hub)
+      #  uses: actions/attest@v4
+      #  with:
+      #    subject-name: ${{ env.DOCKERHUB_IMAGE }}
+      #    subject-digest: ${{ steps.build.outputs.digest }}
+      #    sbom-path: sbom/sbom-source.cyclonedx.json
+      #    push-to-registry: true
