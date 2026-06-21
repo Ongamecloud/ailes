@@ -1594,6 +1594,13 @@ impl Filesystem {
         let detected_mime =
             if let Some(detected_mime) = self.app_state.mime_cache.get(&mime_key).await {
                 detected_mime
+            } else if (metadata.is_file() && metadata.len() == 0)
+                || (symlink_destination.is_some()
+                    && symlink_destination_metadata
+                        .as_ref()
+                        .is_some_and(|m| m.is_file() && m.len() == 0))
+            {
+                crate::routes::MimeCacheValue::text()
             } else {
                 let mut buffer = [0; 64];
                 let buffer = if metadata.is_file()

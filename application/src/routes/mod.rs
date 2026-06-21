@@ -50,6 +50,15 @@ impl MimeCacheValue {
             valid_inner_utf8: false,
         }
     }
+
+    #[inline]
+    pub fn text() -> Self {
+        MimeCacheValue {
+            mime: "text/plain",
+            valid_utf8: true,
+            valid_inner_utf8: false,
+        }
+    }
 }
 
 #[derive(Hash, Eq, PartialEq, Clone, Copy)]

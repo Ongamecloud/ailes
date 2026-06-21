@@ -9,7 +9,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0d9100fb78aa3b854faf01fd9f65f7d1805c47f0f2720919a4120b0a4be0dd83"
 dependencies = [
  "http 0.2.12",
- "itertools",
+ "itertools 0.10.5",
  "mime",
  "snafu",
 ]
@@ -2413,6 +2413,15 @@ name = "itertools"
 version = "0.10.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b0fd2260e829bddf4cb6ea802289de2f86d6a7a690192fbe91b3f46e0f2c8473"
+dependencies = [
+ "either",
+]
+
+[[package]]
+name = "itertools"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b4baf93f58d4425749ca49a51c50ebab072c5df6994d08fed93541c331481dc"
 dependencies = [
  "either",
 ]
@@ -5889,6 +5898,7 @@ dependencies = [
  "infer",
  "ini-roundtrip",
  "itaf",
+ "itertools 0.15.0",
  "json-patch",
  "jsonwebtoken",
  "libz-ng-sys",

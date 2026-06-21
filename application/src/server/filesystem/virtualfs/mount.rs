@@ -208,7 +208,7 @@ impl VirtualReadableFilesystem for VirtualMountFilesystem {
                 listing_path.join(&next_comp)
             };
 
-            if (is_ignored)(FileType::Dir, virtual_path.clone()).is_some() {
+            if let Some(virtual_path) = (is_ignored)(FileType::Dir, virtual_path) {
                 virtual_dirs.push(Self::virtual_dir_entry(&virtual_path));
             }
         }

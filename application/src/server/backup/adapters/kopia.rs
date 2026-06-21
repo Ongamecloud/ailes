@@ -851,6 +851,7 @@ impl KopiaTreeNode {
         for entry in entries {
             root.insert(entry);
         }
+        root.sort_files();
         root.aggregate_sizes();
         root
     }
@@ -887,15 +888,17 @@ impl KopiaTreeNode {
                     oid: entry.oid,
                 };
 
-                match parent.files.binary_search_by(|(n, _)| n.as_str().cmp(leaf)) {
-                    Ok(idx) => {
-                        if let Some(slot) = parent.files.get_mut(idx) {
-                            slot.1 = meta;
-                        }
-                    }
-                    Err(idx) => parent.files.insert(idx, (leaf.to_compact_string(), meta)),
-                }
+                parent.files.push((leaf.to_compact_string(), meta));
             }
+        }
+    }
+
+    fn sort_files(&mut self) {
+        self.files.reverse();
+        self.files.sort_by(|(a, _), (b, _)| a.cmp(b));
+        self.files.dedup_by(|(a, _), (b, _)| a == b);
+        for (_, child) in self.dirs.iter_mut() {
+            child.sort_files();
         }
     }
 
@@ -1015,6 +1018,8 @@ impl VirtualKopiaBackup {
     ) -> DirectoryEntry {
         let detected_mime = if meta.file_type.is_symlink() {
             MimeCacheValue::symlink()
+        } else if meta.file_type.is_file() && meta.size == 0 {
+            MimeCacheValue::text()
         } else {
             crate::utils::detect_mime_type(path, buffer)
         };
@@ -1222,20 +1227,20 @@ impl VirtualReadableFilesystem for VirtualKopiaBackup {
         let mut file_children: Vec<Child<'_>> = Vec::new();
 
         for (name, child_node) in node.dirs.iter() {
-            let child_path = path.join(name.as_str());
-            if (is_ignored)(FileType::Dir, child_path.clone()).is_none() {
-                continue;
-            }
+            let child_path = match (is_ignored)(FileType::Dir, path.join(name.as_str())) {
+                Some(kept) => kept,
+                None => continue,
+            };
             dir_children.push(Child::Dir {
                 path: child_path,
                 node: child_node,
             });
         }
         for (name, meta) in node.files.iter() {
-            let child_path = path.join(name.as_str());
-            if (is_ignored)(meta.file_type, child_path.clone()).is_none() {
-                continue;
-            }
+            let child_path = match (is_ignored)(meta.file_type, path.join(name.as_str())) {
+                Some(kept) => kept,
+                None => continue,
+            };
             file_children.push(Child::File {
                 path: child_path,
                 meta,

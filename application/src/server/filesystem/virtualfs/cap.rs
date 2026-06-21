@@ -18,6 +18,7 @@ use std::{
 };
 use tokio::io::AsyncWriteExt;
 
+#[derive(Clone)]
 pub struct VirtualCapFilesystem {
     pub inner: crate::server::filesystem::cap::CapFilesystem,
     pub server: crate::server::Server,
@@ -174,111 +175,111 @@ impl super::VirtualReadableFilesystem for VirtualCapFilesystem {
         is_ignored: IsIgnoredFn,
         sort: crate::models::DirectorySortingMode,
     ) -> Result<DirectoryListing, anyhow::Error> {
-        use crate::models::DirectorySortingMode::*;
-
-        let path = path.as_ref();
-        let is_ignored = if let Some(existing_is_ignored) = &self.is_ignored {
-            existing_is_ignored.clone().merge(is_ignored)
-        } else {
-            is_ignored
+        let path = path.as_ref().to_path_buf();
+        let is_ignored = match &self.is_ignored {
+            Some(existing) => existing.clone().merge(is_ignored),
+            None => is_ignored,
         };
-        let mut directory_reader = self.inner.async_read_dir(path).await?;
-        let mut directory_entries = Vec::new();
-        let mut other_entries = Vec::new();
-        while let Some(Ok((file_type, entry))) = directory_reader.next_entry().await {
-            let path = path.join(&entry);
-            if is_ignored(file_type, path).is_none() {
-                continue;
-            }
-            if file_type.is_dir() {
-                directory_entries.push(entry);
-            } else {
-                other_entries.push(entry);
-            }
-        }
+        let this = self.clone();
+        let runtime = tokio::runtime::Handle::current();
 
-        let name_sort = matches!(sort, NameAsc | NameDesc);
+        tokio::task::spawn_blocking(move || {
+            use crate::models::DirectorySortingMode::*;
 
-        if name_sort {
-            directory_entries.sort_unstable_by(|a, b| a.cmp_ascii_case_insensitive(b));
-            other_entries.sort_unstable_by(|a, b| a.cmp_ascii_case_insensitive(b));
+            let mut directory_entries = Vec::new();
+            let mut other_entries = Vec::new();
+            let mut scratch = PathBuf::new();
+
+            let mut dir = this.inner.read_dir(&path)?;
+            while let Some(item) = dir.next_entry() {
+                let Ok((file_type, entry)) = item else { break };
+
+                scratch.clear();
+                scratch.push(&path);
+                scratch.push(&entry);
+
+                match is_ignored(file_type, std::mem::take(&mut scratch)) {
+                    Some(kept) => scratch = kept,
+                    None => continue,
+                }
+
+                if file_type.is_dir() {
+                    directory_entries.push(entry);
+                } else {
+                    other_entries.push(entry);
+                }
+            }
 
             let total_entries = directory_entries.len() + other_entries.len();
-            let mut entries = Vec::new();
 
-            if matches!(sort, NameDesc) {
-                directory_entries.reverse();
-                other_entries.reverse();
-            }
+            if matches!(sort, NameAsc | NameDesc) {
+                directory_entries.sort_unstable_by(|a, b| a.cmp_ascii_case_insensitive(b));
+                other_entries.sort_unstable_by(|a, b| a.cmp_ascii_case_insensitive(b));
 
-            if let Some(per_page) = per_page {
+                if matches!(sort, NameDesc) {
+                    directory_entries.reverse();
+                    other_entries.reverse();
+                }
+
+                let start = per_page.map_or(0, |per_page| (page - 1) * per_page);
+                let limit = per_page.unwrap_or(usize::MAX);
+
+                let mut entries = Vec::new();
                 for entry in directory_entries
                     .into_iter()
                     .chain(other_entries)
-                    .skip((page - 1) * per_page)
-                    .take(per_page)
+                    .skip(start)
+                    .take(limit)
                 {
-                    let path = path.join(&entry);
-                    let entry = match self.async_directory_entry(&path).await {
-                        Ok(entry) => entry,
-                        Err(_) => continue,
-                    };
-                    entries.push(entry);
+                    if let Ok(entry) =
+                        runtime.block_on(this.async_directory_entry(&path.join(&entry)))
+                    {
+                        entries.push(entry);
+                    }
                 }
+
+                Ok(DirectoryListing {
+                    total_entries,
+                    entries,
+                })
             } else {
+                let mut entries = Vec::new();
                 for entry in directory_entries.into_iter().chain(other_entries) {
-                    let path = path.join(&entry);
-                    let entry = match self.async_directory_entry(&path).await {
-                        Ok(entry) => entry,
-                        Err(_) => continue,
-                    };
-                    entries.push(entry);
+                    if let Ok(entry) =
+                        runtime.block_on(this.async_directory_entry(&path.join(&entry)))
+                    {
+                        entries.push(entry);
+                    }
                 }
+
+                entries.sort_by(|a, b| match (a.directory, b.directory) {
+                    (true, false) => std::cmp::Ordering::Less,
+                    (false, true) => std::cmp::Ordering::Greater,
+                    _ => match sort {
+                        SizeAsc => a.size.cmp(&b.size),
+                        SizeDesc => b.size.cmp(&a.size),
+                        PhysicalSizeAsc => a.size_physical.cmp(&b.size_physical),
+                        PhysicalSizeDesc => b.size_physical.cmp(&a.size_physical),
+                        ModifiedAsc => a.modified.cmp(&b.modified),
+                        ModifiedDesc => b.modified.cmp(&a.modified),
+                        CreatedAsc => a.created.cmp(&b.created),
+                        CreatedDesc => b.created.cmp(&a.created),
+                        NameAsc | NameDesc => std::cmp::Ordering::Equal,
+                    },
+                });
+
+                if let Some(per_page) = per_page {
+                    let start = (page - 1) * per_page;
+                    entries = entries.into_iter().skip(start).take(per_page).collect();
+                }
+
+                Ok(DirectoryListing {
+                    total_entries,
+                    entries,
+                })
             }
-
-            Ok(DirectoryListing {
-                total_entries,
-                entries,
-            })
-        } else {
-            let total_entries = directory_entries.len() + other_entries.len();
-            let mut entries = Vec::new();
-
-            for entry in directory_entries.into_iter().chain(other_entries) {
-                let path = path.join(&entry);
-                let entry = match self.async_directory_entry(&path).await {
-                    Ok(entry) => entry,
-                    Err(_) => continue,
-                };
-                entries.push(entry);
-            }
-
-            entries.sort_by(|a, b| match (a.directory, b.directory) {
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                _ => match sort {
-                    SizeAsc => a.size.cmp(&b.size),
-                    SizeDesc => b.size.cmp(&a.size),
-                    PhysicalSizeAsc => a.size_physical.cmp(&b.size_physical),
-                    PhysicalSizeDesc => b.size_physical.cmp(&a.size_physical),
-                    ModifiedAsc => a.modified.cmp(&b.modified),
-                    ModifiedDesc => b.modified.cmp(&a.modified),
-                    CreatedAsc => a.created.cmp(&b.created),
-                    CreatedDesc => b.created.cmp(&a.created),
-                    NameAsc | NameDesc => std::cmp::Ordering::Equal,
-                },
-            });
-
-            if let Some(per_page) = per_page {
-                let start = (page - 1) * per_page;
-                entries = entries.into_iter().skip(start).take(per_page).collect();
-            }
-
-            Ok(DirectoryListing {
-                total_entries,
-                entries,
-            })
-        }
+        })
+        .await?
     }
 
     async fn async_walk_dir<'a>(

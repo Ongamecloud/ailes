@@ -104,6 +104,7 @@ impl ResticTreeNode {
         for entry in entries {
             root.insert(entry);
         }
+        root.sort_files();
         root.aggregate_sizes();
         root
     }
@@ -143,13 +144,18 @@ impl ResticTreeNode {
                     size: entry.size.unwrap_or(0),
                     mtime: entry.mtime,
                 };
-                let leaf_name = leaf.to_compact_string();
-                match parent.files.binary_search_by(|(n, _)| n.as_str().cmp(leaf)) {
-                    // SAFETY: `idx` is guaranteed to be a valid index into `parent.files` due to the logic above.
-                    Ok(idx) => unsafe { parent.files.get_unchecked_mut(idx) }.1 = meta,
-                    Err(idx) => parent.files.insert(idx, (leaf_name, meta)),
-                }
+
+                parent.files.push((leaf.to_compact_string(), meta));
             }
+        }
+    }
+
+    fn sort_files(&mut self) {
+        self.files.reverse();
+        self.files.sort_by(|(a, _), (b, _)| a.cmp(b));
+        self.files.dedup_by(|(a, _), (b, _)| a == b);
+        for (_, child) in self.dirs.iter_mut() {
+            child.sort_files();
         }
     }
 
@@ -1228,6 +1234,8 @@ impl VirtualResticBackup {
     ) -> DirectoryEntry {
         let detected_mime = if meta.file_type.is_symlink() {
             MimeCacheValue::symlink()
+        } else if meta.file_type.is_file() && meta.size == 0 {
+            MimeCacheValue::text()
         } else {
             crate::utils::detect_mime_type(path, buffer)
         };
@@ -1404,20 +1412,20 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
         let mut file_children: Vec<Child<'_>> = Vec::new();
 
         for (name, child_node) in node.dirs.iter() {
-            let child_path = path.join(name.as_str());
-            if (is_ignored)(FileType::Dir, child_path.clone()).is_none() {
-                continue;
-            }
+            let child_path = match (is_ignored)(FileType::Dir, path.join(name.as_str())) {
+                Some(kept) => kept,
+                None => continue,
+            };
             dir_children.push(Child::Dir {
                 path: child_path,
                 node: child_node,
             });
         }
         for (name, meta) in node.files.iter() {
-            let child_path = path.join(name.as_str());
-            if (is_ignored)(meta.file_type, child_path.clone()).is_none() {
-                continue;
-            }
+            let child_path = match (is_ignored)(meta.file_type, path.join(name.as_str())) {
+                Some(kept) => kept,
+                None => continue,
+            };
             file_children.push(Child::File {
                 path: child_path,
                 meta,

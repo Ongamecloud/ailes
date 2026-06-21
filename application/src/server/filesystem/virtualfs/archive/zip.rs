@@ -249,6 +249,8 @@ impl VirtualZipArchive {
 
             mime_cache.insert(entry_index, detected_mime);
             detected_mime
+        } else if entry.size() == 0 {
+            MimeCacheValue::text()
         } else {
             let mut buffer = [0; 64];
             let buffer = if entry.read_uninterrupted(&mut buffer).is_err() {

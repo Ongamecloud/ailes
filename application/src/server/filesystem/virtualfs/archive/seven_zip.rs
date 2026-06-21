@@ -203,6 +203,8 @@ impl VirtualSevenZipArchive {
 
             mime_cache.insert(entry_index, detected_mime);
             detected_mime
+        } else if entry.size() == 0 {
+            MimeCacheValue::text()
         } else {
             let mut buffer = [0; 64];
             let buffer = if reader.read_uninterrupted(&mut buffer).is_err() {
@@ -510,9 +512,8 @@ impl VirtualReadableFilesystem for VirtualSevenZipArchive {
 
                 if let Some(node) = sizes.get_path(&path) {
                     for (child_name, _child_node) in node.get_entries() {
-                        let child_path = path.join(child_name.as_str());
-
-                        let Some(filtered_path) = (is_ignored)(FileType::Dir, child_path.clone())
+                        let Some(filtered_path) =
+                            (is_ignored)(FileType::Dir, path.join(child_name.as_str()))
                         else {
                             continue;
                         };
@@ -521,7 +522,7 @@ impl VirtualReadableFilesystem for VirtualSevenZipArchive {
                             .files
                             .iter()
                             .enumerate()
-                            .find(|(_, e)| Path::new(e.name()) == child_path);
+                            .find(|(_, e)| Path::new(e.name()) == filtered_path);
 
                         directory_entries.push(DirItem::Dir {
                             path: filtered_path,

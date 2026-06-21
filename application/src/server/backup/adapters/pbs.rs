@@ -769,6 +769,7 @@ impl PbsTreeNode {
         for entry in entries {
             root.insert(entry);
         }
+        root.sort_files();
         root.aggregate_sizes();
         root
     }
@@ -810,15 +811,17 @@ impl PbsTreeNode {
                     symlink: entry.symlink,
                 };
 
-                match parent.files.binary_search_by(|(n, _)| n.as_str().cmp(leaf)) {
-                    Ok(idx) => {
-                        if let Some(slot) = parent.files.get_mut(idx) {
-                            slot.1 = meta;
-                        }
-                    }
-                    Err(idx) => parent.files.insert(idx, (leaf.to_compact_string(), meta)),
-                }
+                parent.files.push((leaf.to_compact_string(), meta));
             }
+        }
+    }
+
+    fn sort_files(&mut self) {
+        self.files.reverse();
+        self.files.sort_by(|(a, _), (b, _)| a.cmp(b));
+        self.files.dedup_by(|(a, _), (b, _)| a == b);
+        for (_, child) in self.dirs.iter_mut() {
+            child.sort_files();
         }
     }
 
@@ -957,6 +960,8 @@ impl PbsVirtualFilesystem {
     ) -> DirectoryEntry {
         let detected_mime = if meta.file_type.is_symlink() {
             MimeCacheValue::symlink()
+        } else if meta.file_type.is_file() && meta.size == 0 {
+            MimeCacheValue::text()
         } else {
             detect_mime_type(path, buffer)
         };
@@ -1156,53 +1161,48 @@ impl VirtualReadableFilesystem for PbsVirtualFilesystem {
         };
 
         enum Child<'a> {
-            Dir {
-                path: PathBuf,
-                node: &'a PbsTreeNode,
-            },
-            File {
-                path: PathBuf,
-                meta: &'a PbsFileMeta,
-            },
+            Dir(&'a CompactString, &'a PbsTreeNode),
+            File(&'a CompactString, &'a PbsFileMeta),
         }
 
-        let mut dir_children: Vec<Child<'_>> = Vec::new();
-        let mut file_children: Vec<Child<'_>> = Vec::new();
+        let mut dir_children: Vec<Child<'_>> = Vec::with_capacity(node.dirs.len());
+        let mut file_children: Vec<Child<'_>> = Vec::with_capacity(node.files.len());
+        let mut scratch = PathBuf::new();
 
         for (name, child_node) in node.dirs.iter() {
-            let child_path = path.join(name.as_str());
-            if (is_ignored)(FileType::Dir, child_path.clone()).is_none() {
-                continue;
+            scratch.clear();
+            scratch.push(&path);
+            scratch.push(name.as_str());
+            match (is_ignored)(FileType::Dir, std::mem::take(&mut scratch)) {
+                Some(kept) => scratch = kept,
+                None => continue,
             }
-            dir_children.push(Child::Dir {
-                path: child_path,
-                node: child_node,
-            });
+            dir_children.push(Child::Dir(name, child_node));
         }
         for (name, meta) in node.files.iter() {
-            let child_path = path.join(name.as_str());
-            if (is_ignored)(meta.file_type, child_path.clone()).is_none() {
-                continue;
+            scratch.clear();
+            scratch.push(&path);
+            scratch.push(name.as_str());
+            match (is_ignored)(meta.file_type, std::mem::take(&mut scratch)) {
+                Some(kept) => scratch = kept,
+                None => continue,
             }
-            file_children.push(Child::File {
-                path: child_path,
-                meta,
-            });
+            file_children.push(Child::File(name, meta));
         }
 
         let cmp = |a: &Child<'_>, b: &Child<'_>| -> std::cmp::Ordering {
-            let (a_path, a_size, a_mtime) = match a {
-                Child::Dir { path, node } => (path, node.size, node.mtime),
-                Child::File { path, meta } => (path, meta.size, meta.mtime),
+            let (a_name, a_size, a_mtime) = match a {
+                Child::Dir(name, node) => (name.as_str(), node.size, node.mtime),
+                Child::File(name, meta) => (name.as_str(), meta.size, meta.mtime),
             };
-            let (b_path, b_size, b_mtime) = match b {
-                Child::Dir { path, node } => (path, node.size, node.mtime),
-                Child::File { path, meta } => (path, meta.size, meta.mtime),
+            let (b_name, b_size, b_mtime) = match b {
+                Child::Dir(name, node) => (name.as_str(), node.size, node.mtime),
+                Child::File(name, meta) => (name.as_str(), meta.size, meta.mtime),
             };
 
             match sort {
-                NameAsc => a_path.cmp_ascii_case_insensitive(b_path),
-                NameDesc => b_path.cmp_ascii_case_insensitive(a_path),
+                NameAsc => a_name.cmp_ascii_case_insensitive(b_name),
+                NameDesc => b_name.cmp_ascii_case_insensitive(a_name),
                 SizeAsc | PhysicalSizeAsc => a_size.cmp(&b_size),
                 SizeDesc | PhysicalSizeDesc => b_size.cmp(&a_size),
                 ModifiedAsc | CreatedAsc => a_mtime.cmp(&b_mtime),
@@ -1226,11 +1226,17 @@ impl VirtualReadableFilesystem for PbsVirtualFilesystem {
         let mut entries = Vec::with_capacity(target.len());
         for child in target {
             match child {
-                Child::Dir { path, node } => {
-                    entries.push(Self::directory_entry_from_dir_node(&path, node));
+                Child::Dir(name, node) => {
+                    let child_path = path.join(name.as_str());
+                    entries.push(Self::directory_entry_from_dir_node(&child_path, node));
                 }
-                Child::File { path, meta } => {
-                    entries.push(Self::directory_entry_from_file_meta(&path, meta, None));
+                Child::File(name, meta) => {
+                    let child_path = path.join(name.as_str());
+                    entries.push(Self::directory_entry_from_file_meta(
+                        &child_path,
+                        meta,
+                        None,
+                    ));
                 }
             }
         }

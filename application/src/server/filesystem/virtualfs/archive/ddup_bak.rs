@@ -247,6 +247,8 @@ impl VirtualDdupBakArchive {
             Entry::File(file) => {
                 if let Some(detected_mime) = mime_cache.get(&file.offset) {
                     detected_mime
+                } else if file.size == 0 {
+                    MimeCacheValue::text()
                 } else {
                     let detected_mime = match buffer {
                         Some(buffer) => crate::utils::detect_mime_type(path, Some(buffer)),
@@ -698,14 +700,16 @@ impl VirtualReadableFilesystem for VirtualDdupBakArchive {
                         other_entries
                             .reserve_exact(archive.entries().len() - directory_entry_count);
 
+                        let mut scratch = PathBuf::new();
                         for entry in archive.entries() {
-                            if (is_ignored)(
+                            scratch.clear();
+                            scratch.push(entry.name());
+                            match (is_ignored)(
                                 Self::ddup_bak_entry_to_file_type(entry),
-                                PathBuf::from(entry.name()),
-                            )
-                            .is_none()
-                            {
-                                continue;
+                                std::mem::take(&mut scratch),
+                            ) {
+                                Some(kept) => scratch = kept,
+                                None => continue,
                             }
 
                             if entry.is_directory() {
@@ -771,14 +775,16 @@ impl VirtualReadableFilesystem for VirtualDdupBakArchive {
                             dir.entries.iter().filter(|e| !e.is_directory()).count(),
                         );
 
+                        let mut scratch = PathBuf::new();
                         for entry in &dir.entries {
-                            if (is_ignored)(
+                            scratch.clear();
+                            scratch.push(entry.name());
+                            match (is_ignored)(
                                 Self::ddup_bak_entry_to_file_type(entry),
-                                PathBuf::from(entry.name()),
-                            )
-                            .is_none()
-                            {
-                                continue;
+                                std::mem::take(&mut scratch),
+                            ) {
+                                Some(kept) => scratch = kept,
+                                None => continue,
                             }
 
                             if entry.is_directory() {
