@@ -1075,9 +1075,6 @@ impl VirtualKopiaBackup {
         }
     }
 
-    // Depth-first walk for archiving. Files first then directories per level, an
-    // ignored directory prunes its whole subtree (matching the previous
-    // tree-walk semantics). Relative paths are emitted relative to the base.
     fn collect_subtree<'a>(
         &'a self,
         rel: PathBuf,
@@ -1132,10 +1129,6 @@ impl VirtualKopiaBackup {
         })
     }
 
-    // Depth-first flatten for directory walks. Files first then directories per
-    // level, directories recursed unconditionally (an ignored directory is
-    // dropped from output but its children are still visited). Paths carry the
-    // base prefix. The trailing String is the file OID, empty for directories.
     fn flatten_walk<'a>(
         &'a self,
         rel: PathBuf,

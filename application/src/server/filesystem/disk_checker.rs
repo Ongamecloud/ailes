@@ -52,207 +52,219 @@ pub async fn run(ctx: DiskCheckerContext) {
             .await
             .expect("failed to acquire disk check concurrency semaphore");
 
-        let run_inner = async |paths_to_scan: Option<Vec<PathBuf>>| -> Result<(), anyhow::Error> {
-            tracing::debug!(
-                path = %cap_filesystem.base_path.display(),
-                "checking disk usage"
-            );
+        let run_inner = |paths_to_scan: Option<Vec<PathBuf>>| {
+            let cap_filesystem = cap_filesystem.clone();
+            let disk_usage = disk_usage.clone();
+            let disk_usage_cached_logical = disk_usage_cached_logical.clone();
+            let disk_usage_cached_physical = disk_usage_cached_physical.clone();
 
-            'selective_scan: {
-                if let Some(modified_paths) = paths_to_scan {
-                    if modified_paths.is_empty() {
-                        tracing::debug!(
-                            path = %cap_filesystem.base_path.display(),
-                            "skipping disk usage check, no modified paths"
-                        );
-                        return Ok(());
-                    }
+            async move {
+                tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
+                    tracing::debug!(
+                        path = %cap_filesystem.base_path.display(),
+                        "checking disk usage"
+                    );
 
-                    let mut dirs_to_scan = Vec::new();
-                    for modified_path in &modified_paths {
-                        let relative = match modified_path.strip_prefix(&*cap_filesystem.base_path)
-                        {
-                            Ok(relative) => relative,
-                            Err(_) => continue,
-                        };
+                    'selective_scan: {
+                        if let Some(modified_paths) = paths_to_scan {
+                            if modified_paths.is_empty() {
+                                tracing::debug!(
+                                    path = %cap_filesystem.base_path.display(),
+                                    "skipping disk usage check, no modified paths"
+                                );
+                                return Ok(());
+                            }
 
-                        let dir = match cap_filesystem.async_symlink_metadata(relative).await {
-                            Ok(metadata) if metadata.is_dir() => relative.to_path_buf(),
-                            Ok(_) => match relative.parent() {
-                                Some(relative) => relative.to_path_buf(),
-                                None => continue,
-                            },
-                            Err(_) => {
-                                let mut parent = relative;
-                                loop {
-                                    parent = match parent.parent() {
-                                        Some(p) => p,
-                                        None => break,
+                            let mut dirs_to_scan = Vec::new();
+                            for modified_path in &modified_paths {
+                                let relative =
+                                    match modified_path.strip_prefix(&*cap_filesystem.base_path) {
+                                        Ok(relative) => relative,
+                                        Err(_) => continue,
                                     };
 
-                                    match cap_filesystem.async_symlink_metadata(parent).await {
-                                        Ok(metadata) if metadata.is_dir() => {
-                                            dirs_to_scan.push(parent.to_path_buf());
-                                            break;
+                                let dir = match cap_filesystem.symlink_metadata(relative) {
+                                    Ok(metadata) if metadata.is_dir() => relative.to_path_buf(),
+                                    Ok(_) => match relative.parent() {
+                                        Some(relative) => relative.to_path_buf(),
+                                        None => continue,
+                                    },
+                                    Err(_) => {
+                                        let mut parent = relative;
+                                        loop {
+                                            parent = match parent.parent() {
+                                                Some(p) => p,
+                                                None => break,
+                                            };
+
+                                            match cap_filesystem.symlink_metadata(parent) {
+                                                Ok(metadata) if metadata.is_dir() => {
+                                                    dirs_to_scan.push(parent.to_path_buf());
+                                                    break;
+                                                }
+                                                _ => continue,
+                                            }
                                         }
-                                        _ => continue,
+
+                                        parent.to_path_buf()
+                                    }
+                                };
+
+                                dirs_to_scan.push(dir);
+                            }
+
+                            let dirs_to_scan = crate::utils::deduplicate_paths(dirs_to_scan);
+
+                            if dirs_to_scan.first().is_some_and(|p| p == Path::new("")) {
+                                break 'selective_scan;
+                            }
+
+                            tracing::debug!(
+                                path = %cap_filesystem.base_path.display(),
+                                "checking disk usage for {} modified directories: {:?}",
+                                dirs_to_scan.len(),
+                                dirs_to_scan
+                            );
+
+                            for dir in &dirs_to_scan {
+                                let mut tmp_disk_usage = DiskUsage::default();
+                                #[cfg(unix)]
+                                let mut seen_inodes = HashSet::new();
+
+                                let mut walker = cap_filesystem.walk_dir(dir)?;
+                                while let Some(entry) = walker.next_entry() {
+                                    let (_, path) = entry?;
+                                    let metadata = match cap_filesystem.symlink_metadata(&path) {
+                                        Ok(metadata) => metadata,
+                                        Err(_) => continue,
+                                    };
+                                    let delta = SpaceDelta::new(
+                                        metadata.size_logical() as i64,
+                                        metadata.size_physical() as i64,
+                                    );
+
+                                    let relative = match path.strip_prefix(dir) {
+                                        Ok(relative) => relative,
+                                        Err(_) => continue,
+                                    };
+
+                                    #[cfg(unix)]
+                                    {
+                                        use cap_std::fs::MetadataExt;
+
+                                        if !metadata.is_dir() && metadata.nlink() > 1 {
+                                            if seen_inodes.contains(&metadata.ino()) {
+                                                if let Some(parent) = relative.parent() {
+                                                    tmp_disk_usage.update_size(
+                                                        parent,
+                                                        SpaceDelta::only_logical(delta.logical),
+                                                    );
+                                                }
+                                                continue;
+                                            } else {
+                                                seen_inodes.insert(metadata.ino());
+                                            }
+                                        }
+                                    }
+
+                                    if metadata.is_dir() {
+                                        tmp_disk_usage.update_size(relative, delta);
+                                    } else if let Some(parent) = relative.parent() {
+                                        tmp_disk_usage.update_size(parent, delta);
                                     }
                                 }
 
-                                parent.to_path_buf()
+                                let mut disk_usage_write = disk_usage.blocking_write();
+                                disk_usage_write.remove_path(dir);
+                                disk_usage_write.add_directory(
+                                    &dir.components()
+                                        .map(|c| c.as_os_str().to_string_lossy().to_string())
+                                        .collect::<Vec<_>>(),
+                                    tmp_disk_usage,
+                                );
+                                let root_space = disk_usage_write.space;
+                                drop(disk_usage_write);
+
+                                disk_usage_cached_logical
+                                    .store(root_space.get_logical(), Ordering::Relaxed);
+                                disk_usage_cached_physical
+                                    .store(root_space.get_physical(), Ordering::Relaxed);
                             }
+
+                            return Ok(());
+                        }
+                    }
+
+                    let mut tmp_disk_usage = DiskUsage::default();
+                    #[cfg(unix)]
+                    let mut seen_inodes = HashSet::new();
+                    let mut total_entries = 0;
+                    let mut total_size = 0;
+                    let mut total_size_physical = 0;
+
+                    let mut walker = cap_filesystem.walk_dir(Path::new(""))?;
+
+                    while let Some(entry) = walker.next_entry() {
+                        let (_, path) = entry?;
+
+                        let metadata = match cap_filesystem.symlink_metadata(&path) {
+                            Ok(metadata) => metadata,
+                            Err(_) => continue,
                         };
+                        let delta = SpaceDelta::new(
+                            metadata.size_logical() as i64,
+                            metadata.size_physical() as i64,
+                        );
 
-                        dirs_to_scan.push(dir);
+                        total_entries += 1;
+
+                        #[cfg(unix)]
+                        {
+                            use cap_std::fs::MetadataExt;
+
+                            if !metadata.is_dir() && metadata.nlink() > 1 {
+                                if seen_inodes.contains(&metadata.ino()) {
+                                    if let Some(parent) = path.parent() {
+                                        tmp_disk_usage.update_size(
+                                            parent,
+                                            SpaceDelta::only_logical(delta.logical),
+                                        );
+                                    }
+                                    total_size += metadata.size_logical();
+                                    continue;
+                                } else {
+                                    seen_inodes.insert(metadata.ino());
+                                }
+                            }
+                        }
+
+                        if metadata.is_dir() {
+                            tmp_disk_usage.update_size(&path, delta);
+                        } else if let Some(parent) = path.parent() {
+                            tmp_disk_usage.update_size(parent, delta);
+                        }
+
+                        total_size += metadata.size_logical();
+                        total_size_physical += metadata.size_physical();
                     }
 
-                    let dirs_to_scan = crate::utils::deduplicate_paths(dirs_to_scan);
-
-                    if dirs_to_scan.first().is_some_and(|p| p == Path::new("")) {
-                        break 'selective_scan;
-                    }
+                    let old_disk_usage =
+                        std::mem::replace(&mut *disk_usage.blocking_write(), tmp_disk_usage);
+                    disk_usage_cached_logical.store(total_size, Ordering::Relaxed);
+                    disk_usage_cached_physical.store(total_size_physical, Ordering::Relaxed);
+                    drop(old_disk_usage);
 
                     tracing::debug!(
                         path = %cap_filesystem.base_path.display(),
-                        "checking disk usage for {} modified directories: {:?}",
-                        dirs_to_scan.len(),
-                        dirs_to_scan
+                        total_entries = total_entries,
+                        "{} bytes disk usage",
+                        total_size
                     );
 
-                    for dir in &dirs_to_scan {
-                        let mut tmp_disk_usage = DiskUsage::default();
-                        #[cfg(unix)]
-                        let mut seen_inodes = HashSet::new();
-
-                        let mut walker = cap_filesystem.async_walk_dir(dir).await?;
-                        while let Some(entry) = walker.next_entry().await {
-                            let (_, path) = entry?;
-                            let metadata = match cap_filesystem.async_symlink_metadata(&path).await
-                            {
-                                Ok(metadata) => metadata,
-                                Err(_) => continue,
-                            };
-                            let delta = SpaceDelta::new(
-                                metadata.size_logical() as i64,
-                                metadata.size_physical() as i64,
-                            );
-
-                            let relative = match path.strip_prefix(dir) {
-                                Ok(relative) => relative,
-                                Err(_) => continue,
-                            };
-
-                            #[cfg(unix)]
-                            {
-                                use cap_std::fs::MetadataExt;
-
-                                if !metadata.is_dir() && metadata.nlink() > 1 {
-                                    if seen_inodes.contains(&metadata.ino()) {
-                                        if let Some(parent) = relative.parent() {
-                                            tmp_disk_usage.update_size(
-                                                parent,
-                                                SpaceDelta::only_logical(delta.logical),
-                                            );
-                                        }
-                                        continue;
-                                    } else {
-                                        seen_inodes.insert(metadata.ino());
-                                    }
-                                }
-                            }
-
-                            if metadata.is_dir() {
-                                tmp_disk_usage.update_size(relative, delta);
-                            } else if let Some(parent) = relative.parent() {
-                                tmp_disk_usage.update_size(parent, delta);
-                            }
-                        }
-
-                        let mut disk_usage_write = disk_usage.write().await;
-                        disk_usage_write.remove_path(dir);
-                        disk_usage_write.add_directory(
-                            &dir.components()
-                                .map(|c| c.as_os_str().to_string_lossy().to_string())
-                                .collect::<Vec<_>>(),
-                            tmp_disk_usage,
-                        );
-                        let root_space = disk_usage_write.space;
-                        drop(disk_usage_write);
-
-                        disk_usage_cached_logical
-                            .store(root_space.get_logical(), Ordering::Relaxed);
-                        disk_usage_cached_physical
-                            .store(root_space.get_physical(), Ordering::Relaxed);
-                    }
-
-                    return Ok(());
-                }
+                    Ok(())
+                })
+                .await?
             }
-
-            let mut tmp_disk_usage = DiskUsage::default();
-            #[cfg(unix)]
-            let mut seen_inodes = HashSet::new();
-            let mut total_entries = 0;
-            let mut total_size = 0;
-            let mut total_size_physical = 0;
-
-            let mut walker = cap_filesystem.async_walk_dir(Path::new("")).await?;
-
-            while let Some(entry) = walker.next_entry().await {
-                let (_, path) = entry?;
-
-                let metadata = match cap_filesystem.async_symlink_metadata(&path).await {
-                    Ok(metadata) => metadata,
-                    Err(_) => continue,
-                };
-                let delta = SpaceDelta::new(
-                    metadata.size_logical() as i64,
-                    metadata.size_physical() as i64,
-                );
-
-                total_entries += 1;
-
-                #[cfg(unix)]
-                {
-                    use cap_std::fs::MetadataExt;
-
-                    if !metadata.is_dir() && metadata.nlink() > 1 {
-                        if seen_inodes.contains(&metadata.ino()) {
-                            if let Some(parent) = path.parent() {
-                                tmp_disk_usage
-                                    .update_size(parent, SpaceDelta::only_logical(delta.logical));
-                            }
-                            total_size += metadata.size_logical();
-                            continue;
-                        } else {
-                            seen_inodes.insert(metadata.ino());
-                        }
-                    }
-                }
-
-                if metadata.is_dir() {
-                    tmp_disk_usage.update_size(&path, delta);
-                } else if let Some(parent) = path.parent() {
-                    tmp_disk_usage.update_size(parent, delta);
-                }
-
-                total_size += metadata.size_logical();
-                total_size_physical += metadata.size_physical();
-            }
-
-            let old_disk_usage = std::mem::replace(&mut *disk_usage.write().await, tmp_disk_usage);
-            disk_usage_cached_logical.store(total_size, Ordering::Relaxed);
-            disk_usage_cached_physical.store(total_size_physical, Ordering::Relaxed);
-            drop(old_disk_usage);
-
-            tracing::debug!(
-                path = %cap_filesystem.base_path.display(),
-                total_entries = total_entries,
-                "{} bytes disk usage",
-                total_size
-            );
-
-            Ok(())
         };
 
         if !disk_checker_state_dirty.swap(false, Ordering::Relaxed) && !force_scan {
