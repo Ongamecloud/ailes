@@ -9,7 +9,7 @@ env:
   BIN_NAME: wings-rs
   PROJECT_NAME: wings-rs
   GHCR_IMAGE: ghcr.io/${{ github.repository }}
-  DOCKERHUB_IMAGE: docker.io/${{ vars.DOCKERHUB_REPO }}
+  DOCKERHUB_IMAGE: docker.io/${{ github.repository }}
 
 jobs:
   generate-sbom:
@@ -153,6 +153,9 @@ jobs:
         with:
           path: dist
 
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v4.1.2
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
 
@@ -205,7 +208,7 @@ jobs:
           # Emit each suffix for both registries.
           DOCKER_TAGS=""
           for t in "${SUFFIXES[@]}"; do
-            DOCKER_TAGS="${DOCKER_TAGS}${DOCKER_TAGS:+,}${GHCR_IMAGE}:${t}"
+            DOCKER_TAGS="${DOCKER_TAGS}${DOCKER_TAGS:+,}${GHCR_IMAGE}:${t},${DOCKERHUB_IMAGE}:${t}"
           done
 
           echo "DOCKER_TAGS=$DOCKER_TAGS" >> $GITHUB_ENV
@@ -231,10 +234,16 @@ jobs:
           sbom-path: sbom/sbom-source.cyclonedx.json
           push-to-registry: true
 
-      #- name: Attach source SBOM attestation to image (Docker Hub)
-      #  uses: actions/attest@v4
-      #  with:
-      #    subject-name: ${{ env.DOCKERHUB_IMAGE }}
-      #    subject-digest: ${{ steps.build.outputs.digest }}
-      #    sbom-path: sbom/sbom-source.cyclonedx.json
-      #    push-to-registry: true
+      - name: Attach source SBOM attestation to image (Docker Hub)
+        uses: actions/attest@v4
+        with:
+          subject-name: ${{ env.DOCKERHUB_IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          sbom-path: sbom/sbom-source.cyclonedx.json
+          push-to-registry: true
+
+      - name: Sign image (GHCR)
+        run: cosign sign --yes ${{ env.GHCR_IMAGE }}@${{ steps.build.outputs.digest }}
+
+      - name: Sign image (Docker Hub)
+        run: cosign sign --yes ${{ env.DOCKERHUB_IMAGE }}@${{ steps.build.outputs.digest }}
