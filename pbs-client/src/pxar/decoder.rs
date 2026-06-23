@@ -1,5 +1,3 @@
-use tokio::io::{AsyncRead, AsyncReadExt, ReadBuf};
-
 use super::{Entry, EntryKind, Metadata, Stat, StatxTimestamp, Symlink, format::Header};
 use crate::osstr::{os_str_as_bytes, os_string_from_bytes, os_string_into_bytes};
 use std::{
@@ -8,6 +6,7 @@ use std::{
     pin::Pin,
     task::{Context, Poll},
 };
+use tokio::io::{AsyncRead, AsyncReadExt, ReadBuf};
 
 const SKIP_BUF_SIZE: usize = 4096;
 

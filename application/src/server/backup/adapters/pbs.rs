@@ -27,7 +27,7 @@ use crate::{
     utils::{CmpExt, PortablePermissions, detect_mime_type},
 };
 use chrono::{Datelike, Timelike};
-use compact_str::{CompactString, ToCompactString};
+use compact_str::ToCompactString;
 use itaf::encoder::{EncoderOptions, ItafEncoder, Metadata as ItafMetadata};
 use pbs_client::{
     accessor::{ArchiveEntry, ArchiveEntryKind, PbsArchive},
@@ -55,7 +55,7 @@ use tokio_util::io::SyncIoBridge;
 pub struct PbsBackup {
     uuid: uuid::Uuid,
     config: PbsConfig,
-    backup_id: CompactString,
+    backup_id: compact_str::CompactString,
     backup_time: i64,
 }
 
@@ -452,7 +452,7 @@ impl BackupExt for PbsBackup {
                         },
                     )?;
                     let mut decoder = Decoder::from_std(SyncIoBridge::new(pxar_reader))?;
-                    let mut dir_stack: Vec<CompactString> = Vec::new();
+                    let mut dir_stack: Vec<compact_str::CompactString> = Vec::new();
 
                     while let Some(entry) = decoder.next() {
                         let entry = entry?;
@@ -759,8 +759,8 @@ struct PbsTreeNode {
     mtime: chrono::DateTime<chrono::Utc>,
     mode: u32,
     has_explicit_entry: bool,
-    dirs: Vec<(CompactString, PbsTreeNode)>,
-    files: Vec<(CompactString, PbsFileMeta)>,
+    dirs: Vec<(compact_str::CompactString, PbsTreeNode)>,
+    files: Vec<(compact_str::CompactString, PbsFileMeta)>,
 }
 
 impl PbsTreeNode {
@@ -1161,8 +1161,8 @@ impl VirtualReadableFilesystem for PbsVirtualFilesystem {
         };
 
         enum Child<'a> {
-            Dir(&'a CompactString, &'a PbsTreeNode),
-            File(&'a CompactString, &'a PbsFileMeta),
+            Dir(&'a compact_str::CompactString, &'a PbsTreeNode),
+            File(&'a compact_str::CompactString, &'a PbsFileMeta),
         }
 
         let mut dir_children: Vec<Child<'_>> = Vec::with_capacity(node.dirs.len());
@@ -1638,9 +1638,9 @@ impl VirtualReadableFilesystem for PbsVirtualFilesystem {
                         },
                     )?;
 
-                    let mut dir_stack: Vec<CompactString> = Vec::new();
+                    let mut dir_stack: Vec<compact_str::CompactString> = Vec::new();
                     for entry in entries {
-                        let components: Vec<CompactString> = entry
+                        let components: Vec<compact_str::CompactString> = entry
                             .relative
                             .components()
                             .filter_map(|c| match c {

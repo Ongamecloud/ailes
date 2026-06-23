@@ -23,18 +23,18 @@ use crate::{
     utils::{CmpExt, PortablePermissions},
 };
 use chrono::{Datelike, Timelike};
-use compact_str::{CompactString, ToCompactString};
+use compact_str::CompactString;
 use serde::Deserialize;
 use sha2::Digest;
 use std::{
     io::{Read, Write},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
 };
-use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+use tokio::io::AsyncBufReadExt;
 
 const BACKUP_UUID_TAG: &str = "backup-uuid";
 
@@ -481,15 +481,6 @@ impl BackupCreateExt for KopiaBackup {
     }
 }
 
-struct KopiaDirectoryEntry {
-    path: PathBuf,
-    file_type: FileType,
-    mode: u32,
-    size: u64,
-    mtime: chrono::DateTime<chrono::Utc>,
-    oid: String,
-}
-
 #[async_trait::async_trait]
 impl BackupExt for KopiaBackup {
     #[inline]
@@ -714,104 +705,13 @@ impl BackupExt for KopiaBackup {
         let cache_dir = Self::get_cache_dir_path(&self.config, &self.remote);
         Self::ensure_connected(&self.config_file, &cache_dir, &self.remote).await?;
 
-        let mut child = Self::get_tokio_command(&self.config_file, &self.remote)
-            .arg("ls")
-            .arg("-l")
-            .arg("-r")
-            .arg("--no-error-summary")
-            .arg(&self.root_oid)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()?;
-
-        let mut entries = Vec::new();
-
-        if let Some(stdout) = child.stdout.take() {
-            let mut line_reader = tokio::io::BufReader::new(stdout).lines();
-
-            while let Ok(Some(line)) = line_reader.next_line().await {
-                if line.is_empty() {
-                    continue;
-                }
-
-                fn parse_ls_line(line: &str) -> Option<KopiaDirectoryEntry> {
-                    let mut parts = line.split_whitespace();
-                    let mode_str = parts.next()?;
-                    let size: u64 = parts.next()?.parse().unwrap_or(0);
-                    let date = parts.next()?;
-                    let time = parts.next()?;
-                    let _tz = parts.next()?;
-                    let oid = parts.next()?.to_string();
-
-                    let mut raw_path = line.trim_start();
-                    for _ in 0..6 {
-                        let end = raw_path.find(char::is_whitespace)?;
-                        raw_path = raw_path.get(end..)?.trim_start();
-                    }
-                    let path = raw_path.trim_end_matches('/');
-                    if path.is_empty() {
-                        return None;
-                    }
-
-                    let file_type = match mode_str.chars().next() {
-                        Some('d') => FileType::Dir,
-                        Some('L') | Some('l') => FileType::Symlink,
-                        _ => FileType::File,
-                    };
-
-                    let mode = u32::from_str_radix(
-                        &mode_str
-                            .chars()
-                            .skip(1)
-                            .map(|c| if c == '-' { '0' } else { '1' })
-                            .collect::<String>(),
-                        2,
-                    )
-                    .unwrap_or(if file_type.is_dir() { 0o755 } else { 0o644 });
-
-                    let mtime = chrono::NaiveDateTime::parse_from_str(
-                        &format!("{date} {time}"),
-                        "%Y-%m-%d %H:%M:%S",
-                    )
-                    .map(|naive| naive.and_utc())
-                    .unwrap_or_else(|_| chrono::DateTime::from_timestamp(0, 0).unwrap_or_default());
-
-                    Some(KopiaDirectoryEntry {
-                        path: PathBuf::from(path),
-                        file_type,
-                        mode,
-                        size,
-                        mtime,
-                        oid,
-                    })
-                }
-
-                if let Some(entry) = parse_ls_line(&line) {
-                    entries.push(entry);
-                }
-            }
-        }
-
-        let status = child.wait().await?;
-        if !status.success()
-            && let Some(mut stderr) = child.stderr.take()
-        {
-            let mut stderr_out = String::new();
-            stderr.read_to_string(&mut stderr_out).await?;
-
-            tracing::error!(
-                "failed to list Kopia snapshot for browsing: {}",
-                stderr_out.trim()
-            );
-        }
-
-        let tree = tokio::task::block_in_place(|| KopiaTreeNode::build(entries));
-
         Ok(Arc::new(VirtualKopiaBackup {
             server: server.clone(),
             config_file: self.config_file.clone(),
             remote: Arc::clone(&self.remote),
-            tree: Arc::new(tree),
+            root_oid: Arc::from(self.root_oid.as_str()),
+            root_size: self.total_size,
+            dir_cache: moka::sync::Cache::builder().max_capacity(8192).build(),
         }))
     }
 }
@@ -826,7 +726,8 @@ impl BackupCleanExt for KopiaBackup {
     }
 }
 
-struct KopiaFileMeta {
+#[derive(Clone)]
+struct KopiaEntry {
     file_type: FileType,
     mode: u32,
     size: u64,
@@ -834,127 +735,87 @@ struct KopiaFileMeta {
     oid: String,
 }
 
-#[derive(Default)]
-struct KopiaTreeNode {
-    size: u64,
-    mtime: chrono::DateTime<chrono::Utc>,
-    mode: u32,
-    has_explicit_entry: bool,
-    dirs: Vec<(CompactString, KopiaTreeNode)>,
-    files: Vec<(CompactString, KopiaFileMeta)>,
+struct ParsedDir {
+    entries: Vec<(CompactString, KopiaEntry)>,
 }
 
-impl KopiaTreeNode {
-    fn build(entries: Vec<KopiaDirectoryEntry>) -> Self {
-        let mut root = KopiaTreeNode::default();
+#[derive(Deserialize)]
+struct RawDirManifest {
+    #[serde(default)]
+    entries: Vec<RawDirEntry>,
+}
 
-        for entry in entries {
-            root.insert(entry);
-        }
-        root.sort_files();
-        root.aggregate_sizes();
-        root
-    }
+#[derive(Deserialize)]
+struct RawDirEntry {
+    #[serde(default)]
+    name: String,
+    #[serde(rename = "type", default)]
+    entry_type: CompactString,
+    #[serde(default)]
+    mode: CompactString,
+    #[serde(default)]
+    size: u64,
+    #[serde(default)]
+    mtime: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    obj: String,
+    #[serde(default)]
+    summ: Option<RawDirSummary>,
+}
 
-    fn insert(&mut self, entry: KopiaDirectoryEntry) {
-        let components: Vec<&str> = entry
-            .path
-            .components()
-            .filter_map(|c| c.as_os_str().to_str())
-            .collect();
-        if components.is_empty() {
-            return;
-        }
+#[derive(Deserialize)]
+struct RawDirSummary {
+    #[serde(default)]
+    size: u64,
+}
 
-        match entry.file_type {
-            FileType::Dir => {
-                let node = self.upsert_dir_path(&components);
-                node.has_explicit_entry = true;
-                node.mtime = entry.mtime;
-                node.mode = entry.mode;
+fn parse_dir(bytes: &[u8]) -> Result<ParsedDir, anyhow::Error> {
+    let raw: RawDirManifest = serde_json::from_slice(bytes)?;
+    let epoch = chrono::DateTime::from_timestamp(0, 0).unwrap_or_default();
+
+    let mut entries: Vec<(CompactString, KopiaEntry)> = raw
+        .entries
+        .into_iter()
+        .filter_map(|e| {
+            if e.name.is_empty() {
+                return None;
             }
-            _ => {
-                let (leaf, parents) = match components.split_last() {
-                    Some(value) => value,
-                    None => return,
-                };
 
-                let parent = self.upsert_dir_path(parents);
-                let meta = KopiaFileMeta {
-                    file_type: entry.file_type,
-                    mode: entry.mode,
-                    size: entry.size,
-                    mtime: entry.mtime,
-                    oid: entry.oid,
-                };
-
-                parent.files.push((leaf.to_compact_string(), meta));
-            }
-        }
-    }
-
-    fn sort_files(&mut self) {
-        self.files.reverse();
-        self.files.sort_by(|(a, _), (b, _)| a.cmp(b));
-        self.files.dedup_by(|(a, _), (b, _)| a == b);
-        for (_, child) in self.dirs.iter_mut() {
-            child.sort_files();
-        }
-    }
-
-    fn upsert_dir_path(&mut self, components: &[&str]) -> &mut KopiaTreeNode {
-        let mut current = self;
-        for name in components {
-            let idx = match current.dirs.binary_search_by(|(n, _)| n.as_str().cmp(name)) {
-                Ok(idx) => idx,
-                Err(idx) => {
-                    current
-                        .dirs
-                        .insert(idx, (name.to_compact_string(), KopiaTreeNode::default()));
-                    idx
-                }
+            let file_type = match e.entry_type.as_str() {
+                "d" => FileType::Dir,
+                "s" => FileType::Symlink,
+                _ => FileType::File,
             };
-            // SAFETY: `idx` is a valid index into `current.dirs` by construction above.
-            current = unsafe { &mut current.dirs.get_unchecked_mut(idx).1 };
-        }
-        current
-    }
 
-    fn aggregate_sizes(&mut self) -> u64 {
-        let mut total: u64 = self.files.iter().map(|(_, m)| m.size).sum();
-        for (_, child) in self.dirs.iter_mut() {
-            total = total.saturating_add(child.aggregate_sizes());
-        }
-        self.size = total;
-        total
-    }
+            let default_mode = if file_type.is_dir() { 0o755 } else { 0o644 };
+            let mode = if e.mode.is_empty() {
+                default_mode
+            } else {
+                u32::from_str_radix(e.mode.as_str(), 8).unwrap_or(default_mode)
+            };
 
-    fn lookup_dir(&self, path: &Path) -> Option<&KopiaTreeNode> {
-        if path == Path::new("") || path == Path::new("/") {
-            return Some(self);
-        }
-        let mut current = self;
-        for component in path.components() {
-            let name = component.as_os_str().to_str()?;
-            let idx = current
-                .dirs
-                .binary_search_by(|(n, _)| n.as_str().cmp(name))
-                .ok()?;
-            current = &current.dirs.get(idx)?.1;
-        }
-        Some(current)
-    }
+            let size = if file_type.is_dir() {
+                e.summ.map(|s| s.size).unwrap_or(0)
+            } else {
+                e.size
+            };
 
-    fn lookup_file(&self, path: &Path) -> Option<&KopiaFileMeta> {
-        let parent_path = path.parent()?;
-        let leaf = path.file_name()?.to_str()?;
-        let parent = self.lookup_dir(parent_path)?;
-        let idx = parent
-            .files
-            .binary_search_by(|(n, _)| n.as_str().cmp(leaf))
-            .ok()?;
-        Some(&parent.files.get(idx)?.1)
-    }
+            Some((
+                CompactString::from(e.name),
+                KopiaEntry {
+                    file_type,
+                    mode,
+                    size,
+                    mtime: e.mtime.unwrap_or(epoch),
+                    oid: e.obj,
+                },
+            ))
+        })
+        .collect();
+
+    entries.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+
+    Ok(ParsedDir { entries })
 }
 
 struct SubtreeEntry {
@@ -970,7 +831,9 @@ pub struct VirtualKopiaBackup {
     server: crate::server::Server,
     config_file: PathBuf,
     remote: Arc<KopiaBackupConfiguration>,
-    tree: Arc<KopiaTreeNode>,
+    root_oid: Arc<str>,
+    root_size: u64,
+    dir_cache: moka::sync::Cache<Arc<str>, Arc<ParsedDir>>,
 }
 
 impl VirtualKopiaBackup {
@@ -987,101 +850,327 @@ impl VirtualKopiaBackup {
             .ok_or_else(|| anyhow::anyhow!("kopia show produced no stdout"))
     }
 
-    fn directory_entry_from_dir_node(path: &Path, node: &KopiaTreeNode) -> DirectoryEntry {
-        let mode = if node.mode != 0 { node.mode } else { 0o755 };
+    async fn load_dir(&self, oid: &str) -> Result<Arc<ParsedDir>, anyhow::Error> {
+        if let Some(hit) = self.dir_cache.get(oid) {
+            return Ok(hit);
+        }
 
-        DirectoryEntry {
-            name: path
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into(),
-            mode: encode_mode(mode),
-            mode_bits: compact_str::format_compact!("{:o}", mode & 0o777),
-            size: node.size,
-            size_physical: node.size,
-            editable: false,
-            inner_editable: false,
-            directory: true,
-            file: false,
-            symlink: false,
-            mime: MimeCacheValue::directory().mime,
-            modified: node.mtime,
-            created: chrono::DateTime::from_timestamp(0, 0).unwrap_or_default(),
+        let output = KopiaBackup::get_tokio_command(&self.config_file, &self.remote)
+            .arg("show")
+            .arg(oid)
+            .stderr(std::process::Stdio::null())
+            .output()
+            .await?;
+        if !output.status.success() {
+            return Err(anyhow::anyhow!(
+                "failed to read Kopia directory object {oid}"
+            ));
+        }
+
+        let parsed = Arc::new(parse_dir(&output.stdout)?);
+        self.dir_cache.insert(oid.into(), Arc::clone(&parsed));
+
+        Ok(parsed)
+    }
+
+    fn load_dir_blocking(&self, oid: &str) -> Result<Arc<ParsedDir>, anyhow::Error> {
+        if let Some(hit) = self.dir_cache.get(oid) {
+            return Ok(hit);
+        }
+
+        let output = KopiaBackup::get_std_command(&self.config_file, &self.remote)
+            .arg("show")
+            .arg(oid)
+            .stderr(std::process::Stdio::null())
+            .output()?;
+        if !output.status.success() {
+            return Err(anyhow::anyhow!(
+                "failed to read Kopia directory object {oid}"
+            ));
+        }
+
+        let parsed = Arc::new(parse_dir(&output.stdout)?);
+        self.dir_cache.insert(oid.into(), Arc::clone(&parsed));
+
+        Ok(parsed)
+    }
+
+    fn not_found() -> anyhow::Error {
+        anyhow::anyhow!(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "File not found"
+        ))
+    }
+
+    async fn resolve_dir_oid(&self, path: &Path) -> Result<Arc<str>, anyhow::Error> {
+        let mut oid = Arc::clone(&self.root_oid);
+        for component in path.components() {
+            let Component::Normal(name) = component else {
+                continue;
+            };
+            let Some(name) = name.to_str() else {
+                return Err(Self::not_found());
+            };
+
+            let dir = self.load_dir(&oid).await?;
+            let idx = dir
+                .entries
+                .binary_search_by(|(n, _)| n.as_str().cmp(name))
+                .map_err(|_| Self::not_found())?;
+            let entry = &dir.entries.get(idx).ok_or_else(Self::not_found)?.1;
+            if !entry.file_type.is_dir() {
+                return Err(Self::not_found());
+            }
+            oid = Arc::from(entry.oid.as_str());
+        }
+
+        Ok(oid)
+    }
+
+    fn resolve_dir_oid_blocking(&self, path: &Path) -> Result<Arc<str>, anyhow::Error> {
+        let mut oid = Arc::clone(&self.root_oid);
+        for component in path.components() {
+            let Component::Normal(name) = component else {
+                continue;
+            };
+            let Some(name) = name.to_str() else {
+                return Err(Self::not_found());
+            };
+
+            let dir = self.load_dir_blocking(&oid)?;
+            let idx = dir
+                .entries
+                .binary_search_by(|(n, _)| n.as_str().cmp(name))
+                .map_err(|_| Self::not_found())?;
+            let entry = &dir.entries.get(idx).ok_or_else(Self::not_found)?.1;
+            if !entry.file_type.is_dir() {
+                return Err(Self::not_found());
+            }
+            oid = Arc::from(entry.oid.as_str());
+        }
+
+        Ok(oid)
+    }
+
+    async fn resolve_dir(&self, path: &Path) -> Result<Arc<ParsedDir>, anyhow::Error> {
+        let oid = self.resolve_dir_oid(path).await?;
+        self.load_dir(&oid).await
+    }
+
+    async fn lookup_entry(&self, path: &Path) -> Result<KopiaEntry, anyhow::Error> {
+        let parent = path.parent().unwrap_or(Path::new(""));
+        let leaf = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(Self::not_found)?;
+
+        let dir = self.resolve_dir(parent).await?;
+        let idx = dir
+            .entries
+            .binary_search_by(|(n, _)| n.as_str().cmp(leaf))
+            .map_err(|_| Self::not_found())?;
+
+        Ok(dir.entries.get(idx).ok_or_else(Self::not_found)?.1.clone())
+    }
+
+    fn lookup_entry_blocking(&self, path: &Path) -> Result<KopiaEntry, anyhow::Error> {
+        let parent = path.parent().unwrap_or(Path::new(""));
+        let leaf = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(Self::not_found)?;
+
+        let oid = self.resolve_dir_oid_blocking(parent)?;
+        let dir = self.load_dir_blocking(&oid)?;
+        let idx = dir
+            .entries
+            .binary_search_by(|(n, _)| n.as_str().cmp(leaf))
+            .map_err(|_| Self::not_found())?;
+
+        Ok(dir.entries.get(idx).ok_or_else(Self::not_found)?.1.clone())
+    }
+
+    fn root_entry(&self) -> KopiaEntry {
+        KopiaEntry {
+            file_type: FileType::Dir,
+            mode: 0o755,
+            size: self.root_size,
+            mtime: chrono::DateTime::from_timestamp(0, 0).unwrap_or_default(),
+            oid: self.root_oid.to_string(),
         }
     }
 
-    fn directory_entry_from_file_meta(
-        path: &Path,
-        meta: &KopiaFileMeta,
-        buffer: Option<&[u8]>,
-    ) -> DirectoryEntry {
-        let detected_mime = if meta.file_type.is_symlink() {
-            MimeCacheValue::symlink()
-        } else if meta.file_type.is_file() && meta.size == 0 {
-            MimeCacheValue::text()
-        } else {
-            crate::utils::detect_mime_type(path, buffer)
-        };
-
-        DirectoryEntry {
-            name: path
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into(),
-            mode: encode_mode(meta.mode),
-            mode_bits: compact_str::format_compact!("{:o}", meta.mode & 0o777),
-            size: meta.size,
-            size_physical: meta.size,
-            editable: meta.file_type.is_file() && detected_mime.valid_utf8,
-            inner_editable: meta.file_type.is_file() && detected_mime.valid_inner_utf8,
-            directory: false,
-            file: meta.file_type.is_file(),
-            symlink: meta.file_type.is_symlink(),
-            mime: detected_mime.mime,
-            modified: meta.mtime,
-            created: chrono::DateTime::from_timestamp(0, 0).unwrap_or_default(),
+    fn root_metadata(&self) -> FileMetadata {
+        FileMetadata {
+            file_type: FileType::Dir,
+            permissions: PortablePermissions::from_mode(0o755),
+            size: self.root_size,
+            modified: None,
+            created: None,
         }
     }
 
-    fn collect_subtree(
-        node: &KopiaTreeNode,
-        relative_dir: &Path,
-        is_ignored: &IsIgnoredFn,
-        out: &mut Vec<SubtreeEntry>,
-    ) {
-        for (name, meta) in node.files.iter() {
-            let relative = relative_dir.join(name.as_str());
-            if (is_ignored)(meta.file_type, relative.clone()).is_none() {
-                continue;
-            }
-            out.push(SubtreeEntry {
-                relative,
-                file_type: meta.file_type,
-                mode: meta.mode,
-                mtime: meta.mtime,
-                size: meta.size,
-                oid: meta.oid.clone(),
-            });
+    fn metadata_from_entry(entry: &KopiaEntry) -> FileMetadata {
+        FileMetadata {
+            file_type: entry.file_type,
+            permissions: PortablePermissions::from_mode(entry.mode),
+            size: entry.size,
+            modified: Some(entry.mtime.into()),
+            created: None,
         }
+    }
 
-        for (name, child) in node.dirs.iter() {
-            let relative = relative_dir.join(name.as_str());
-            if (is_ignored)(FileType::Dir, relative.clone()).is_none() {
-                continue;
+    fn directory_entry(path: &Path, entry: &KopiaEntry, buffer: Option<&[u8]>) -> DirectoryEntry {
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into();
+        let epoch = chrono::DateTime::from_timestamp(0, 0).unwrap_or_default();
+
+        match entry.file_type {
+            FileType::Dir => {
+                let mode = if entry.mode != 0 { entry.mode } else { 0o755 };
+                DirectoryEntry {
+                    name,
+                    mode: encode_mode(mode),
+                    mode_bits: compact_str::format_compact!("{:o}", mode & 0o777),
+                    size: entry.size,
+                    size_physical: entry.size,
+                    editable: false,
+                    inner_editable: false,
+                    directory: true,
+                    file: false,
+                    symlink: false,
+                    mime: MimeCacheValue::directory().mime,
+                    modified: entry.mtime,
+                    created: epoch,
+                }
             }
-            let mode = if child.mode != 0 { child.mode } else { 0o755 };
-            out.push(SubtreeEntry {
-                relative: relative.clone(),
-                file_type: FileType::Dir,
-                mode,
-                mtime: child.mtime,
-                size: 0,
-                oid: String::new(),
-            });
-            Self::collect_subtree(child, &relative, is_ignored, out);
+            _ => {
+                let detected_mime = if entry.file_type.is_symlink() {
+                    MimeCacheValue::symlink()
+                } else if entry.file_type.is_file() && entry.size == 0 {
+                    MimeCacheValue::text()
+                } else {
+                    crate::utils::detect_mime_type(path, buffer)
+                };
+
+                DirectoryEntry {
+                    name,
+                    mode: encode_mode(entry.mode),
+                    mode_bits: compact_str::format_compact!("{:o}", entry.mode & 0o777),
+                    size: entry.size,
+                    size_physical: entry.size,
+                    editable: entry.file_type.is_file() && detected_mime.valid_utf8,
+                    inner_editable: entry.file_type.is_file() && detected_mime.valid_inner_utf8,
+                    directory: false,
+                    file: entry.file_type.is_file(),
+                    symlink: entry.file_type.is_symlink(),
+                    mime: detected_mime.mime,
+                    modified: entry.mtime,
+                    created: epoch,
+                }
+            }
         }
+    }
+
+    // Depth-first walk for archiving. Files first then directories per level, an
+    // ignored directory prunes its whole subtree (matching the previous
+    // tree-walk semantics). Relative paths are emitted relative to the base.
+    fn collect_subtree<'a>(
+        &'a self,
+        rel: PathBuf,
+        oid: Arc<str>,
+        is_ignored: &'a IsIgnoredFn,
+        out: &'a mut Vec<SubtreeEntry>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), anyhow::Error>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let dir = self.load_dir(&oid).await?;
+
+            for (name, entry) in dir.entries.iter() {
+                if entry.file_type.is_dir() {
+                    continue;
+                }
+                let relative = rel.join(name.as_str());
+                if (is_ignored)(entry.file_type, relative.clone()).is_none() {
+                    continue;
+                }
+                out.push(SubtreeEntry {
+                    relative,
+                    file_type: entry.file_type,
+                    mode: entry.mode,
+                    mtime: entry.mtime,
+                    size: entry.size,
+                    oid: entry.oid.clone(),
+                });
+            }
+
+            for (name, entry) in dir.entries.iter() {
+                if !entry.file_type.is_dir() {
+                    continue;
+                }
+                let relative = rel.join(name.as_str());
+                if (is_ignored)(FileType::Dir, relative.clone()).is_none() {
+                    continue;
+                }
+                let mode = if entry.mode != 0 { entry.mode } else { 0o755 };
+                out.push(SubtreeEntry {
+                    relative: relative.clone(),
+                    file_type: FileType::Dir,
+                    mode,
+                    mtime: entry.mtime,
+                    size: 0,
+                    oid: String::new(),
+                });
+                self.collect_subtree(relative, Arc::from(entry.oid.as_str()), is_ignored, out)
+                    .await?;
+            }
+
+            Ok(())
+        })
+    }
+
+    // Depth-first flatten for directory walks. Files first then directories per
+    // level, directories recursed unconditionally (an ignored directory is
+    // dropped from output but its children are still visited). Paths carry the
+    // base prefix. The trailing String is the file OID, empty for directories.
+    fn flatten_walk<'a>(
+        &'a self,
+        rel: PathBuf,
+        oid: Arc<str>,
+        is_ignored: &'a IsIgnoredFn,
+        out: &'a mut Vec<(FileType, PathBuf, String)>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), anyhow::Error>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let dir = self.load_dir(&oid).await?;
+
+            for (name, entry) in dir.entries.iter() {
+                if entry.file_type.is_dir() {
+                    continue;
+                }
+                let child_path = rel.join(name.as_str());
+                if let Some(filtered) = (is_ignored)(entry.file_type, child_path) {
+                    out.push((entry.file_type, filtered, entry.oid.clone()));
+                }
+            }
+
+            for (name, entry) in dir.entries.iter() {
+                if !entry.file_type.is_dir() {
+                    continue;
+                }
+                let child_path = rel.join(name.as_str());
+                if let Some(filtered) = (is_ignored)(FileType::Dir, child_path.clone()) {
+                    out.push((FileType::Dir, filtered, String::new()));
+                }
+                self.flatten_walk(child_path, Arc::from(entry.oid.as_str()), is_ignored, out)
+                    .await?;
+            }
+
+            Ok(())
+        })
     }
 }
 
@@ -1096,48 +1185,22 @@ impl VirtualReadableFilesystem for VirtualKopiaBackup {
         path: &(dyn AsRef<Path> + Send + Sync),
     ) -> Result<FileMetadata, anyhow::Error> {
         let path = path.as_ref();
-
         if path == Path::new("") || path == Path::new("/") {
-            return Ok(FileMetadata {
-                file_type: FileType::Dir,
-                permissions: PortablePermissions::from_mode(0o755),
-                size: 0,
-                modified: None,
-                created: None,
-            });
+            return Ok(self.root_metadata());
         }
-
-        if let Some(node) = self.tree.lookup_dir(path) {
-            let mode = if node.mode != 0 { node.mode } else { 0o755 };
-            return Ok(FileMetadata {
-                file_type: FileType::Dir,
-                permissions: PortablePermissions::from_mode(mode),
-                size: node.size,
-                modified: node.has_explicit_entry.then(|| node.mtime.into()),
-                created: None,
-            });
-        }
-
-        if let Some(meta) = self.tree.lookup_file(path) {
-            return Ok(FileMetadata {
-                file_type: meta.file_type,
-                permissions: PortablePermissions::from_mode(meta.mode),
-                size: meta.size,
-                modified: Some(meta.mtime.into()),
-                created: None,
-            });
-        }
-
-        Err(anyhow::anyhow!(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "File not found"
-        )))
+        let entry = self.lookup_entry_blocking(path)?;
+        Ok(Self::metadata_from_entry(&entry))
     }
     async fn async_metadata(
         &self,
         path: &(dyn AsRef<Path> + Send + Sync),
     ) -> Result<FileMetadata, anyhow::Error> {
-        self.metadata(path)
+        let path = path.as_ref();
+        if path == Path::new("") || path == Path::new("/") {
+            return Ok(self.root_metadata());
+        }
+        let entry = self.lookup_entry(path).await?;
+        Ok(Self::metadata_from_entry(&entry))
     }
 
     fn symlink_metadata(
@@ -1150,7 +1213,7 @@ impl VirtualReadableFilesystem for VirtualKopiaBackup {
         &self,
         path: &(dyn AsRef<Path> + Send + Sync),
     ) -> Result<FileMetadata, anyhow::Error> {
-        self.metadata(path)
+        self.async_metadata(path).await
     }
 
     async fn async_directory_entry(
@@ -1158,16 +1221,11 @@ impl VirtualReadableFilesystem for VirtualKopiaBackup {
         path: &(dyn AsRef<Path> + Send + Sync),
     ) -> Result<DirectoryEntry, anyhow::Error> {
         let path = path.as_ref();
-        if let Some(node) = self.tree.lookup_dir(path) {
-            return Ok(Self::directory_entry_from_dir_node(path, node));
+        if path == Path::new("") || path == Path::new("/") {
+            return Ok(Self::directory_entry(path, &self.root_entry(), None));
         }
-        if let Some(meta) = self.tree.lookup_file(path) {
-            return Ok(Self::directory_entry_from_file_meta(path, meta, None));
-        }
-        Err(anyhow::anyhow!(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "File not found"
-        )))
+        let entry = self.lookup_entry(path).await?;
+        Ok(Self::directory_entry(path, &entry, None))
     }
     async fn async_directory_entry_buffer(
         &self,
@@ -1175,20 +1233,11 @@ impl VirtualReadableFilesystem for VirtualKopiaBackup {
         buffer: &[u8],
     ) -> Result<DirectoryEntry, anyhow::Error> {
         let path = path.as_ref();
-        if let Some(node) = self.tree.lookup_dir(path) {
-            return Ok(Self::directory_entry_from_dir_node(path, node));
+        if path == Path::new("") || path == Path::new("/") {
+            return Ok(Self::directory_entry(path, &self.root_entry(), None));
         }
-        if let Some(meta) = self.tree.lookup_file(path) {
-            return Ok(Self::directory_entry_from_file_meta(
-                path,
-                meta,
-                Some(buffer),
-            ));
-        }
-        Err(anyhow::anyhow!(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "File not found"
-        )))
+        let entry = self.lookup_entry(path).await?;
+        Ok(Self::directory_entry(path, &entry, Some(buffer)))
     }
 
     async fn async_read_dir(
@@ -1202,9 +1251,9 @@ impl VirtualReadableFilesystem for VirtualKopiaBackup {
         use crate::models::DirectorySortingMode::*;
 
         let path = path.as_ref().to_path_buf();
-        let node = match self.tree.lookup_dir(&path) {
-            Some(node) => node,
-            None => {
+        let dir = match self.resolve_dir(&path).await {
+            Ok(dir) => dir,
+            Err(_) => {
                 return Ok(DirectoryListing {
                     total_entries: 0,
                     entries: Vec::new(),
@@ -1212,58 +1261,29 @@ impl VirtualReadableFilesystem for VirtualKopiaBackup {
             }
         };
 
-        enum Child<'a> {
-            Dir {
-                path: PathBuf,
-                node: &'a KopiaTreeNode,
-            },
-            File {
-                path: PathBuf,
-                meta: &'a KopiaFileMeta,
-            },
-        }
+        let mut dir_children: Vec<(PathBuf, &KopiaEntry)> = Vec::new();
+        let mut file_children: Vec<(PathBuf, &KopiaEntry)> = Vec::new();
 
-        let mut dir_children: Vec<Child<'_>> = Vec::new();
-        let mut file_children: Vec<Child<'_>> = Vec::new();
-
-        for (name, child_node) in node.dirs.iter() {
-            let child_path = match (is_ignored)(FileType::Dir, path.join(name.as_str())) {
+        for (name, entry) in dir.entries.iter() {
+            let child_path = match (is_ignored)(entry.file_type, path.join(name.as_str())) {
                 Some(kept) => kept,
                 None => continue,
             };
-            dir_children.push(Child::Dir {
-                path: child_path,
-                node: child_node,
-            });
-        }
-        for (name, meta) in node.files.iter() {
-            let child_path = match (is_ignored)(meta.file_type, path.join(name.as_str())) {
-                Some(kept) => kept,
-                None => continue,
-            };
-            file_children.push(Child::File {
-                path: child_path,
-                meta,
-            });
+            if entry.file_type.is_dir() {
+                dir_children.push((child_path, entry));
+            } else {
+                file_children.push((child_path, entry));
+            }
         }
 
-        let cmp = |a: &Child<'_>, b: &Child<'_>| -> std::cmp::Ordering {
-            let (a_path, a_size, a_mtime) = match a {
-                Child::Dir { path, node } => (path, node.size, node.mtime),
-                Child::File { path, meta } => (path, meta.size, meta.mtime),
-            };
-            let (b_path, b_size, b_mtime) = match b {
-                Child::Dir { path, node } => (path, node.size, node.mtime),
-                Child::File { path, meta } => (path, meta.size, meta.mtime),
-            };
-
+        let cmp = |a: &(PathBuf, &KopiaEntry), b: &(PathBuf, &KopiaEntry)| -> std::cmp::Ordering {
             match sort {
-                NameAsc => a_path.cmp_ascii_case_insensitive(b_path),
-                NameDesc => b_path.cmp_ascii_case_insensitive(a_path),
-                SizeAsc | PhysicalSizeAsc => a_size.cmp(&b_size),
-                SizeDesc | PhysicalSizeDesc => b_size.cmp(&a_size),
-                ModifiedAsc | CreatedAsc => a_mtime.cmp(&b_mtime),
-                ModifiedDesc | CreatedDesc => b_mtime.cmp(&a_mtime),
+                NameAsc => a.0.cmp_ascii_case_insensitive(&b.0),
+                NameDesc => b.0.cmp_ascii_case_insensitive(&a.0),
+                SizeAsc | PhysicalSizeAsc => a.1.size.cmp(&b.1.size),
+                SizeDesc | PhysicalSizeDesc => b.1.size.cmp(&a.1.size),
+                ModifiedAsc | CreatedAsc => a.1.mtime.cmp(&b.1.mtime),
+                ModifiedDesc | CreatedDesc => b.1.mtime.cmp(&a.1.mtime),
             }
         };
 
@@ -1273,7 +1293,7 @@ impl VirtualReadableFilesystem for VirtualKopiaBackup {
         let total_entries = dir_children.len() + file_children.len();
         let merged = dir_children.into_iter().chain(file_children);
 
-        let target: Vec<Child<'_>> = if let Some(per_page) = per_page {
+        let target: Vec<(PathBuf, &KopiaEntry)> = if let Some(per_page) = per_page {
             let start = page.saturating_sub(1) * per_page;
             merged.skip(start).take(per_page).collect()
         } else {
@@ -1281,15 +1301,8 @@ impl VirtualReadableFilesystem for VirtualKopiaBackup {
         };
 
         let mut entries = Vec::with_capacity(target.len());
-        for child in target {
-            match child {
-                Child::Dir { path, node } => {
-                    entries.push(Self::directory_entry_from_dir_node(&path, node));
-                }
-                Child::File { path, meta } => {
-                    entries.push(Self::directory_entry_from_file_meta(&path, meta, None));
-                }
-            }
+        for (child_path, entry) in target {
+            entries.push(Self::directory_entry(&child_path, entry, None));
         }
 
         Ok(DirectoryListing {
@@ -1303,31 +1316,11 @@ impl VirtualReadableFilesystem for VirtualKopiaBackup {
         path: &(dyn AsRef<Path> + Send + Sync),
         is_ignored: IsIgnoredFn,
     ) -> Result<Box<dyn DirectoryWalk + Send + Sync + 'a>, anyhow::Error> {
-        let mut flat: Vec<(FileType, PathBuf)> = Vec::new();
+        let base = path.as_ref().to_path_buf();
+        let mut flat: Vec<(FileType, PathBuf, String)> = Vec::new();
 
-        if let Some(start) = self.tree.lookup_dir(path.as_ref()) {
-            fn walk(
-                node: &KopiaTreeNode,
-                current_path: &Path,
-                is_ignored: &IsIgnoredFn,
-                out: &mut Vec<(FileType, PathBuf)>,
-            ) {
-                for (name, meta) in node.files.iter() {
-                    let child_path = current_path.join(name.as_str());
-                    if let Some(filtered) = (is_ignored)(meta.file_type, child_path) {
-                        out.push((meta.file_type, filtered));
-                    }
-                }
-                for (name, child) in node.dirs.iter() {
-                    let child_path = current_path.join(name.as_str());
-                    if let Some(filtered) = (is_ignored)(FileType::Dir, child_path.clone()) {
-                        out.push((FileType::Dir, filtered));
-                    }
-                    walk(child, &child_path, is_ignored, out);
-                }
-            }
-
-            walk(start, path.as_ref(), &is_ignored, &mut flat);
+        if let Ok(oid) = self.resolve_dir_oid(&base).await {
+            self.flatten_walk(base, oid, &is_ignored, &mut flat).await?;
         }
 
         struct TreeWalk {
@@ -1341,8 +1334,10 @@ impl VirtualReadableFilesystem for VirtualKopiaBackup {
             }
         }
 
+        let items: Vec<(FileType, PathBuf)> = flat.into_iter().map(|(ft, p, _)| (ft, p)).collect();
+
         Ok(Box::new(TreeWalk {
-            items: flat.into_iter(),
+            items: items.into_iter(),
         }))
     }
 
@@ -1373,30 +1368,10 @@ impl VirtualReadableFilesystem for VirtualKopiaBackup {
             }
         }
 
+        let base = path.as_ref().to_path_buf();
         let mut flat: Vec<(FileType, PathBuf, String)> = Vec::new();
-        if let Some(start) = self.tree.lookup_dir(path.as_ref()) {
-            fn walk(
-                node: &KopiaTreeNode,
-                current_path: &Path,
-                is_ignored: &IsIgnoredFn,
-                out: &mut Vec<(FileType, PathBuf, String)>,
-            ) {
-                for (name, meta) in node.files.iter() {
-                    let child_path = current_path.join(name.as_str());
-                    if let Some(filtered) = (is_ignored)(meta.file_type, child_path) {
-                        out.push((meta.file_type, filtered, meta.oid.clone()));
-                    }
-                }
-                for (name, child) in node.dirs.iter() {
-                    let child_path = current_path.join(name.as_str());
-                    if let Some(filtered) = (is_ignored)(FileType::Dir, child_path.clone()) {
-                        out.push((FileType::Dir, filtered, String::new()));
-                    }
-                    walk(child, &child_path, is_ignored, out);
-                }
-            }
-
-            walk(start, path.as_ref(), &is_ignored, &mut flat);
+        if let Ok(oid) = self.resolve_dir_oid(&base).await {
+            self.flatten_walk(base, oid, &is_ignored, &mut flat).await?;
         }
 
         let entry_wanted_notifier = Arc::new(tokio::sync::Notify::new());
@@ -1465,23 +1440,16 @@ impl VirtualReadableFilesystem for VirtualKopiaBackup {
         path: &(dyn AsRef<Path> + Send + Sync),
         _range: Option<ByteRange>,
     ) -> Result<FileRead, anyhow::Error> {
-        let meta = self.metadata(path)?;
-        if !meta.file_type.is_file() {
-            return Err(anyhow::anyhow!(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "File not found"
-            )));
+        let entry = self.lookup_entry_blocking(path.as_ref())?;
+        if !entry.file_type.is_file() {
+            return Err(Self::not_found());
         }
 
-        let file_meta = self
-            .tree
-            .lookup_file(path.as_ref())
-            .ok_or_else(|| anyhow::anyhow!("File not found"))?;
-        let reader = self.open_object(&file_meta.oid)?;
+        let reader = self.open_object(&entry.oid)?;
 
         Ok(FileRead {
-            size: meta.size,
-            total_size: meta.size,
+            size: entry.size,
+            total_size: entry.size,
             reader_range: None,
             reader: Box::new(reader),
         })
@@ -1491,24 +1459,14 @@ impl VirtualReadableFilesystem for VirtualKopiaBackup {
         path: &(dyn AsRef<Path> + Send + Sync),
         _range: Option<ByteRange>,
     ) -> Result<AsyncFileRead, anyhow::Error> {
-        let meta = self.metadata(path)?;
-        if !meta.file_type.is_file() {
-            return Err(anyhow::anyhow!(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "File not found"
-            )));
+        let entry = self.lookup_entry(path.as_ref()).await?;
+        if !entry.file_type.is_file() {
+            return Err(Self::not_found());
         }
-
-        let oid = self
-            .tree
-            .lookup_file(path.as_ref())
-            .ok_or_else(|| anyhow::anyhow!("File not found"))?
-            .oid
-            .clone();
 
         let child = KopiaBackup::get_tokio_command(&self.config_file, &self.remote)
             .arg("show")
-            .arg(&oid)
+            .arg(&entry.oid)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .spawn()?;
@@ -1518,8 +1476,8 @@ impl VirtualReadableFilesystem for VirtualKopiaBackup {
             .ok_or_else(|| anyhow::anyhow!("kopia show produced no stdout"))?;
 
         Ok(AsyncFileRead {
-            size: meta.size,
-            total_size: meta.size,
+            size: entry.size,
+            total_size: entry.size,
             reader_range: None,
             reader: Box::new(reader),
         })
@@ -1529,25 +1487,38 @@ impl VirtualReadableFilesystem for VirtualKopiaBackup {
         &self,
         path: &(dyn AsRef<Path> + Send + Sync),
     ) -> Result<PathBuf, anyhow::Error> {
-        let path = path.as_ref();
-        match self.tree.lookup_file(path) {
-            Some(meta) if meta.file_type.is_symlink() => {
-                let mut reader = self.open_object(&meta.oid)?;
-                let mut target = String::new();
-                reader.read_to_string(&mut target)?;
-                Ok(PathBuf::from(target))
-            }
-            _ => Err(anyhow::anyhow!(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "Symlink not found"
-            ))),
+        let entry = self.lookup_entry_blocking(path.as_ref())?;
+        if !entry.file_type.is_symlink() {
+            return Err(Self::not_found());
         }
+
+        let mut reader = self.open_object(&entry.oid)?;
+        let mut target = String::new();
+        reader.read_to_string(&mut target)?;
+        Ok(PathBuf::from(target))
     }
     async fn async_read_symlink(
         &self,
         path: &(dyn AsRef<Path> + Send + Sync),
     ) -> Result<PathBuf, anyhow::Error> {
-        self.read_symlink(path)
+        let entry = self.lookup_entry(path.as_ref()).await?;
+        if !entry.file_type.is_symlink() {
+            return Err(Self::not_found());
+        }
+
+        let output = KopiaBackup::get_tokio_command(&self.config_file, &self.remote)
+            .arg("show")
+            .arg(&entry.oid)
+            .stderr(std::process::Stdio::null())
+            .output()
+            .await?;
+        if !output.status.success() {
+            return Err(Self::not_found());
+        }
+
+        Ok(PathBuf::from(
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+        ))
     }
 
     async fn async_read_dir_archive(
@@ -1559,18 +1530,14 @@ impl VirtualReadableFilesystem for VirtualKopiaBackup {
         is_ignored: IsIgnoredFn,
     ) -> Result<tokio::io::ReadHalf<tokio::io::SimplexStream>, anyhow::Error> {
         let base_path = path.as_ref().to_path_buf();
-        let node = match self.tree.lookup_dir(&base_path) {
-            Some(node) => node,
-            None => {
-                return Err(anyhow::anyhow!(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    "File not found"
-                )));
-            }
+        let base_oid = match self.resolve_dir_oid(&base_path).await {
+            Ok(oid) => oid,
+            Err(_) => return Err(Self::not_found()),
         };
 
         let mut entries = Vec::new();
-        Self::collect_subtree(node, Path::new(""), &is_ignored, &mut entries);
+        self.collect_subtree(PathBuf::new(), base_oid, &is_ignored, &mut entries)
+            .await?;
 
         let threads = self
             .server
