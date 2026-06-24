@@ -7,13 +7,16 @@ mod get {
     use crate::{
         response::{ApiResponse, ApiResponseResult},
         routes::GetState,
+        server::filesystem::archive::ArchiveFormat,
     };
     use serde::Serialize;
+    use std::str::FromStr;
     use utoipa::ToSchema;
 
     #[derive(ToSchema, Serialize)]
     struct ResponseLogFile {
         name: compact_str::CompactString,
+        compression_type: crate::io::compression::CompressionType,
         size: u64,
         last_modified: chrono::DateTime<chrono::Utc>,
     }
@@ -43,6 +46,9 @@ mod get {
 
             log_files.push(ResponseLogFile {
                 name: entry.file_name().to_string_lossy().into(),
+                compression_type: ArchiveFormat::from_str(&entry.file_name().to_string_lossy())
+                    .map(|format| format.compression_format())
+                    .unwrap_or_default(),
                 size: metadata.len(),
                 last_modified: chrono::DateTime::from_timestamp(
                     metadata

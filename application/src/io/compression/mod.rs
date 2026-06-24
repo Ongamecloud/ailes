@@ -4,8 +4,11 @@ use utoipa::ToSchema;
 pub mod reader;
 pub mod writer;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, ToSchema, Deserialize, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+#[schema(rename_all = "snake_case")]
 pub enum CompressionType {
+    #[default]
     None,
     Gz,
     Xz,

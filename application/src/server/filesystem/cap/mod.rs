@@ -22,13 +22,13 @@ pub use utils::{AsyncReadDir, AsyncWalkDir, FileType, ReadDir, WalkDir};
 
 #[derive(Debug, Clone)]
 pub struct CapFilesystem {
-    pub base_path: Arc<PathBuf>,
+    pub base_path: Arc<Path>,
     pub(super) inner: Arc<ArcSwapOption<cap_std::fs::Dir>>,
 }
 
 impl CapFilesystem {
-    pub async fn new(base_path: PathBuf) -> Result<Self, std::io::Error> {
-        let base_path = Arc::new(base_path);
+    pub async fn new(base_path: &Path) -> Result<Self, std::io::Error> {
+        let base_path: Arc<Path> = Arc::from(base_path);
 
         let inner = tokio::task::spawn_blocking({
             let base_path = base_path.clone();
@@ -43,9 +43,9 @@ impl CapFilesystem {
         })
     }
 
-    pub fn new_uninitialized(base_path: PathBuf) -> Self {
+    pub fn new_uninitialized(base_path: &Path) -> Self {
         Self {
-            base_path: Arc::new(base_path),
+            base_path: Arc::from(base_path),
             inner: Arc::new(ArcSwapOption::empty()),
         }
     }

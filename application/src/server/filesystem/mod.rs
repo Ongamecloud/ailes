@@ -120,7 +120,7 @@ impl Filesystem {
             disk_ignored.add_line(None, entry).ok();
         }
 
-        let cap_filesystem = cap::CapFilesystem::new_uninitialized(base_path.clone());
+        let cap_filesystem = cap::CapFilesystem::new_uninitialized(&base_path);
         let server_notifier = inotify::InotifyServerNotifier::new(base_path.clone());
         let use_server_notifier = Arc::new(AtomicBool::new(false));
         let disk_checker_rescan = Arc::new(tokio::sync::Notify::new());
@@ -496,7 +496,7 @@ impl Filesystem {
         };
 
         if let Some((inner_path, source_path, read_only)) = mount_match {
-            match cap::CapFilesystem::new(source_path).await {
+            match cap::CapFilesystem::new(&source_path).await {
                 Ok(cap_fs) => {
                     let mut fs = cap_fs.get_virtual(server.clone());
                     fs.is_primary_server_fs = false;
@@ -574,7 +574,7 @@ impl Filesystem {
         };
 
         if let Some((inner_path, source_path, read_only)) = mount_match {
-            match cap::CapFilesystem::new(source_path).await {
+            match cap::CapFilesystem::new(&source_path).await {
                 Ok(cap_fs) => {
                     let mut fs = cap_fs.get_virtual(server.clone());
                     fs.is_primary_server_fs = false;

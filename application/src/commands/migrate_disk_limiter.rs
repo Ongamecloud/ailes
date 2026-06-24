@@ -263,8 +263,8 @@ async fn migrate_server(
     }
 
     let copy_result = async {
-        let source = CapFilesystem::new(staging_path.clone()).await?;
-        let destination = CapFilesystem::new(base_path.to_path_buf()).await?;
+        let source = CapFilesystem::new(&staging_path).await?;
+        let destination = CapFilesystem::new(base_path).await?;
 
         let source_dir = source.get_inner()?;
         let destination_dir = destination.get_inner()?;

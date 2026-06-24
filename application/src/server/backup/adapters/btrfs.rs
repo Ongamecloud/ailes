@@ -208,7 +208,8 @@ impl BtrfsBackup {
             ));
         }
 
-        let filesystem = crate::server::filesystem::cap::CapFilesystem::new(subvolume_path).await?;
+        let filesystem =
+            crate::server::filesystem::cap::CapFilesystem::new(&subvolume_path).await?;
         let names = filesystem.async_read_dir_all(Path::new("")).await?;
         let ignore = Self::get_ignore(&state.config, self.uuid).await?;
         let threads = state.config.load().api.file_compression_threads;
@@ -504,7 +505,8 @@ impl BackupExt for BtrfsBackup {
             ));
         }
 
-        let filesystem = crate::server::filesystem::cap::CapFilesystem::new(subvolume_path).await?;
+        let filesystem =
+            crate::server::filesystem::cap::CapFilesystem::new(&subvolume_path).await?;
         let ignore = Self::get_ignore(&server.app_state.config, self.uuid).await?;
 
         let total_task = {
@@ -676,7 +678,8 @@ impl BackupExt for BtrfsBackup {
             ));
         }
 
-        let filesystem = crate::server::filesystem::cap::CapFilesystem::new(subvolume_path).await?;
+        let filesystem =
+            crate::server::filesystem::cap::CapFilesystem::new(&subvolume_path).await?;
         let ignore = Self::get_ignore(&server.app_state.config, self.uuid).await?;
 
         Ok(Arc::new(

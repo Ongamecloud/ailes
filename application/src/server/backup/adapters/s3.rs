@@ -10,7 +10,7 @@ use crate::{
     server::{
         backup::{Backup, BackupCleanExt, BackupCreateExt, BackupExt, BackupFindExt},
         filesystem::{
-            archive::StreamableArchiveFormat,
+            archive::{ArchiveFormat, StreamableArchiveFormat},
             virtualfs::{ByteRange, VirtualReadableFilesystem},
         },
     },
@@ -21,6 +21,7 @@ use sha2::Digest;
 use std::{
     io::Write,
     path::{Path, PathBuf},
+    str::FromStr,
     sync::{
         Arc, OnceLock,
         atomic::{AtomicU64, Ordering},
@@ -171,9 +172,28 @@ impl S3Backup {
     ) -> Result<RawServerBackup, anyhow::Error> {
         if part_size == 0 {
             return Err(anyhow::anyhow!(
-                "remote returned a part size of 0 for s3 backup {uuid}, cannot upload backup"
+                "remote returned a part size of 0 for s3 backup, cannot upload backup"
             ));
         }
+
+        let url = match initial_urls
+            .first()
+            .map(|url| reqwest::Url::parse(url))
+            .transpose()
+        {
+            Ok(Some(url)) => url,
+            Ok(None) => {
+                return Err(anyhow::anyhow!(
+                    "no initial urls provided for s3 backup, cannot upload backup"
+                ));
+            }
+            Err(err) => {
+                return Err(anyhow::anyhow!(
+                    "failed to parse initial url for s3 backup: {:?}",
+                    err
+                ));
+            }
+        };
 
         let scratch_path = Self::get_scratch_file_name(&server.app_state.config, uuid);
         let mut scratch = tokio::fs::OpenOptions::new()
@@ -242,7 +262,17 @@ impl S3Backup {
                     Some(Arc::clone(&progress)),
                     ignore.into(),
                     crate::server::filesystem::archive::create::CreateTarOptions {
-                        compression_type: CompressionType::Gz,
+                        compression_type: ArchiveFormat::from_str(
+                            url.path_segments()
+                                .and_then(|mut segments| segments.next_back())
+                                .unwrap_or_default(),
+                        )
+                        .map_err(|_| {
+                            anyhow::anyhow!(
+                                "failed to determine compression format from url path for s3 backup"
+                            )
+                        })?
+                        .compression_format(),
                         compression_level: server
                             .app_state
                             .config
@@ -323,9 +353,8 @@ impl S3Backup {
 
                             url_queue.pop_front().ok_or_else(|| {
                                 anyhow::anyhow!(
-                                    "failed to retrieve presigned URL for part {} of backup {}",
-                                    part_number,
-                                    uuid
+                                    "failed to retrieve presigned URL for part {} of backup",
+                                    part_number
                                 )
                             })?
                         }
@@ -507,7 +536,7 @@ impl S3Backup {
             .await?;
         if part_size == 0 {
             return Err(anyhow::anyhow!(
-                "remote returned a part size of 0 for s3 backup {uuid}, cannot upload backup"
+                "remote returned a part size of 0 for s3 backup, cannot upload backup"
             ));
         }
 
@@ -709,7 +738,17 @@ impl BackupExt for S3Backup {
             }
         };
 
-        let response = get_client(server).get(download_url.as_str()).send().await?;
+        let url = match reqwest::Url::parse(&download_url) {
+            Ok(url) => url,
+            Err(err) => {
+                return Err(anyhow::anyhow!(
+                    "failed to parse download_url from s3 backup restore request: {:?}",
+                    err
+                ));
+            }
+        };
+
+        let response = get_client(server).get(url.clone()).send().await?;
         if let Some(content_length) = response.content_length() {
             total.store(content_length, Ordering::SeqCst);
         }
@@ -729,7 +768,8 @@ impl BackupExt for S3Backup {
             let reader = CountingReader::new_with_bytes_read(reader, progress);
             let reader = CompressionReader::new(
                 reader,
-                CompressionType::Gz,
+                ArchiveFormat::from_str(url.path_segments().and_then(|mut segments| segments.next_back()).unwrap_or_default())
+                    .map_err(|_| anyhow::anyhow!("failed to determine archive format from download_url"))?.compression_format(),
             )?;
             let reader = std::io::BufReader::with_capacity(crate::TRANSFER_BUFFER_SIZE, reader);
 
