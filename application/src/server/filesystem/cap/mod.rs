@@ -923,7 +923,7 @@ impl CapFilesystem {
 
             AsyncReadDir::Cap(utils::AsyncCapReadDir(
                 Some(tokio::task::spawn_blocking(move || inner.read_dir(path)).await??),
-                Some(VecDeque::with_capacity(32)),
+                Some(VecDeque::with_capacity(128)),
             ))
         })
     }

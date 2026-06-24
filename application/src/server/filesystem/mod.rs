@@ -1114,72 +1114,145 @@ impl Filesystem {
 
         #[cfg(unix)]
         {
-            use std::os::fd::AsFd;
+            use rayon::prelude::*;
+            use std::{collections::VecDeque, os::fd::AsFd};
+
+            const CHANNEL_CAPACITY: usize = 1 << 16;
+            const CHUNK: usize = 8192;
 
             let metadata = self.async_metadata(path.as_ref()).await?;
-
             let owner_uid = rustix::fs::Uid::from_raw_unchecked(self.config.load().system.user.uid);
             let owner_gid = rustix::fs::Gid::from_raw_unchecked(self.config.load().system.user.gid);
+            let root_rel = self.relative_path(path.as_ref());
 
             tokio::task::spawn_blocking({
                 let cap_filesystem = self.cap_filesystem.clone();
-                let path = self.relative_path(path.as_ref());
                 let base_path = self.base_path.clone();
+                let root_rel = root_rel.clone();
 
-                move || {
-                    if path == Path::new("") || path == Path::new(".") || path == Path::new("/") {
-                        Ok::<_, anyhow::Error>(std::os::unix::fs::chown(
+                move || -> Result<(), anyhow::Error> {
+                    if root_rel.as_os_str().is_empty()
+                        || root_rel == Path::new(".")
+                        || root_rel == Path::new("/")
+                    {
+                        std::os::unix::fs::chown(
                             &base_path,
                             Some(owner_uid.as_raw()),
                             Some(owner_gid.as_raw()),
-                        )?)
+                        )?;
                     } else {
-                        Ok(rustix::fs::chownat(
+                        rustix::fs::chownat(
                             cap_filesystem.get_inner()?.as_fd(),
-                            path,
+                            &root_rel,
                             Some(owner_uid),
                             Some(owner_gid),
                             rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
-                        )?)
+                        )?;
                     }
+
+                    Ok(())
                 }
             })
             .await??;
 
-            if metadata.is_dir() {
+            if !metadata.is_dir() {
+                return Ok(());
+            }
+
+            let threads = self.config.load().system.check_permissions_on_boot_threads;
+            let (tx, rx) = tokio::sync::mpsc::channel(CHANNEL_CAPACITY);
+
+            let worker = tokio::task::spawn_blocking({
                 let cap_filesystem = self.cap_filesystem.clone();
 
-                self.async_walk_dir(path)
-                    .await?
-                    .run_multithreaded(
-                        self.config.load().system.check_permissions_on_boot_threads,
-                        Arc::new(move |_, path: PathBuf| {
-                            let cap_filesystem = cap_filesystem.clone();
+                move || -> Result<(), anyhow::Error> {
+                    let mut rx = rx;
 
-                            async move {
-                                tokio::task::spawn_blocking(move || {
-                                    rustix::fs::chownat(
-                                        cap_filesystem.get_inner()?.as_fd(),
-                                        path,
-                                        Some(owner_uid),
-                                        Some(owner_gid),
-                                        rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
-                                    )
-                                    .ok();
+                    let inner = cap_filesystem.get_inner()?;
+                    let fd = inner.as_fd();
 
-                                    Ok(())
-                                })
-                                .await?
+                    let pool = rayon::ThreadPoolBuilder::new()
+                        .num_threads(threads)
+                        .build()?;
+                    let mut chunk = Vec::with_capacity(CHUNK);
+
+                    loop {
+                        while chunk.len() < CHUNK {
+                            match rx.blocking_recv() {
+                                Some(path) => chunk.push(path),
+                                None => break,
                             }
-                        }),
-                    )
-                    .await
-            } else {
-                Ok(())
-            }
+                        }
+                        if chunk.is_empty() {
+                            break;
+                        }
+
+                        pool.install(|| {
+                            chunk.par_iter().for_each(|path| {
+                                let Ok(stat) = rustix::fs::statx(
+                                    fd,
+                                    path,
+                                    rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+                                    rustix::fs::StatxFlags::UID | rustix::fs::StatxFlags::GID,
+                                ) else {
+                                    return;
+                                };
+
+                                if stat.stx_uid == owner_uid.as_raw()
+                                    && stat.stx_gid == owner_gid.as_raw()
+                                {
+                                    return;
+                                }
+
+                                rustix::fs::chownat(
+                                    fd,
+                                    path,
+                                    Some(owner_uid),
+                                    Some(owner_gid),
+                                    rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+                                )
+                                .ok();
+                            });
+                        });
+
+                        chunk.clear();
+                    }
+
+                    Ok(())
+                }
+            });
+
+            let lister = async move {
+                let mut stack = VecDeque::new();
+                stack.push_back(root_rel);
+
+                while let Some(dir) = stack.pop_front() {
+                    let mut entries = self.async_read_dir(&dir).await?;
+
+                    while let Some(Ok((file_type, entry_name))) = entries.next_entry().await {
+                        let child = dir.join(entry_name);
+
+                        if file_type.is_dir() {
+                            stack.push_back(child.clone());
+                        }
+                        if tx.send(child).await.is_err() {
+                            return Ok(());
+                        }
+                    }
+                }
+
+                Ok::<_, anyhow::Error>(())
+            };
+
+            let (list_res, work_res) = tokio::join!(lister, worker);
+            list_res?;
+            work_res??;
+
+            Ok(())
         }
         #[cfg(not(unix))]
         {
+            let _ = path;
             Ok(())
         }
     }

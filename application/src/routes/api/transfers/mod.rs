@@ -275,7 +275,7 @@ mod post {
                                                     last_parent = Some(parent.to_path_buf());
                                                 }
 
-                                                let meta = file_entry.metadata().clone();
+                                                let meta = file_entry.metadata();
                                                 let mut writer =
                                                     crate::server::filesystem::file::ServerFile::new(
                                                         server.clone(),

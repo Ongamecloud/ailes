@@ -67,7 +67,7 @@ impl AsyncCapReadDir {
         let mut buffer = self.1.take()?;
 
         match tokio::task::spawn_blocking(move || {
-            for _ in 0..32 {
+            for _ in 0..128 {
                 if let Some(entry) = read_dir.next() {
                     buffer.push_back(entry.map(|e| {
                         (
