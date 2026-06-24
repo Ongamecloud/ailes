@@ -52,7 +52,7 @@ mod post {
         },
         response::{ApiResponse, ApiResponseResult},
         routes::{ApiError, GetState},
-        server::transfer::TransferArchiveFormat,
+        server::{filesystem::archive::Archive, transfer::TransferArchiveFormat},
         utils::PortablePermissions,
     };
     use axum::{
@@ -237,6 +237,7 @@ mod post {
                                 {
                                     let archive = itaf::decoder::ItafDecoder::new(&mut reader)?;
                                     let mut directory_entries = chunked_vec::ChunkedVec::new();
+                                    let mut last_parent = None;
                                     let mut entries = archive.entries();
 
                                     let mut read_buffer = vec![0; crate::TRANSFER_BUFFER_SIZE];
@@ -260,14 +261,18 @@ mod post {
                                                     PortablePermissions::from_mode(meta.mode),
                                                 )?;
 
-                                                directory_entries
-                                                    .push((destination_path, meta.modified));
+                                                if directory_entries.len() < Archive::MAX_DIRECTORY_MTIME_ENTRIES {
+                                                    directory_entries.push((destination_path, meta.modified));
+                                                }
                                             }
                                             itaf::decoder::ArchiveEntry::File(file_entry) => {
-                                                if let Some(parent) = destination_path.parent() {
+                                                if let Some(parent) = destination_path.parent()
+                                                    && last_parent.as_deref() != Some(parent)
+                                                {
                                                     server
                                                         .filesystem
                                                         .create_chowned_dir_all(parent)?;
+                                                    last_parent = Some(parent.to_path_buf());
                                                 }
 
                                                 let meta = file_entry.metadata().clone();
@@ -371,6 +376,7 @@ mod post {
                                 } else {
                                     let mut archive = tar::Archive::new(reader);
                                     let mut directory_entries = chunked_vec::ChunkedVec::new();
+                                    let mut last_parent = None;
                                     let mut entries = archive.entries()?;
 
                                     let mut read_buffer = vec![0; crate::TRANSFER_BUFFER_SIZE];
@@ -399,7 +405,7 @@ mod post {
                                                     )?;
                                                 }
 
-                                                if let Ok(modified_time) = header.mtime() {
+                                                if let Ok(modified_time) = header.mtime() && directory_entries.len() < Archive::MAX_DIRECTORY_MTIME_ENTRIES {
                                                     directory_entries.push((
                                                         destination_path.to_path_buf(),
                                                         modified_time,
@@ -407,10 +413,13 @@ mod post {
                                                 }
                                             }
                                             tar::EntryType::Regular => {
-                                                if let Some(parent) = destination_path.parent() {
+                                                if let Some(parent) = destination_path.parent()
+                                                    && last_parent.as_deref() != Some(parent)
+                                                {
                                                     server
                                                         .filesystem
                                                         .create_chowned_dir_all(parent)?;
+                                                    last_parent = Some(parent.to_path_buf());
                                                 }
 
                                                 let mut writer =

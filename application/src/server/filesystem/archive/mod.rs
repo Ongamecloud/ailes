@@ -338,6 +338,8 @@ pub struct Archive {
 }
 
 impl Archive {
+    pub const MAX_DIRECTORY_MTIME_ENTRIES: usize = 10_000_000;
+
     pub async fn open(server: crate::server::Server, path: PathBuf) -> Result<Self, anyhow::Error> {
         let mut file = server.filesystem.async_open(&path).await?;
 
@@ -497,6 +499,7 @@ impl Archive {
                     let mut entries = archive.entries()?;
 
                     let mut read_buffer = vec![0; crate::BUFFER_SIZE];
+                    let mut last_parent = None;
                     while let Some(Ok(mut entry)) = entries.next() {
                         let path = entry.path()?;
 
@@ -528,13 +531,18 @@ impl Archive {
                                         .set_permissions(&destination_path, permissions)?;
                                 }
 
-                                if let Ok(modified_time) = header.mtime() {
+                                if let Ok(modified_time) = header.mtime()
+                                    && directory_entries.len() < Self::MAX_DIRECTORY_MTIME_ENTRIES
+                                {
                                     directory_entries.push((destination_path, modified_time));
                                 }
                             }
                             tar::EntryType::Regular => {
-                                if let Some(parent) = destination_path.parent() {
+                                if let Some(parent) = destination_path.parent()
+                                    && last_parent.as_deref() != Some(parent)
+                                {
                                     self.server.filesystem.create_chowned_dir_all(parent)?;
+                                    last_parent = Some(parent.to_path_buf());
                                 }
 
                                 let mut writer = super::file::ServerFile::new(
@@ -641,6 +649,7 @@ impl Archive {
 
                             let mut run = move || -> Result<(), anyhow::Error> {
                                 let mut read_buffer = vec![0; crate::BUFFER_SIZE];
+                                let mut last_parent = None;
 
                                 loop {
                                     if error_clone2.read().is_some() {
@@ -682,8 +691,11 @@ impl Archive {
                                             ),
                                         )?;
                                     } else if entry.is_file() {
-                                        if let Some(parent) = destination_path.parent() {
+                                        if let Some(parent) = destination_path.parent()
+                                            && last_parent.as_deref() != Some(parent)
+                                        {
                                             server.filesystem.create_chowned_dir_all(parent)?;
+                                            last_parent = Some(parent.to_path_buf());
                                         }
 
                                         let mut writer = super::file::ServerFile::new(
@@ -838,6 +850,7 @@ impl Archive {
                     )
                     .open_for_processing()?;
                     let mut directory_entries = chunked_vec::ChunkedVec::new();
+                    let mut last_parent = None;
 
                     loop {
                         let entry = match archive.read_header()? {
@@ -871,15 +884,20 @@ impl Archive {
                                 .filesystem
                                 .create_chowned_dir_all(&destination_path)?;
 
-                            if let Some(modified_time) = dos_time_to_unix(entry.entry().file_time) {
+                            if let Some(modified_time) = dos_time_to_unix(entry.entry().file_time)
+                                && directory_entries.len() < Self::MAX_DIRECTORY_MTIME_ENTRIES
+                            {
                                 directory_entries.push((destination_path, modified_time));
                             }
 
                             archive = entry.skip()?;
                             continue;
                         } else {
-                            if let Some(parent) = destination_path.parent() {
+                            if let Some(parent) = destination_path.parent()
+                                && last_parent.as_deref() != Some(parent)
+                            {
                                 self.server.filesystem.create_chowned_dir_all(parent)?;
+                                last_parent = Some(parent.to_path_buf());
                             }
 
                             let writer = super::file::ServerFile::new(
@@ -981,6 +999,7 @@ impl Archive {
                                 );
 
                                 let mut read_buffer = vec![0; crate::BUFFER_SIZE];
+                                let mut last_parent = None;
                                 if let Err(err) = folder.for_each_entries(&mut |entry, reader| {
                                     let path = entry.name();
                                     if path.starts_with('/') || path.starts_with('\\') {
@@ -1007,12 +1026,16 @@ impl Archive {
                                         }
                                     } else {
                                         if let Some(parent) = destination_path.parent()
-                                            && let Err(err) =
-                                                server.filesystem.create_chowned_dir_all(parent)
+                                            && last_parent.as_deref() != Some(parent)
                                         {
-                                            return Err(sevenz_rust2::Error::Other(
-                                                err.to_string().into(),
-                                            ));
+                                            if let Err(err) =
+                                                server.filesystem.create_chowned_dir_all(parent)
+                                            {
+                                                return Err(sevenz_rust2::Error::Other(
+                                                    err.to_string().into(),
+                                                ));
+                                            }
+                                            last_parent = Some(parent.to_path_buf());
                                         }
 
                                         let mut writer = super::file::ServerFile::new(
@@ -1280,6 +1303,7 @@ impl Archive {
                     let mut decoder = pbs_client::pxar::decoder::Decoder::from_std(reader)?;
                     let mut directory_entries = chunked_vec::ChunkedVec::new();
                     let mut read_buffer = vec![0; crate::BUFFER_SIZE];
+                    let mut last_parent = None;
 
                     while let Some(entry) = decoder.next() {
                         let entry = entry?;
@@ -1309,11 +1333,16 @@ impl Archive {
                                 self.server
                                     .filesystem
                                     .set_permissions(&destination_path, permissions)?;
-                                directory_entries.push((destination_path, modified_time));
+                                if directory_entries.len() < Self::MAX_DIRECTORY_MTIME_ENTRIES {
+                                    directory_entries.push((destination_path, modified_time));
+                                }
                             }
                             pbs_client::pxar::EntryKind::File { .. } => {
-                                if let Some(parent) = destination_path.parent() {
+                                if let Some(parent) = destination_path.parent()
+                                    && last_parent.as_deref() != Some(parent)
+                                {
                                     self.server.filesystem.create_chowned_dir_all(parent)?;
+                                    last_parent = Some(parent.to_path_buf());
                                 }
 
                                 let mut writer = super::file::ServerFile::new(

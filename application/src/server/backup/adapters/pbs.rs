@@ -14,7 +14,7 @@ use crate::{
     server::{
         backup::{Backup, BackupCleanExt, BackupCreateExt, BackupExt, BackupFindExt},
         filesystem::{
-            archive::{StreamableArchiveFormat, create::CreatePxarOptions},
+            archive::{Archive, StreamableArchiveFormat, create::CreatePxarOptions},
             cap::FileType,
             file::AsyncServerFile,
             virtualfs::{
@@ -613,6 +613,7 @@ impl BackupExt for PbsBackup {
 
             let mut decoder = AsyncDecoder::from_tokio(reader)?;
             let mut directory_entries = chunked_vec::ChunkedVec::new();
+            let mut last_parent = None;
 
             while let Some(entry) = decoder.next().await {
                 let entry = entry?;
@@ -638,7 +639,10 @@ impl BackupExt for PbsBackup {
                                 PortablePermissions::from_mode(mode),
                             )
                             .await?;
-                        directory_entries.push((path, mtime));
+
+                        if directory_entries.len() < Archive::MAX_DIRECTORY_MTIME_ENTRIES {
+                            directory_entries.push((path, mtime));
+                        }
                     }
                     EntryKind::File { .. } => {
                         server.log_daemon(compact_str::format_compact!(
@@ -646,11 +650,14 @@ impl BackupExt for PbsBackup {
                             path.display()
                         ));
 
-                        if let Some(parent) = path.parent() {
+                        if let Some(parent) = path.parent()
+                            && last_parent.as_deref() != Some(parent)
+                        {
                             server
                                 .filesystem
                                 .async_create_chowned_dir_all(parent)
                                 .await?;
+                            last_parent = Some(parent.to_path_buf());
                         }
 
                         let mut writer = AsyncServerFile::new(

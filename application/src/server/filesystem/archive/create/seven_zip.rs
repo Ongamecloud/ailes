@@ -4,7 +4,7 @@ use crate::{
         compression::CompressionLevel,
         counting_reader::CountingReader,
     },
-    server::filesystem::virtualfs::IsIgnoredFn,
+    server::filesystem::{archive::Archive, virtualfs::IsIgnoredFn},
 };
 use sevenz_rust2::{
     EncoderConfiguration, EncoderMethod, NtTime,
@@ -76,7 +76,9 @@ pub async fn create_7z<W: Write + Seek + Send + 'static>(
                 .map_or(None, |ctime| NtTime::try_from(ctime.into_std()).ok());
 
             if source_metadata.is_dir() {
-                directory_entries.push((relative.to_path_buf(), mtime, ctime));
+                if directory_entries.len() < Archive::MAX_DIRECTORY_MTIME_ENTRIES {
+                    directory_entries.push((relative.to_path_buf(), mtime, ctime));
+                }
                 if let Some(bytes_archived) = &bytes_archived {
                     bytes_archived.fetch_add(source_metadata.len(), Ordering::SeqCst);
                 }

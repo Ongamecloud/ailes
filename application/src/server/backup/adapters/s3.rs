@@ -10,7 +10,7 @@ use crate::{
     server::{
         backup::{Backup, BackupCleanExt, BackupCreateExt, BackupExt, BackupFindExt},
         filesystem::{
-            archive::{ArchiveFormat, StreamableArchiveFormat},
+            archive::{Archive, ArchiveFormat, StreamableArchiveFormat},
             virtualfs::{ByteRange, VirtualReadableFilesystem},
         },
     },
@@ -775,6 +775,7 @@ impl BackupExt for S3Backup {
 
             let mut archive = tar::Archive::new(reader);
             let mut directory_entries = chunked_vec::ChunkedVec::new();
+            let mut last_parent = None;
             let entries = archive.entries()?;
 
             let mut read_buffer = vec![0; crate::TRANSFER_BUFFER_SIZE];
@@ -797,15 +798,18 @@ impl BackupExt for S3Backup {
                                 PortablePermissions::from_mode(header.mode().unwrap_or(0o755)),
                             )?;
 
-                        if let Ok(modified_time) = header.mtime() {
+                        if let Ok(modified_time) = header.mtime() && directory_entries.len() < Archive::MAX_DIRECTORY_MTIME_ENTRIES {
                             directory_entries.push((path.to_path_buf(), modified_time));
                         }
                     }
                     tar::EntryType::Regular => {
                         server.log_daemon(compact_str::format_compact!("(restoring): {}", path.display()));
 
-                        if let Some(parent) = path.parent() {
+                        if let Some(parent) = path.parent()
+                            && last_parent.as_deref() != Some(parent)
+                        {
                             server.filesystem.create_chowned_dir_all(parent)?;
+                            last_parent = Some(parent.to_path_buf());
                         }
 
                         let mut writer = crate::server::filesystem::file::ServerFile::new(
