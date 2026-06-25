@@ -30,9 +30,14 @@ mod get {
                 transfers.insert(
                     server.uuid,
                     crate::models::TransferProgress {
-                        archive_progress: outgoing_transfer.bytes_archived.load(Ordering::Relaxed),
-                        network_progress: outgoing_transfer.bytes_sent.load(Ordering::Relaxed),
-                        total: outgoing_transfer.bytes_total.load(Ordering::Relaxed),
+                        archive_bytes_processed: outgoing_transfer
+                            .bytes_archived
+                            .load(Ordering::Relaxed),
+                        network_bytes_processed: outgoing_transfer
+                            .bytes_sent
+                            .load(Ordering::Relaxed),
+                        bytes_total: outgoing_transfer.bytes_total.load(Ordering::Relaxed),
+                        files_processed: outgoing_transfer.files_archived.load(Ordering::Relaxed),
                     },
                 );
             }

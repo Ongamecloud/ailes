@@ -2,7 +2,6 @@ use crate::{
     io::{
         SafeDigestExt,
         compression::{CompressionLevel, writer::CompressionWriter},
-        counting_reader::CountingReader,
         fixed_reader::FixedReader,
     },
     remote::backups::RawServerBackup,
@@ -327,7 +326,7 @@ impl BackupCreateExt for DdupBakBackup {
     async fn create(
         server: &crate::server::Server,
         uuid: uuid::Uuid,
-        progress: Arc<AtomicU64>,
+        progress: crate::server::filesystem::archive::create::ArchiveProgress,
         total: Arc<AtomicU64>,
         ignore: ignore::gitignore::Gitignore,
         ignore_raw: compact_str::CompactString,
@@ -396,7 +395,8 @@ impl BackupCreateExt for DdupBakBackup {
                             .compression_format;
 
                         Arc::new(move |_, metadata| {
-                            progress.fetch_add(metadata.len(), Ordering::SeqCst);
+                            progress.increment_bytes(metadata.len());
+                            progress.increment_files();
 
                             match compression_format {
                                 crate::config::SystemBackupsDdupBakCompressionFormat::None => {
@@ -600,7 +600,7 @@ impl BackupExt for DdupBakBackup {
     async fn restore(
         &self,
         server: &crate::server::Server,
-        progress: Arc<AtomicU64>,
+        progress: crate::server::filesystem::archive::create::ArchiveProgress,
         total: Arc<AtomicU64>,
         _download_url: Option<compact_str::CompactString>,
     ) -> Result<(), anyhow::Error> {
@@ -623,7 +623,7 @@ impl BackupExt for DdupBakBackup {
                 entry: &Entry,
                 path: &Path,
                 server: &crate::server::Server,
-                progress: &Arc<AtomicU64>,
+                progress: &crate::server::filesystem::archive::create::ArchiveProgress,
             ) -> Result<(), anyhow::Error> {
                 enum Work<'a> {
                     Visit {
@@ -674,11 +674,12 @@ impl BackupExt for DdupBakBackup {
                                 Some(file.mtime),
                             )?;
                             let reader = repository.entry_reader(Entry::File(file.clone()))?;
-                            let mut reader =
-                                CountingReader::new_with_bytes_read(reader, Arc::clone(progress));
+                            let mut reader = progress.counting_reader(reader);
 
                             crate::io::copy(&mut reader, &mut writer)?;
                             writer.flush()?;
+
+                            progress.increment_files();
                         }
                         Entry::Directory(directory) => {
                             server.filesystem.create_chowned_dir_all(&path)?;
@@ -703,6 +704,8 @@ impl BackupExt for DdupBakBackup {
                             if let Err(err) = server.filesystem.symlink(&symlink.target, &path) {
                                 tracing::debug!(path = %path.display(), "failed to create symlink from backup: {:?}", err);
                             } else {
+                                progress.increment_files();
+
                                 server.filesystem.set_times(&path, symlink.mtime, None)?;
                             }
                         }

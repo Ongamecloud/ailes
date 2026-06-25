@@ -115,7 +115,7 @@ impl BackupAdapter {
         self,
         server: &crate::server::Server,
         uuid: uuid::Uuid,
-        progress: Arc<AtomicU64>,
+        progress: crate::server::filesystem::archive::create::ArchiveProgress,
         total: Arc<AtomicU64>,
         ignore: ignore::gitignore::Gitignore,
         ignore_raw: compact_str::CompactString,

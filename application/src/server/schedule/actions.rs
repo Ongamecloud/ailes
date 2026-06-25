@@ -826,8 +826,9 @@ impl ScheduleAction {
                     .filesystem
                     .relative_path(&destination_path.join(destination_file_name));
 
-                let progress = Arc::new(AtomicU64::new(0));
-                let total = Arc::new(AtomicU64::new(metadata.size));
+                let bytes_processed = Arc::new(AtomicU64::new(0));
+                let bytes_total = Arc::new(AtomicU64::new(metadata.size));
+                let files_processed = Arc::new(AtomicU64::new(0));
 
                 let (_, task) = server
                     .filesystem
@@ -837,8 +838,9 @@ impl ScheduleAction {
                             path: path.clone(),
                             destination_path: file_name,
                             start_time: chrono::Utc::now(),
-                            progress: progress.clone(),
-                            total: total.clone(),
+                            bytes_processed: bytes_processed.clone(),
+                            bytes_total: bytes_total.clone(),
+                            files_processed: files_processed.clone(),
                         },
                         {
                             let server = server.clone();
@@ -849,7 +851,10 @@ impl ScheduleAction {
                                 server
                                     .filesystem
                                     .copy_path(
-                                        progress,
+                                        crate::server::filesystem::archive::create::ArchiveProgress::new(
+                                            bytes_processed,
+                                            files_processed,
+                                        ),
                                         &server,
                                         metadata,
                                         path,
@@ -1084,8 +1089,9 @@ impl ScheduleAction {
                     return Err("file not found".into());
                 }
 
-                let progress = Arc::new(AtomicU64::new(0));
-                let total = Arc::new(AtomicU64::new(0));
+                let bytes_processed = Arc::new(AtomicU64::new(0));
+                let bytes_total = Arc::new(AtomicU64::new(0));
+                let files_processed = Arc::new(AtomicU64::new(0));
 
                 let (_, task) = server
                     .filesystem
@@ -1096,8 +1102,9 @@ impl ScheduleAction {
                             files: files.iter().map(PathBuf::from).collect(),
                             destination_path: PathBuf::from(&raw_root).join(file_name),
                             start_time: chrono::Utc::now(),
-                            progress: progress.clone(),
-                            total: total.clone(),
+                            bytes_processed: bytes_processed.clone(),
+                            bytes_total: bytes_total.clone(),
+                            files_processed: files_processed.clone(),
                         },
                         {
                             let state = state.clone();
@@ -1129,7 +1136,7 @@ impl ScheduleAction {
                                     total_size += directory_entry.size;
                                 }
 
-                                total.store(total_size, std::sync::atomic::Ordering::Relaxed);
+                                bytes_total.store(total_size, std::sync::atomic::Ordering::Relaxed);
 
                                 match format {
                                     ArchiveFormat::Tar
@@ -1144,7 +1151,7 @@ impl ScheduleAction {
                                             writer,
                                             &root,
                                             files,
-                                            Some(progress),
+                                            crate::server::filesystem::archive::create::ArchiveProgress::new(bytes_processed.clone(), files_processed.clone()),
                                             ignored.into(),
                                             crate::server::filesystem::archive::create::CreateTarOptions {
                                                 compression_type: format.compression_format(),
@@ -1164,7 +1171,7 @@ impl ScheduleAction {
                                             writer,
                                             &root,
                                             files,
-                                            Some(progress),
+                                            crate::server::filesystem::archive::create::ArchiveProgress::new(bytes_processed.clone(), files_processed.clone()),
                                             ignored.into(),
                                             crate::server::filesystem::archive::create::CreateZipOptions {
                                                 compression_level: state
@@ -1182,7 +1189,7 @@ impl ScheduleAction {
                                             writer,
                                             &root,
                                             files,
-                                            Some(progress),
+                                            crate::server::filesystem::archive::create::ArchiveProgress::new(bytes_processed.clone(), files_processed.clone()),
                                             ignored.into(),
                                             crate::server::filesystem::archive::create::Create7zOptions {
                                                 compression_level: state

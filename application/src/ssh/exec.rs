@@ -170,7 +170,7 @@ impl ExecSession {
                                 writer,
                                 base,
                                 paths,
-                                None,
+                                crate::server::filesystem::archive::create::ArchiveProgress::default(),
                                 self.server.filesystem.get_ignored().into(),
                                 crate::server::filesystem::archive::create::CreateTarOptions {
                                     compression_type: match destination

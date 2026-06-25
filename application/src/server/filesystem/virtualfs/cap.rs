@@ -12,10 +12,7 @@ use crate::{
     },
     utils::{CmpExt, PortablePermissions},
 };
-use std::{
-    path::{Path, PathBuf},
-    sync::{Arc, atomic::AtomicU64},
-};
+use std::path::{Path, PathBuf};
 use tokio::io::AsyncWriteExt;
 
 #[derive(Clone)]
@@ -407,7 +404,7 @@ impl super::VirtualReadableFilesystem for VirtualCapFilesystem {
         path: &(dyn AsRef<Path> + Send + Sync),
         archive_format: StreamableArchiveFormat,
         compression_level: CompressionLevel,
-        bytes_archived: Option<Arc<AtomicU64>>,
+        progress: crate::server::filesystem::archive::create::ArchiveProgress,
         is_ignored: IsIgnoredFn,
     ) -> Result<tokio::io::ReadHalf<tokio::io::SimplexStream>, anyhow::Error> {
         let names = self.inner.async_read_dir_all(path).await?;
@@ -439,7 +436,7 @@ impl super::VirtualReadableFilesystem for VirtualCapFilesystem {
                             writer,
                             &path,
                             names,
-                            bytes_archived,
+                            progress,
                             is_ignored,
                             crate::server::filesystem::archive::create::CreateZipOptions {
                                 compression_level,
@@ -464,7 +461,7 @@ impl super::VirtualReadableFilesystem for VirtualCapFilesystem {
                             writer,
                             &path,
                             names,
-                            bytes_archived,
+                            progress,
                             is_ignored,
                             crate::server::filesystem::archive::create::CreateTarOptions {
                                 compression_type: archive_format.compression_format(),
@@ -491,7 +488,7 @@ impl super::VirtualReadableFilesystem for VirtualCapFilesystem {
                             writer,
                             &path,
                             names,
-                            bytes_archived,
+                            progress,
                             is_ignored,
                             crate::server::filesystem::archive::create::CreateItafOptions {
                                 compression_type: archive_format.compression_format(),

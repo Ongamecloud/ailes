@@ -1,8 +1,7 @@
 use crate::{
     io::{
-        SafeDigestExt, compression::reader::CompressionReaderMt, counting_reader::CountingReader,
-        limited_reader::LimitedReader, limited_writer::LimitedWriter,
-        range_reader::AsyncRangeReader,
+        SafeDigestExt, compression::reader::CompressionReaderMt, limited_reader::LimitedReader,
+        limited_writer::LimitedWriter, range_reader::AsyncRangeReader,
     },
     remote::backups::RawServerBackup,
     response::ApiResponse,
@@ -113,7 +112,7 @@ impl BackupCreateExt for WingsBackup {
     async fn create(
         server: &crate::server::Server,
         uuid: uuid::Uuid,
-        progress: Arc<AtomicU64>,
+        progress: crate::server::filesystem::archive::create::ArchiveProgress,
         total: Arc<AtomicU64>,
         ignore: ignore::gitignore::Gitignore,
         _ignore_raw: compact_str::CompactString,
@@ -122,154 +121,155 @@ impl BackupCreateExt for WingsBackup {
         let file = tokio::fs::File::create(&file_name).await?.into_std().await;
 
         let total_task = {
-            let server = server.clone();
+            let filesystem = server.filesystem.clone();
             let ignore = ignore.clone();
+            let total = Arc::clone(&total);
 
             async move {
-                let mut walker = server
-                    .filesystem
-                    .async_walk_dir(Path::new(""))
-                    .await?
-                    .with_is_ignored(ignore.into());
-                let mut total_files = 0;
-                while let Some(Ok((_, path))) = walker.next_entry().await {
-                    let metadata = match server.filesystem.async_symlink_metadata(&path).await {
-                        Ok(metadata) => metadata,
-                        Err(_) => continue,
-                    };
+                tokio::task::spawn_blocking(move || {
+                    let mut walker = filesystem
+                        .walk_dir(Path::new(""))?
+                        .with_is_ignored(ignore.into());
+                    while let Some(Ok((_, path))) = walker.next_entry() {
+                        let metadata = match filesystem.symlink_metadata(&path) {
+                            Ok(metadata) => metadata,
+                            Err(_) => continue,
+                        };
 
-                    total.fetch_add(metadata.len(), Ordering::Relaxed);
-                    if !metadata.is_dir() {
-                        total_files += 1;
+                        total.fetch_add(metadata.len(), Ordering::Relaxed);
                     }
-                }
 
-                Ok::<_, anyhow::Error>(total_files)
+                    Ok::<_, anyhow::Error>(())
+                })
+                .await?
             }
         };
 
-        let archive_task = async move {
-            let sources = server.filesystem.async_read_dir_all(Path::new("")).await?;
-            let writer = LimitedWriter::new_with_bytes_per_second(
-                file,
-                server
+        let archive_task = {
+            let progress = progress.clone();
+            async move {
+                let sources = server.filesystem.async_read_dir_all(Path::new("")).await?;
+                let writer = LimitedWriter::new_with_bytes_per_second(
+                    file,
+                    server
+                        .app_state
+                        .config
+                        .load()
+                        .system
+                        .backups
+                        .write_limit
+                        .as_bytes(),
+                );
+
+                let file = match server
                     .app_state
                     .config
                     .load()
                     .system
                     .backups
-                    .write_limit
-                    .as_bytes(),
-            );
+                    .wings
+                    .archive_format
+                {
+                    ArchiveFormat::Tar
+                    | ArchiveFormat::TarGz
+                    | ArchiveFormat::TarXz
+                    | ArchiveFormat::TarLzip
+                    | ArchiveFormat::TarBz2
+                    | ArchiveFormat::TarLz4
+                    | ArchiveFormat::TarZstd => {
+                        crate::server::filesystem::archive::create::create_tar(
+                            server.filesystem.clone(),
+                            writer,
+                            Path::new(""),
+                            sources,
+                            progress.clone(),
+                            ignore.into(),
+                            crate::server::filesystem::archive::create::CreateTarOptions {
+                                compression_type: server
+                                    .app_state
+                                    .config
+                                    .load()
+                                    .system
+                                    .backups
+                                    .wings
+                                    .archive_format
+                                    .compression_format(),
+                                compression_level: server
+                                    .app_state
+                                    .config
+                                    .load()
+                                    .system
+                                    .backups
+                                    .compression_level,
+                                threads: server
+                                    .app_state
+                                    .config
+                                    .load()
+                                    .system
+                                    .backups
+                                    .wings
+                                    .create_threads,
+                            },
+                        )
+                        .await
+                    }
+                    ArchiveFormat::Zip => {
+                        crate::server::filesystem::archive::create::create_zip(
+                            server.filesystem.clone(),
+                            writer,
+                            Path::new(""),
+                            sources,
+                            progress.clone(),
+                            ignore.into(),
+                            crate::server::filesystem::archive::create::CreateZipOptions {
+                                compression_level: server
+                                    .app_state
+                                    .config
+                                    .load()
+                                    .system
+                                    .backups
+                                    .compression_level,
+                            },
+                        )
+                        .await
+                    }
+                    ArchiveFormat::SevenZip => {
+                        crate::server::filesystem::archive::create::create_7z(
+                            server.filesystem.clone(),
+                            writer,
+                            Path::new(""),
+                            sources,
+                            progress.clone(),
+                            ignore.into(),
+                            crate::server::filesystem::archive::create::Create7zOptions {
+                                compression_level: server
+                                    .app_state
+                                    .config
+                                    .load()
+                                    .system
+                                    .backups
+                                    .compression_level,
+                                threads: server
+                                    .app_state
+                                    .config
+                                    .load()
+                                    .system
+                                    .backups
+                                    .wings
+                                    .create_threads,
+                            },
+                        )
+                        .await
+                    }
+                }?;
 
-            let file = match server
-                .app_state
-                .config
-                .load()
-                .system
-                .backups
-                .wings
-                .archive_format
-            {
-                ArchiveFormat::Tar
-                | ArchiveFormat::TarGz
-                | ArchiveFormat::TarXz
-                | ArchiveFormat::TarLzip
-                | ArchiveFormat::TarBz2
-                | ArchiveFormat::TarLz4
-                | ArchiveFormat::TarZstd => {
-                    crate::server::filesystem::archive::create::create_tar(
-                        server.filesystem.clone(),
-                        writer,
-                        Path::new(""),
-                        sources,
-                        Some(progress),
-                        ignore.into(),
-                        crate::server::filesystem::archive::create::CreateTarOptions {
-                            compression_type: server
-                                .app_state
-                                .config
-                                .load()
-                                .system
-                                .backups
-                                .wings
-                                .archive_format
-                                .compression_format(),
-                            compression_level: server
-                                .app_state
-                                .config
-                                .load()
-                                .system
-                                .backups
-                                .compression_level,
-                            threads: server
-                                .app_state
-                                .config
-                                .load()
-                                .system
-                                .backups
-                                .wings
-                                .create_threads,
-                        },
-                    )
-                    .await
-                }
-                ArchiveFormat::Zip => {
-                    crate::server::filesystem::archive::create::create_zip(
-                        server.filesystem.clone(),
-                        writer,
-                        Path::new(""),
-                        sources,
-                        Some(progress),
-                        ignore.into(),
-                        crate::server::filesystem::archive::create::CreateZipOptions {
-                            compression_level: server
-                                .app_state
-                                .config
-                                .load()
-                                .system
-                                .backups
-                                .compression_level,
-                        },
-                    )
-                    .await
-                }
-                ArchiveFormat::SevenZip => {
-                    crate::server::filesystem::archive::create::create_7z(
-                        server.filesystem.clone(),
-                        writer,
-                        Path::new(""),
-                        sources,
-                        Some(progress),
-                        ignore.into(),
-                        crate::server::filesystem::archive::create::Create7zOptions {
-                            compression_level: server
-                                .app_state
-                                .config
-                                .load()
-                                .system
-                                .backups
-                                .compression_level,
-                            threads: server
-                                .app_state
-                                .config
-                                .load()
-                                .system
-                                .backups
-                                .wings
-                                .create_threads,
-                        },
-                    )
-                    .await
-                }
-            }?;
+                tokio::task::spawn_blocking(move || file.into_inner().sync_all()).await??;
 
-            tokio::task::spawn_blocking(move || file.into_inner().sync_all()).await??;
-
-            Ok(())
+                Ok(())
+            }
         };
 
-        let (total_files, _) = tokio::try_join!(total_task, archive_task)?;
+        tokio::try_join!(total_task, archive_task)?;
 
         let mut checksum_writer = sha2::Sha256::new();
         let mut file = tokio::fs::File::open(&file_name).await?;
@@ -294,7 +294,9 @@ impl BackupCreateExt for WingsBackup {
             checksum: hex::encode(checksum_writer.finalize()),
             checksum_type: "sha256".into(),
             size,
-            files: total_files,
+            files: progress
+                .clone_files()
+                .map_or(0, |files| files.load(Ordering::Relaxed)),
             successful: true,
             browsable: matches!(
                 server
@@ -366,7 +368,7 @@ impl BackupExt for WingsBackup {
     async fn restore(
         &self,
         server: &crate::server::Server,
-        progress: Arc<AtomicU64>,
+        progress: crate::server::filesystem::archive::create::ArchiveProgress,
         total: Arc<AtomicU64>,
         _download_url: Option<compact_str::CompactString>,
     ) -> Result<(), anyhow::Error> {
@@ -397,7 +399,7 @@ impl BackupExt for WingsBackup {
                             .read_limit
                             .as_bytes(),
                     );
-                    let reader = CountingReader::new_with_bytes_read(reader, progress);
+                    let reader = progress.counting_reader(reader);
                     let reader = CompressionReaderMt::new(
                         reader,
                         compression_type,
@@ -465,6 +467,7 @@ impl BackupExt for WingsBackup {
 
                                 crate::io::copy_shared(&mut read_buffer, &mut entry, &mut writer)?;
                                 writer.flush()?;
+                                progress.increment_files();
                             }
                             tar::EntryType::Symlink => {
                                 let link =
@@ -477,13 +480,17 @@ impl BackupExt for WingsBackup {
                                         "failed to create symlink from archive: {:#?}",
                                         err
                                     );
-                                } else if let Ok(modified_time) = header.mtime() {
-                                    server.filesystem.set_times(
-                                        destination_path,
-                                        std::time::UNIX_EPOCH
-                                            + std::time::Duration::from_secs(modified_time),
-                                        None,
-                                    )?;
+                                } else {
+                                    progress.increment_files();
+
+                                    if let Ok(modified_time) = header.mtime() {
+                                        server.filesystem.set_times(
+                                            destination_path,
+                                            std::time::UNIX_EPOCH
+                                                + std::time::Duration::from_secs(modified_time),
+                                            None,
+                                        )?;
+                                    }
                                 }
                             }
                             _ => {}
@@ -537,7 +544,7 @@ impl BackupExt for WingsBackup {
 
                         scope.spawn_broadcast(move |_, _| {
                             let mut archive = archive.clone();
-                            let progress = Arc::clone(&progress);
+                            let progress = progress.clone();
                             let entry_index = Arc::clone(&entry_index);
                             let error_clone2 = Arc::clone(&error_clone);
                             let server = server.clone();
@@ -587,10 +594,7 @@ impl BackupExt for WingsBackup {
                                             entry.unix_mode().map(PortablePermissions::from_mode),
                                             crate::server::filesystem::archive::zip_entry_get_modified_time(&entry),
                                         )?;
-                                        let mut reader = CountingReader::new_with_bytes_read(
-                                            entry,
-                                            Arc::clone(&progress),
-                                        );
+                                        let mut reader = progress.counting_reader(entry);
 
                                         if let Err(err) = crate::io::copy_shared(&mut read_buffer, &mut reader, &mut writer) {
                                             if err.kind() == std::io::ErrorKind::InvalidData {
@@ -604,6 +608,7 @@ impl BackupExt for WingsBackup {
                                             }
                                         }
                                         writer.flush()?;
+                                        progress.increment_files();
                                     } else if entry.is_symlink() && (1..=2048).contains(&entry.size()) {
                                         let link = std::io::read_to_string(&mut entry).unwrap_or_default();
 
@@ -613,12 +618,16 @@ impl BackupExt for WingsBackup {
                                                 "failed to create symlink from backup: {:#?}",
                                                 err
                                             );
-                                        } else if let Some(modified_time) = zip_entry_get_modified_time(&entry) {
-                                            server.filesystem.set_times(
-                                                &path,
-                                                modified_time,
-                                                None,
-                                            )?;
+                                        } else {
+                                            progress.increment_files();
+
+                                            if let Some(modified_time) = zip_entry_get_modified_time(&entry) {
+                                                server.filesystem.set_times(
+                                                    &path,
+                                                    modified_time,
+                                                    None,
+                                                )?;
+                                            }
                                         }
                                     }
                                 }
@@ -770,10 +779,7 @@ impl BackupExt for WingsBackup {
                                             )
                                             .map_err(|e| std::io::Error::other(e.to_string()))?;
 
-                                        let mut reader = CountingReader::new_with_bytes_read(
-                                            reader,
-                                            Arc::clone(&progress),
-                                        );
+                                        let mut reader = progress.counting_reader(reader);
 
                                         crate::io::copy_shared(
                                             &mut read_buffer,
@@ -781,6 +787,7 @@ impl BackupExt for WingsBackup {
                                             &mut writer,
                                         )?;
                                         writer.flush()?;
+                                        progress.increment_files();
                                     }
 
                                     Ok(true)

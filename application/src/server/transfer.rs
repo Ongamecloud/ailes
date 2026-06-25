@@ -195,6 +195,7 @@ pub struct OutgoingServerTransfer {
     pub bytes_archived: Arc<AtomicU64>,
     pub bytes_sent: Arc<AtomicU64>,
     pub bytes_total: Arc<AtomicU64>,
+    pub files_archived: Arc<AtomicU64>,
 
     server: super::Server,
     archive_format: TransferArchiveFormat,
@@ -212,6 +213,7 @@ impl OutgoingServerTransfer {
             bytes_archived: Arc::new(AtomicU64::new(0)),
             bytes_sent: Arc::new(AtomicU64::new(0)),
             bytes_total: Arc::new(AtomicU64::new(0)),
+            files_archived: Arc::new(AtomicU64::new(0)),
             server: server.clone(),
             archive_format,
             compression_level,
@@ -299,6 +301,7 @@ impl OutgoingServerTransfer {
         let bytes_archived = Arc::clone(&self.bytes_archived);
         let bytes_sent = Arc::clone(&self.bytes_sent);
         let bytes_total = Arc::clone(&self.bytes_total);
+        let files_archived = Arc::clone(&self.files_archived);
         let archive_format = self.archive_format;
         let compression_level = self.compression_level;
         let server = self.server.clone();
@@ -345,6 +348,7 @@ impl OutgoingServerTransfer {
             fn get_tar_archive_task(
                 files_receiver: async_channel::Receiver<PathBuf>,
                 bytes_archived: Arc<AtomicU64>,
+                files_archived: Arc<AtomicU64>,
                 server: super::Server,
                 writer: tokio_util::io::SyncIoBridge<tokio::io::WriteHalf<tokio::io::SimplexStream>>,
                 options: crate::server::filesystem::archive::create::CreateTarOptions
@@ -355,7 +359,7 @@ impl OutgoingServerTransfer {
                         writer,
                         Path::new(""),
                         files_receiver,
-                        Some(Arc::clone(&bytes_archived)),
+                        crate::server::filesystem::archive::create::ArchiveProgress::new(bytes_archived, files_archived),
                         options,
                     )
                     .await?;
@@ -369,6 +373,7 @@ impl OutgoingServerTransfer {
             fn get_itaf_archive_task(
                 files_receiver: async_channel::Receiver<PathBuf>,
                 bytes_archived: Arc<AtomicU64>,
+                files_archived: Arc<AtomicU64>,
                 server: super::Server,
                 writer: tokio_util::io::SyncIoBridge<tokio::io::WriteHalf<tokio::io::SimplexStream>>,
                 options: crate::server::filesystem::archive::create::CreateItafOptions
@@ -379,7 +384,7 @@ impl OutgoingServerTransfer {
                         writer,
                         Path::new(""),
                         files_receiver,
-                        Some(Arc::clone(&bytes_archived)),
+                        crate::server::filesystem::archive::create::ArchiveProgress::new(bytes_archived, files_archived),
                         options,
                     )
                     .await?;
@@ -395,6 +400,7 @@ impl OutgoingServerTransfer {
                     get_tar_archive_task(
                         files_receiver.clone(),
                         Arc::clone(&bytes_archived),
+                        Arc::clone(&files_archived),
                         server.clone(),
                         writer,
                         crate::server::filesystem::archive::create::CreateTarOptions {
@@ -407,6 +413,7 @@ impl OutgoingServerTransfer {
                     get_itaf_archive_task(
                         files_receiver.clone(),
                         Arc::clone(&bytes_archived),
+                        Arc::clone(&files_archived),
                         server.clone(),
                         writer,
                         crate::server::filesystem::archive::create::CreateItafOptions {
@@ -539,6 +546,7 @@ impl OutgoingServerTransfer {
             let progress_task = Box::pin({
                 let bytes_archived = Arc::clone(&bytes_archived);
                 let bytes_sent = Arc::clone(&bytes_sent);
+                let files_archived = Arc::clone(&files_archived);
                 let bytes_total = bytes_total.load(Ordering::Relaxed);
                 let server = server.clone();
 
@@ -557,6 +565,7 @@ impl OutgoingServerTransfer {
 
                         let current_bytes_archived = bytes_archived.load(Ordering::SeqCst);
                         let current_bytes_sent = bytes_sent.load(Ordering::SeqCst);
+                        let current_files_archived = files_archived.load(Ordering::SeqCst);
 
                         history.push_back((now, current_bytes_archived));
                         while let Some(&(t, _)) = history.front() {
@@ -643,12 +652,13 @@ impl OutgoingServerTransfer {
                         };
 
                         let progress_log = format!(
-                            "{} - ETA: {}\r\nArchive: {} of {} ({}/s) - Elapsed: {}\r\nNetwork: {} sent ({}/s)",
+                            "{} - ETA: {}\r\nArchive: {} of {} ({}/s) - {} files - Elapsed: {}\r\nNetwork: {} sent ({}/s)",
                             crate::utils::draw_progress_bar(30, current_bytes_archived as f64, bytes_total as f64),
                             time_estimate,
                             formatted_bytes_archived,
                             formatted_bytes_total,
                             formatted_archive_rate,
+                            current_files_archived,
                             elapsed_time,
                             formatted_bytes_sent,
                             formatted_network_rate
@@ -663,9 +673,10 @@ impl OutgoingServerTransfer {
                                     super::websocket::WebsocketEvent::ServerTransferProgress,
                                 )
                                 .structured_arg(crate::models::TransferProgress {
-                                    archive_progress: current_bytes_archived,
-                                    network_progress: current_bytes_sent,
-                                    total: bytes_total,
+                                    archive_bytes_processed: current_bytes_archived,
+                                    network_bytes_processed: current_bytes_sent,
+                                    bytes_total,
+                                    files_processed: current_files_archived,
                                 })
                                 .build(),
                             )
@@ -673,11 +684,12 @@ impl OutgoingServerTransfer {
 
                         tracing::debug!(
                             server = %server.uuid,
-                            "Progress: {}, Archive: {} of {} ({}/s), Network: {} ({}/s), ETA: {}",
+                            "Progress: {}, Archive: {} of {} ({}/s, {} files), Network: {} ({}/s), ETA: {}",
                             formatted_archive_percentage,
                             formatted_bytes_archived,
                             formatted_bytes_total,
                             formatted_archive_rate,
+                            current_files_archived,
                             formatted_bytes_sent,
                             formatted_network_rate,
                             time_estimate

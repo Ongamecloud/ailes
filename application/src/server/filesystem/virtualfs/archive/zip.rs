@@ -2,7 +2,6 @@ use crate::{
     io::{
         SafeAsyncWriteExt, SafeSliceExt, UninterruptedReadExt,
         compression::{CompressionLevel, writer::CompressionWriter},
-        counting_reader::CountingReader,
     },
     models::DirectoryEntry,
     routes::MimeCacheValue,
@@ -26,10 +25,7 @@ use itaf::encoder::{EncoderOptions, ItafEncoder, Metadata};
 use std::{
     io::{Read, Seek, Write},
     path::{Path, PathBuf},
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::Arc,
 };
 use tokio::io::AsyncWriteExt;
 
@@ -896,7 +892,7 @@ impl VirtualReadableFilesystem for VirtualZipArchive {
         path: &(dyn AsRef<Path> + Send + Sync),
         archive_format: StreamableArchiveFormat,
         compression_level: CompressionLevel,
-        bytes_archived: Option<Arc<AtomicU64>>,
+        progress: crate::server::filesystem::archive::create::ArchiveProgress,
         is_ignored: IsIgnoredFn,
     ) -> Result<tokio::io::ReadHalf<tokio::io::SimplexStream>, anyhow::Error> {
         let mut archive = self.archive.clone();
@@ -940,9 +936,8 @@ impl VirtualReadableFilesystem for VirtualZipArchive {
                         } else {
                             let entry_size = entry.size();
                             zip.raw_copy_file_to_path(entry, name)?;
-                            if let Some(bytes_archived) = &bytes_archived {
-                                bytes_archived.fetch_add(entry_size, Ordering::SeqCst);
-                            }
+                            progress.increment_bytes(entry_size);
+                            progress.increment_files();
                         }
                     }
 
@@ -1018,22 +1013,16 @@ impl VirtualReadableFilesystem for VirtualZipArchive {
                             entry_header.set_entry_type(tar::EntryType::Regular);
                             entry_header.set_size(entry.size());
 
-                            let reader: Box<dyn Read> = match &bytes_archived {
-                                Some(bytes_archived) => {
-                                    Box::new(CountingReader::new_with_bytes_read(
-                                        entry,
-                                        Arc::clone(bytes_archived),
-                                    ))
-                                }
-                                None => Box::new(entry),
-                            };
+                            let reader = progress.counting_reader(entry);
 
                             tar.append_data(&mut entry_header, name, reader)?;
+                            progress.increment_files();
                         } else if entry.is_symlink() && (1..=2048).contains(&entry.size()) {
                             entry_header.set_entry_type(tar::EntryType::Symlink);
 
                             let link_name = std::io::read_to_string(entry)?;
                             tar.append_link(&mut entry_header, name, link_name)?;
+                            progress.increment_files();
                         }
                     }
 
@@ -1146,21 +1135,17 @@ impl VirtualReadableFilesystem for VirtualZipArchive {
                             let link_target = std::io::read_to_string(entry)?;
                             if itaf::spec::validate_name(name).is_ok() {
                                 itaf_enc.add_symlink(name, &link_target, false, &meta)?;
+                                progress.increment_files();
                             }
                         } else if entry.is_file() {
-                            let reader: Box<dyn Read> = match &bytes_archived {
-                                Some(ba) => Box::new(CountingReader::new_with_bytes_read(
-                                    entry,
-                                    Arc::clone(ba),
-                                )),
-                                None => Box::new(entry),
-                            };
+                            let reader = progress.counting_reader(entry);
                             let mut reader =
                                 crate::io::fixed_reader::FixedReader::new_with_fixed_bytes(
                                     reader,
                                     size as usize,
                                 );
                             itaf_enc.add_file(name, &meta, size, &mut { reader })?;
+                            progress.increment_files();
                         }
                     }
 

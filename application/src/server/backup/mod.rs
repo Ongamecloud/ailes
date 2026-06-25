@@ -74,7 +74,7 @@ impl Backup {
     pub async fn restore(
         &self,
         server: &crate::server::Server,
-        progress: Arc<AtomicU64>,
+        progress: crate::server::filesystem::archive::create::ArchiveProgress,
         total: Arc<AtomicU64>,
         download_url: Option<compact_str::CompactString>,
     ) -> Result<(), anyhow::Error> {
@@ -136,7 +136,7 @@ pub trait BackupCreateExt {
     async fn create(
         server: &crate::server::Server,
         uuid: uuid::Uuid,
-        progress: Arc<AtomicU64>,
+        progress: crate::server::filesystem::archive::create::ArchiveProgress,
         total: Arc<AtomicU64>,
         ignore: ignore::gitignore::Gitignore,
         ignore_raw: compact_str::CompactString,
@@ -157,7 +157,7 @@ pub trait BackupExt {
     async fn restore(
         &self,
         server: &crate::server::Server,
-        progress: Arc<AtomicU64>,
+        progress: crate::server::filesystem::archive::create::ArchiveProgress,
         total: Arc<AtomicU64>,
         download_url: Option<compact_str::CompactString>,
     ) -> Result<(), anyhow::Error>;

@@ -2,7 +2,6 @@ use crate::{
     io::{
         SafeAsyncWriteExt, UninterruptedReadExt,
         compression::{CompressionLevel, writer::CompressionWriter},
-        counting_reader::CountingReader,
         fixed_reader::FixedReader,
     },
     models::DirectoryEntry,
@@ -25,9 +24,9 @@ use ddup_bak::archive::entries::Entry;
 use itaf::encoder::{EncoderOptions, ItafEncoder, Metadata};
 use std::{
     collections::VecDeque,
-    io::{Read, Write},
+    io::Write,
     path::{Path, PathBuf},
-    sync::{Arc, atomic::AtomicU64},
+    sync::Arc,
 };
 use tokio::io::AsyncWriteExt;
 
@@ -318,7 +317,7 @@ impl VirtualDdupBakArchive {
         repository: &Option<Arc<ddup_bak::repository::Repository>>,
         archive: &mut tar::Builder<impl Write + 'static>,
         parent_path: &Path,
-        bytes_archived: &Option<Arc<AtomicU64>>,
+        progress: &crate::server::filesystem::archive::create::ArchiveProgress,
         is_ignored: &IsIgnoredFn,
     ) -> Result<(), anyhow::Error> {
         let mut stack: Vec<(PathBuf, &Entry)> = vec![(parent_path.to_path_buf(), entry)];
@@ -354,21 +353,18 @@ impl VirtualDdupBakArchive {
                     entry_header.set_entry_type(tar::EntryType::Regular);
                     entry_header.set_size(file.size_real);
 
-                    let reader: Box<dyn Read> = match &bytes_archived {
-                        Some(bytes_archived) => Box::new(CountingReader::new_with_bytes_read(
-                            repository.entry_reader(Entry::File(file.clone()))?,
-                            Arc::clone(bytes_archived),
-                        )),
-                        None => Box::new(repository.entry_reader(Entry::File(file.clone()))?),
-                    };
+                    let reader = progress
+                        .counting_reader(repository.entry_reader(Entry::File(file.clone()))?);
                     let reader = FixedReader::new_with_fixed_bytes(reader, file.size_real as usize);
 
                     archive.append_data(&mut entry_header, &path, reader)?;
+                    progress.increment_files();
                 }
                 Entry::Symlink(link) => {
                     entry_header.set_entry_type(tar::EntryType::Symlink);
 
                     archive.append_link(&mut entry_header, &path, &link.target)?;
+                    progress.increment_files();
                 }
             }
         }
@@ -381,7 +377,7 @@ impl VirtualDdupBakArchive {
         repository: &Option<Arc<ddup_bak::repository::Repository>>,
         itaf_enc: &mut ItafEncoder<W>,
         parent_path: &Path,
-        bytes_archived: &Option<Arc<AtomicU64>>,
+        progress: &crate::server::filesystem::archive::create::ArchiveProgress,
         is_ignored: &IsIgnoredFn,
     ) -> Result<(), anyhow::Error> {
         enum Work<'a> {
@@ -443,21 +439,18 @@ impl VirtualDdupBakArchive {
                 }
                 Entry::File(file) => {
                     if itaf::spec::validate_name(&name).is_ok() {
-                        let reader: Box<dyn Read> = match bytes_archived {
-                            Some(ba) => Box::new(CountingReader::new_with_bytes_read(
-                                repository.entry_reader(Entry::File(file.clone()))?,
-                                Arc::clone(ba),
-                            )),
-                            None => Box::new(repository.entry_reader(Entry::File(file.clone()))?),
-                        };
+                        let reader = progress
+                            .counting_reader(repository.entry_reader(Entry::File(file.clone()))?);
                         let mut reader =
                             FixedReader::new_with_fixed_bytes(reader, file.size_real as usize);
                         itaf_enc.add_file(&name, &meta, file.size_real, &mut { reader })?;
+                        progress.increment_files();
                     }
                 }
                 Entry::Symlink(link) => {
                     if itaf::spec::validate_name(&name).is_ok() {
                         itaf_enc.add_symlink(&name, &link.target, false, &meta)?;
+                        progress.increment_files();
                     }
                 }
             }
@@ -476,7 +469,7 @@ impl VirtualDdupBakArchive {
         >,
         compression_level: CompressionLevel,
         parent_path: &Path,
-        bytes_archived: &Option<Arc<AtomicU64>>,
+        progress: &crate::server::filesystem::archive::create::ArchiveProgress,
         is_ignored: &IsIgnoredFn,
     ) -> Result<(), anyhow::Error> {
         let mut stack: Vec<(PathBuf, &Entry)> = vec![(parent_path.to_path_buf(), entry)];
@@ -519,21 +512,18 @@ impl VirtualDdupBakArchive {
                     }
                 }
                 Entry::File(file) => {
-                    let reader: Box<dyn Read> = match &bytes_archived {
-                        Some(bytes_archived) => Box::new(CountingReader::new_with_bytes_read(
-                            repository.entry_reader(Entry::File(file.clone()))?,
-                            Arc::clone(bytes_archived),
-                        )),
-                        None => Box::new(repository.entry_reader(Entry::File(file.clone()))?),
-                    };
+                    let reader = progress
+                        .counting_reader(repository.entry_reader(Entry::File(file.clone()))?);
                     let mut reader =
                         FixedReader::new_with_fixed_bytes(reader, file.size_real as usize);
 
                     zip.start_file(path.to_string_lossy(), options)?;
                     crate::io::copy(&mut reader, zip)?;
+                    progress.increment_files();
                 }
                 Entry::Symlink(link) => {
                     zip.add_symlink(&link.name, &link.target, options)?;
+                    progress.increment_files();
                 }
             }
         }
@@ -956,7 +946,7 @@ impl VirtualReadableFilesystem for VirtualDdupBakArchive {
         path: &(dyn AsRef<Path> + Send + Sync),
         archive_format: StreamableArchiveFormat,
         compression_level: CompressionLevel,
-        bytes_archived: Option<Arc<AtomicU64>>,
+        progress: crate::server::filesystem::archive::create::ArchiveProgress,
         is_ignored: IsIgnoredFn,
     ) -> Result<tokio::io::ReadHalf<tokio::io::SimplexStream>, anyhow::Error> {
         let archive = self.archive.clone();
@@ -990,7 +980,7 @@ impl VirtualReadableFilesystem for VirtualDdupBakArchive {
                                     &mut zip,
                                     compression_level,
                                     Path::new(""),
-                                    &bytes_archived,
+                                    &progress,
                                     &is_ignored,
                                 )?;
                             }
@@ -1004,7 +994,7 @@ impl VirtualReadableFilesystem for VirtualDdupBakArchive {
                                         &mut zip,
                                         compression_level,
                                         Path::new(""),
-                                        &bytes_archived,
+                                        &progress,
                                         &is_ignored,
                                     )?;
                                 }
@@ -1054,7 +1044,7 @@ impl VirtualReadableFilesystem for VirtualDdupBakArchive {
                                     &repository,
                                     &mut tar,
                                     Path::new(""),
-                                    &bytes_archived,
+                                    &progress,
                                     &is_ignored,
                                 )?;
                             }
@@ -1067,7 +1057,7 @@ impl VirtualReadableFilesystem for VirtualDdupBakArchive {
                                         &repository,
                                         &mut tar,
                                         Path::new(""),
-                                        &bytes_archived,
+                                        &progress,
                                         &is_ignored,
                                     )?;
                                 }
@@ -1123,7 +1113,7 @@ impl VirtualReadableFilesystem for VirtualDdupBakArchive {
                                     &repository,
                                     &mut itaf_enc,
                                     Path::new(""),
-                                    &bytes_archived,
+                                    &progress,
                                     &is_ignored,
                                 )?;
                             }
@@ -1136,7 +1126,7 @@ impl VirtualReadableFilesystem for VirtualDdupBakArchive {
                                         &repository,
                                         &mut itaf_enc,
                                         Path::new(""),
-                                        &bytes_archived,
+                                        &progress,
                                         &is_ignored,
                                     )?;
                                 }

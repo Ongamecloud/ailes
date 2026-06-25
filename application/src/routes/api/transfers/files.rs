@@ -29,7 +29,10 @@ mod post {
         io::Write,
         path::{Path, PathBuf},
         str::FromStr,
-        sync::{Arc, atomic::AtomicU64},
+        sync::{
+            Arc,
+            atomic::{AtomicU64, Ordering},
+        },
     };
     use utoipa::ToSchema;
 
@@ -129,6 +132,7 @@ mod post {
 
         let progress = Arc::new(AtomicU64::new(0));
         let total = Arc::new(AtomicU64::new(total_bytes));
+        let files_processed = Arc::new(AtomicU64::new(0));
 
         let (root, filesystem) = server
             .filesystem
@@ -148,14 +152,16 @@ mod post {
                     destination_server: server.uuid,
                     destination_path: PathBuf::from(&payload.destination_path),
                     start_time: chrono::Utc::now(),
-                    progress: progress.clone(),
-                    total: total.clone(),
+                    bytes_processed: progress.clone(),
+                    bytes_total: total.clone(),
+                    files_processed: files_processed.clone(),
                 },
                 {
                     let runtime = tokio::runtime::Handle::current();
                     let server = server.clone();
                     let filesystem = filesystem.clone();
                     let state = state.clone();
+                    let files_processed = files_processed.clone();
 
                     async move {
                         tokio::task::spawn_blocking(move || {
@@ -246,6 +252,8 @@ mod post {
                                                             &mut writer,
                                                         )?;
                                                         writer.flush()?;
+                                                        files_processed
+                                                            .fetch_add(1, Ordering::Relaxed);
                                                     }
                                                     itaf::decoder::ArchiveEntry::Symlink(sym) => {
                                                         let target = sym.target().to_path_buf();
@@ -260,6 +268,9 @@ mod post {
                                                                 "failed to create symlink from itaf archive: {:#?}",
                                                                 err
                                                             );
+                                                        } else {
+                                                            files_processed
+                                                                .fetch_add(1, Ordering::Relaxed);
                                                         }
                                                     }
                                                     _ => {}
@@ -327,6 +338,7 @@ mod post {
                                                             &mut writer,
                                                         )?;
                                                         writer.flush()?;
+                                                        files_processed.fetch_add(1, Ordering::Relaxed);
                                                     }
                                                     tar::EntryType::Symlink => {
                                                         let link = entry
@@ -342,6 +354,8 @@ mod post {
                                                                 "failed to create symlink from archive: {:#?}",
                                                                 err
                                                             );
+                                                        } else {
+                                                            files_processed.fetch_add(1, Ordering::Relaxed);
                                                         }
                                                     }
                                                     _ => {}

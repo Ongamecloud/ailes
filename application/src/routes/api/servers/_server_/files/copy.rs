@@ -161,8 +161,14 @@ mod post {
             .filesystem
             .relative_path(&destination_path.join(&new_name));
 
-        let progress = Arc::new(AtomicU64::new(0));
-        let total = Arc::new(AtomicU64::new(metadata.size));
+        let total_size = match filesystem.async_directory_entry_buffer(&path, &[]).await {
+            Ok(entry) => entry.size,
+            Err(_) => metadata.size,
+        };
+
+        let bytes_processed = Arc::new(AtomicU64::new(0));
+        let bytes_total = Arc::new(AtomicU64::new(total_size));
+        let files_processed = Arc::new(AtomicU64::new(0));
 
         let (identifier, task) = server
             .filesystem
@@ -172,8 +178,9 @@ mod post {
                     path: path.clone(),
                     destination_path: file_name,
                     start_time: chrono::Utc::now(),
-                    progress: progress.clone(),
-                    total: total.clone(),
+                    bytes_processed: bytes_processed.clone(),
+                    bytes_total: bytes_total.clone(),
+                    files_processed: files_processed.clone(),
                 },
                 {
                     let server = server.clone();
@@ -184,7 +191,10 @@ mod post {
                         server
                             .filesystem
                             .copy_path(
-                                progress,
+                                crate::server::filesystem::archive::create::ArchiveProgress::new(
+                                    bytes_processed,
+                                    files_processed,
+                                ),
                                 &server,
                                 metadata,
                                 path,

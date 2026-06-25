@@ -12,7 +12,6 @@ use crate::{
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
-    sync::{Arc, atomic::AtomicU64},
 };
 
 pub struct MountInfo {
@@ -293,7 +292,7 @@ impl VirtualReadableFilesystem for VirtualMountFilesystem {
         path: &(dyn AsRef<Path> + Send + Sync),
         archive_format: StreamableArchiveFormat,
         compression_level: CompressionLevel,
-        bytes_archived: Option<Arc<AtomicU64>>,
+        progress: crate::server::filesystem::archive::create::ArchiveProgress,
         is_ignored: IsIgnoredFn,
     ) -> Result<tokio::io::ReadHalf<tokio::io::SimplexStream>, anyhow::Error> {
         self.inner
@@ -301,7 +300,7 @@ impl VirtualReadableFilesystem for VirtualMountFilesystem {
                 path,
                 archive_format,
                 compression_level,
-                bytes_archived,
+                progress,
                 is_ignored,
             )
             .await

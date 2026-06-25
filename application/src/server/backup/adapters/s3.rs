@@ -2,7 +2,6 @@ use crate::{
     io::{
         SafeAsyncWriteExt, SafeDigestExt, SafeSliceMutExt,
         compression::{CompressionType, reader::CompressionReader},
-        counting_reader::CountingReader,
         limited_reader::{AsyncLimitedReader, LimitedReader},
         limited_writer::LimitedWriter,
     },
@@ -164,7 +163,7 @@ impl S3Backup {
     async fn create_streaming(
         server: &crate::server::Server,
         uuid: uuid::Uuid,
-        progress: Arc<AtomicU64>,
+        progress: crate::server::filesystem::archive::create::ArchiveProgress,
         total: Arc<AtomicU64>,
         ignore: ignore::gitignore::Gitignore,
         part_size: u64,
@@ -237,7 +236,7 @@ impl S3Backup {
         let archive_task = {
             let server = server.clone();
             let ignore = ignore.clone();
-            let progress = Arc::clone(&progress);
+            let progress = progress.clone();
 
             async move {
                 let sources = server.filesystem.async_read_dir_all(Path::new("")).await?;
@@ -259,7 +258,7 @@ impl S3Backup {
                     writer,
                     Path::new(""),
                     sources,
-                    Some(Arc::clone(&progress)),
+                    progress.clone(),
                     ignore.into(),
                     crate::server::filesystem::archive::create::CreateTarOptions {
                         compression_type: ArchiveFormat::from_str(
@@ -410,7 +409,7 @@ impl S3Backup {
     async fn create_buffered(
         server: &crate::server::Server,
         uuid: uuid::Uuid,
-        progress: Arc<AtomicU64>,
+        progress: crate::server::filesystem::archive::create::ArchiveProgress,
         total: Arc<AtomicU64>,
         ignore: ignore::gitignore::Gitignore,
     ) -> Result<RawServerBackup, anyhow::Error> {
@@ -491,7 +490,7 @@ impl S3Backup {
                 writer,
                 Path::new(""),
                 sources,
-                Some(Arc::clone(&progress)),
+                progress.clone(),
                 ignore.into(),
                 crate::server::filesystem::archive::create::CreateTarOptions {
                     compression_type: CompressionType::Gz,
@@ -671,7 +670,7 @@ impl BackupCreateExt for S3Backup {
     async fn create(
         server: &crate::server::Server,
         uuid: uuid::Uuid,
-        progress: Arc<AtomicU64>,
+        progress: crate::server::filesystem::archive::create::ArchiveProgress,
         total: Arc<AtomicU64>,
         ignore: ignore::gitignore::Gitignore,
         _ignore_raw: compact_str::CompactString,
@@ -725,7 +724,7 @@ impl BackupExt for S3Backup {
     async fn restore(
         &self,
         server: &crate::server::Server,
-        progress: Arc<AtomicU64>,
+        progress: crate::server::filesystem::archive::create::ArchiveProgress,
         total: Arc<AtomicU64>,
         download_url: Option<compact_str::CompactString>,
     ) -> Result<(), anyhow::Error> {
@@ -765,7 +764,7 @@ impl BackupExt for S3Backup {
                 reader,
                 server.app_state.config.load().system.backups.read_limit.as_bytes(),
             );
-            let reader = CountingReader::new_with_bytes_read(reader, progress);
+            let reader = progress.counting_reader(reader);
             let reader = CompressionReader::new(
                 reader,
                 ArchiveFormat::from_str(url.path_segments().and_then(|mut segments| segments.next_back()).unwrap_or_default())
@@ -824,21 +823,27 @@ impl BackupExt for S3Backup {
 
                         crate::io::copy_shared(&mut read_buffer, &mut entry, &mut writer)?;
                         writer.flush()?;
+
+                        progress.increment_files();
                     }
                     tar::EntryType::Symlink => {
                         let link = entry.link_name().unwrap_or_default().unwrap_or_default();
 
                         if let Err(err) = server.filesystem.symlink(link, path.as_ref()) {
                             tracing::debug!(path = %path.display(), "failed to create symlink from backup: {:?}", err);
-                        } else if let Ok(modified_time) = header.mtime() {
-                            server
-                                .filesystem
-                                .set_times(
-                                    path.as_ref(),
-                                    std::time::UNIX_EPOCH
-                                        + std::time::Duration::from_secs(modified_time),
-                                    None,
-                                )?;
+                        } else {
+                            progress.increment_files();
+
+                            if let Ok(modified_time) = header.mtime() {
+                                server
+                                    .filesystem
+                                    .set_times(
+                                        path.as_ref(),
+                                        std::time::UNIX_EPOCH
+                                            + std::time::Duration::from_secs(modified_time),
+                                        None,
+                                    )?;
+                            }
                         }
                     }
                     _ => {}

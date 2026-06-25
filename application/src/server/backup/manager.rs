@@ -85,16 +85,19 @@ impl BackupManager {
 
         let progress = Arc::new(AtomicU64::new(0));
         let total = Arc::new(AtomicU64::new(0));
+        let files = Arc::new(AtomicU64::new(0));
 
         let progress_task = tokio::spawn({
             let progress = Arc::clone(&progress);
             let total = Arc::clone(&total);
+            let files = Arc::clone(&files);
             let server = server.clone();
 
             async move {
                 loop {
                     let progress = progress.load(Ordering::SeqCst);
                     let total = total.load(Ordering::SeqCst);
+                    let files = files.load(Ordering::SeqCst);
 
                     server
                         .websocket
@@ -103,7 +106,11 @@ impl BackupManager {
                                 crate::server::websocket::WebsocketEvent::ServerBackupProgress,
                             )
                             .arg(uuid.to_compact_string())
-                            .structured_arg(crate::models::Progress { progress, total })
+                            .structured_arg(crate::models::BackupProgress {
+                                bytes_processed: progress,
+                                bytes_total: total,
+                                files_processed: files,
+                            })
                             .build(),
                         )
                         .ok();
@@ -129,7 +136,10 @@ impl BackupManager {
             .create(
                 server,
                 uuid,
-                Arc::clone(&progress),
+                crate::server::filesystem::archive::create::ArchiveProgress::new(
+                    Arc::clone(&progress),
+                    Arc::clone(&files),
+                ),
                 Arc::clone(&total),
                 ignore_builder.build()?,
                 ignore_raw,
@@ -276,16 +286,19 @@ impl BackupManager {
 
         let progress = Arc::new(AtomicU64::new(0));
         let total = Arc::new(AtomicU64::new(1));
+        let files = Arc::new(AtomicU64::new(0));
 
         let progress_task = tokio::spawn({
             let progress = Arc::clone(&progress);
             let total = Arc::clone(&total);
+            let files = Arc::clone(&files);
             let server = server.clone();
 
             async move {
                 loop {
                     let progress_value = progress.load(Ordering::SeqCst);
                     let total_value = total.load(Ordering::SeqCst);
+                    let files_value = files.load(Ordering::SeqCst);
 
                     server
                         .websocket
@@ -293,9 +306,10 @@ impl BackupManager {
                             crate::server::websocket::WebsocketMessage::builder(
                                 crate::server::websocket::WebsocketEvent::ServerBackupRestoreProgress,
                             )
-                            .structured_arg(crate::models::Progress {
-                                progress: progress_value,
-                                total: total_value,
+                            .structured_arg(crate::models::BackupProgress {
+                                bytes_processed: progress_value,
+                                bytes_total: total_value,
+                                files_processed: files_value,
                             })
                             .build(),
                         )
@@ -316,7 +330,10 @@ impl BackupManager {
         match backup
             .restore(
                 server,
-                Arc::clone(&progress),
+                crate::server::filesystem::archive::create::ArchiveProgress::new(
+                    Arc::clone(&progress),
+                    Arc::clone(&files),
+                ),
                 Arc::clone(&total),
                 download_url,
             )

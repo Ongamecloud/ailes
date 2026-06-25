@@ -29,10 +29,13 @@ pub enum FilesystemOperation {
         start_time: chrono::DateTime<chrono::Utc>,
         #[serde(serialize_with = "serialize_arc")]
         #[schema(value_type = u64)]
-        progress: Arc<AtomicU64>,
+        bytes_processed: Arc<AtomicU64>,
         #[serde(serialize_with = "serialize_arc")]
         #[schema(value_type = u64)]
-        total: Arc<AtomicU64>,
+        bytes_total: Arc<AtomicU64>,
+        #[serde(serialize_with = "serialize_arc")]
+        #[schema(value_type = u64)]
+        files_processed: Arc<AtomicU64>,
     },
     Decompress {
         #[schema(value_type = String)]
@@ -43,10 +46,10 @@ pub enum FilesystemOperation {
         start_time: chrono::DateTime<chrono::Utc>,
         #[serde(serialize_with = "serialize_arc")]
         #[schema(value_type = u64)]
-        progress: Arc<AtomicU64>,
+        bytes_processed: Arc<AtomicU64>,
         #[serde(serialize_with = "serialize_arc")]
         #[schema(value_type = u64)]
-        total: Arc<AtomicU64>,
+        bytes_total: Arc<AtomicU64>,
     },
     Pull {
         #[schema(value_type = String)]
@@ -55,10 +58,10 @@ pub enum FilesystemOperation {
         start_time: chrono::DateTime<chrono::Utc>,
         #[serde(serialize_with = "serialize_arc")]
         #[schema(value_type = u64)]
-        progress: Arc<AtomicU64>,
+        bytes_processed: Arc<AtomicU64>,
         #[serde(serialize_with = "serialize_arc")]
         #[schema(value_type = u64)]
-        total: Arc<AtomicU64>,
+        bytes_total: Arc<AtomicU64>,
     },
     Copy {
         #[schema(value_type = String)]
@@ -69,10 +72,13 @@ pub enum FilesystemOperation {
         start_time: chrono::DateTime<chrono::Utc>,
         #[serde(serialize_with = "serialize_arc")]
         #[schema(value_type = u64)]
-        progress: Arc<AtomicU64>,
+        bytes_processed: Arc<AtomicU64>,
         #[serde(serialize_with = "serialize_arc")]
         #[schema(value_type = u64)]
-        total: Arc<AtomicU64>,
+        bytes_total: Arc<AtomicU64>,
+        #[serde(serialize_with = "serialize_arc")]
+        #[schema(value_type = u64)]
+        files_processed: Arc<AtomicU64>,
     },
     CopyMany {
         #[schema(value_type = String)]
@@ -82,10 +88,13 @@ pub enum FilesystemOperation {
         start_time: chrono::DateTime<chrono::Utc>,
         #[serde(serialize_with = "serialize_arc")]
         #[schema(value_type = u64)]
-        progress: Arc<AtomicU64>,
+        bytes_processed: Arc<AtomicU64>,
         #[serde(serialize_with = "serialize_arc")]
         #[schema(value_type = u64)]
-        total: Arc<AtomicU64>,
+        bytes_total: Arc<AtomicU64>,
+        #[serde(serialize_with = "serialize_arc")]
+        #[schema(value_type = u64)]
+        files_processed: Arc<AtomicU64>,
     },
     CopyRemote {
         server: uuid::Uuid,
@@ -100,10 +109,13 @@ pub enum FilesystemOperation {
         start_time: chrono::DateTime<chrono::Utc>,
         #[serde(serialize_with = "serialize_arc")]
         #[schema(value_type = u64)]
-        progress: Arc<AtomicU64>,
+        bytes_processed: Arc<AtomicU64>,
         #[serde(serialize_with = "serialize_arc")]
         #[schema(value_type = u64)]
-        total: Arc<AtomicU64>,
+        bytes_total: Arc<AtomicU64>,
+        #[serde(serialize_with = "serialize_arc")]
+        #[schema(value_type = u64)]
+        files_processed: Arc<AtomicU64>,
     },
 }
 

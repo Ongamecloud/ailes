@@ -2,7 +2,6 @@ use crate::{
     io::{
         SafeAsyncWriteExt, SafeSliceExt, SafeWriteExt, UninterruptedReadExt,
         compression::{CompressionLevel, writer::CompressionWriter},
-        counting_reader::CountingReader,
     },
     models::{DirectoryEntry, DirectorySortingMode},
     routes::MimeCacheValue,
@@ -26,10 +25,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     io::{Read, Write},
     path::{Path, PathBuf},
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::Arc,
 };
 use tokio::io::AsyncWriteExt;
 
@@ -1058,7 +1054,7 @@ impl VirtualReadableFilesystem for VirtualSevenZipArchive {
         path: &(dyn AsRef<Path> + Send + Sync),
         archive_format: StreamableArchiveFormat,
         compression_level: CompressionLevel,
-        bytes_archived: Option<Arc<AtomicU64>>,
+        progress: crate::server::filesystem::archive::create::ArchiveProgress,
         is_ignored: IsIgnoredFn,
     ) -> Result<tokio::io::ReadHalf<tokio::io::SimplexStream>, anyhow::Error> {
         let archive = self.archive.clone();
@@ -1122,6 +1118,8 @@ impl VirtualReadableFilesystem for VirtualSevenZipArchive {
                         } else {
                             zip.start_file(name.to_string_lossy(), zip_options)?;
 
+                            progress.increment_files();
+
                             if let Some(Some(block_index)) =
                                 archive.stream_map.file_block_index.get(i)
                             {
@@ -1145,9 +1143,7 @@ impl VirtualReadableFilesystem for VirtualSevenZipArchive {
 
                                         crate::io::copy_shared(&mut read_buffer, reader, &mut zip)?;
 
-                                        if let Some(bytes_archived) = &bytes_archived {
-                                            bytes_archived.fetch_add(entry_size, Ordering::SeqCst);
-                                        }
+                                        progress.increment_bytes(entry_size);
 
                                         Ok(false)
                                     })
@@ -1218,6 +1214,8 @@ impl VirtualReadableFilesystem for VirtualSevenZipArchive {
                             entry_header.set_entry_type(tar::EntryType::Regular);
                             entry_header.set_size(entry.size);
 
+                            progress.increment_files();
+
                             if let Some(Some(block_index)) =
                                 archive.stream_map.file_block_index.get(i)
                             {
@@ -1237,15 +1235,7 @@ impl VirtualReadableFilesystem for VirtualSevenZipArchive {
                                             return Ok(true);
                                         }
 
-                                        let reader: Box<dyn Read> = match &bytes_archived {
-                                            Some(bytes_archived) => {
-                                                Box::new(CountingReader::new_with_bytes_read(
-                                                    reader,
-                                                    Arc::clone(bytes_archived),
-                                                ))
-                                            }
-                                            None => Box::new(reader),
-                                        };
+                                        let reader = progress.counting_reader(reader);
 
                                         tar.append_data(&mut entry_header, name, reader)?;
 
@@ -1365,6 +1355,8 @@ impl VirtualReadableFilesystem for VirtualSevenZipArchive {
                         };
                         let size = entry.size;
 
+                        progress.increment_files();
+
                         if let Some(Some(block_index)) =
                             archive.stream_map.file_block_index.get(entry_index)
                         {
@@ -1384,13 +1376,7 @@ impl VirtualReadableFilesystem for VirtualSevenZipArchive {
                                         return Ok(true);
                                     }
 
-                                    let src: Box<dyn Read> = match &bytes_archived {
-                                        Some(ba) => Box::new(CountingReader::new_with_bytes_read(
-                                            block_reader,
-                                            Arc::clone(ba),
-                                        )),
-                                        None => Box::new(block_reader),
-                                    };
+                                    let src = progress.counting_reader(block_reader);
                                     let mut src =
                                         crate::io::fixed_reader::FixedReader::new_with_fixed_bytes(
                                             src,

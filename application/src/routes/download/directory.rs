@@ -143,7 +143,7 @@ mod get {
                 &path,
                 data.archive_format,
                 state.config.load().system.backups.compression_level,
-                None,
+                crate::server::filesystem::archive::create::ArchiveProgress::default(),
                 ignore,
             )
             .await?;

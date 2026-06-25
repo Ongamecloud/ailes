@@ -226,7 +226,7 @@ impl BtrfsBackup {
                         writer,
                         Path::new(""),
                         names,
-                        None,
+                        crate::server::filesystem::archive::create::ArchiveProgress::default(),
                         ignore.into(),
                         crate::server::filesystem::archive::create::CreateZipOptions {
                             compression_level,
@@ -240,7 +240,7 @@ impl BtrfsBackup {
                     writer,
                     Path::new(""),
                     names,
-                    None,
+                    crate::server::filesystem::archive::create::ArchiveProgress::default(),
                     ignore.into(),
                     crate::server::filesystem::archive::create::CreateItafOptions {
                         compression_type: f.compression_format(),
@@ -256,7 +256,7 @@ impl BtrfsBackup {
                     writer,
                     Path::new(""),
                     names,
-                    None,
+                    crate::server::filesystem::archive::create::ArchiveProgress::default(),
                     ignore.into(),
                     crate::server::filesystem::archive::create::CreateTarOptions {
                         compression_type: f.compression_format(),
@@ -322,7 +322,7 @@ impl BackupCreateExt for BtrfsBackup {
     async fn create(
         server: &crate::server::Server,
         uuid: uuid::Uuid,
-        _progress: Arc<AtomicU64>,
+        _progress: crate::server::filesystem::archive::create::ArchiveProgress,
         _total: Arc<AtomicU64>,
         ignore: ignore::gitignore::Gitignore,
         ignore_raw: compact_str::CompactString,
@@ -492,7 +492,7 @@ impl BackupExt for BtrfsBackup {
     async fn restore(
         &self,
         server: &crate::server::Server,
-        progress: Arc<AtomicU64>,
+        progress: crate::server::filesystem::archive::create::ArchiveProgress,
         total: Arc<AtomicU64>,
         _download_url: Option<compact_str::CompactString>,
     ) -> Result<(), anyhow::Error> {
@@ -542,12 +542,12 @@ impl BackupExt for BtrfsBackup {
                     Arc::new({
                         let server = server.clone();
                         let filesystem = filesystem.clone();
-                        let progress = Arc::clone(&progress);
+                        let progress = progress.clone();
 
                         move |_, path: PathBuf| {
                             let server = server.clone();
                             let filesystem = filesystem.clone();
-                            let progress = Arc::clone(&progress);
+                            let progress = progress.clone();
 
                             async move {
                                 let metadata =
@@ -563,7 +563,8 @@ impl BackupExt for BtrfsBackup {
                                         server.filesystem.async_create_dir_all(parent).await?;
                                     }
 
-                                    filesystem.async_quota_copy(&path, &path, &server, Some(&progress)).await?;
+                                    filesystem.async_quota_copy(&path, &path, &server, progress.clone_bytes().as_ref()).await?;
+                                    progress.increment_files();
                                 } else if metadata.is_dir() {
                                     server.filesystem.async_create_dir_all(&path).await?;
                                     server
@@ -580,12 +581,16 @@ impl BackupExt for BtrfsBackup {
                                 } else if metadata.is_symlink() && let Ok(target) = filesystem.async_read_link(&path).await {
                                     if let Err(err) = server.filesystem.async_symlink(&target, &path).await {
                                         tracing::debug!(path = %path.display(), "failed to create symlink from backup: {:?}", err);
-                                    } else if let Ok(modified_time) = metadata.modified() {
-                                        server.filesystem.async_set_times(
-                                            &path,
-                                            modified_time.into_std(),
-                                            None,
-                                        ).await?;
+                                    } else {
+                                        progress.increment_files();
+
+                                        if let Ok(modified_time) = metadata.modified() {
+                                            server.filesystem.async_set_times(
+                                                &path,
+                                                modified_time.into_std(),
+                                                None,
+                                            ).await?;
+                                        }
                                     }
                                 }
 

@@ -1,8 +1,8 @@
+use super::ArchiveProgress;
 use crate::{
     io::{
         abort::{AbortGuard, AbortWriter},
         compression::CompressionLevel,
-        counting_reader::CountingReader,
     },
     server::filesystem::{archive::Archive, virtualfs::IsIgnoredFn},
 };
@@ -11,12 +11,8 @@ use sevenz_rust2::{
     encoder_options::{EncoderOptions, Lzma2Options},
 };
 use std::{
-    io::{Read, Seek, Write},
+    io::{Seek, Write},
     path::Path,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
 };
 
 pub struct Create7zOptions {
@@ -29,7 +25,7 @@ pub async fn create_7z<W: Write + Seek + Send + 'static>(
     destination: W,
     base: &Path,
     sources: Vec<impl AsRef<Path> + Send + 'static>,
-    bytes_archived: Option<Arc<AtomicU64>>,
+    progress: ArchiveProgress,
     is_ignored: IsIgnoredFn,
     options: Create7zOptions,
 ) -> Result<W, anyhow::Error> {
@@ -79,9 +75,7 @@ pub async fn create_7z<W: Write + Seek + Send + 'static>(
                 if directory_entries.len() < Archive::MAX_DIRECTORY_MTIME_ENTRIES {
                     directory_entries.push((relative.to_path_buf(), mtime, ctime));
                 }
-                if let Some(bytes_archived) = &bytes_archived {
-                    bytes_archived.fetch_add(source_metadata.len(), Ordering::SeqCst);
-                }
+                progress.increment_bytes(source_metadata.len());
 
                 let mut walker = filesystem
                     .walk_dir(source)?
@@ -117,18 +111,10 @@ pub async fn create_7z<W: Write + Seek + Send + 'static>(
 
                     if metadata.is_dir() {
                         directory_entries.push((relative.to_path_buf(), mtime, ctime));
-                        if let Some(bytes_archived) = &bytes_archived {
-                            bytes_archived.fetch_add(metadata.len(), Ordering::SeqCst);
-                        }
+                        progress.increment_bytes(metadata.len());
                     } else if metadata.is_file() {
                         let file = filesystem.open(&path)?;
-                        let reader: Box<dyn Read + Send> = match &bytes_archived {
-                            Some(bytes_archived) => Box::new(CountingReader::new_with_bytes_read(
-                                file,
-                                Arc::clone(bytes_archived),
-                            )),
-                            None => Box::new(file),
-                        };
+                        let reader = progress.counting_reader(file);
 
                         let mut entry =
                             sevenz_rust2::ArchiveEntry::new_file(&relative.to_string_lossy());
@@ -143,17 +129,12 @@ pub async fn create_7z<W: Write + Seek + Send + 'static>(
                         entry.size = metadata.len();
 
                         archive.push_archive_entry(entry, Some(reader))?;
+                        progress.increment_files();
                     }
                 }
             } else if source_metadata.is_file() {
                 let file = filesystem.open(&source)?;
-                let reader: Box<dyn Read + Send> = match &bytes_archived {
-                    Some(bytes_archived) => Box::new(CountingReader::new_with_bytes_read(
-                        file,
-                        Arc::clone(bytes_archived),
-                    )),
-                    None => Box::new(file),
-                };
+                let reader = progress.counting_reader(file);
 
                 let mut entry = sevenz_rust2::ArchiveEntry::new_file(&relative.to_string_lossy());
                 if let Some(mtime) = mtime {
@@ -167,6 +148,7 @@ pub async fn create_7z<W: Write + Seek + Send + 'static>(
                 entry.size = source_metadata.len();
 
                 archive.push_archive_entry(entry, Some(reader))?;
+                progress.increment_files();
             }
         }
 

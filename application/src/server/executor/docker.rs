@@ -513,8 +513,8 @@ impl DockerExecutor {
                                             .arg(id.clone())
                                             .structured_arg(crate::models::PullProgress {
                                                 status: crate::models::PullProgressStatus::Pulling,
-                                                progress: detail.current.unwrap_or_default(),
-                                                total: detail.total.unwrap_or_default(),
+                                                bytes_processed: detail.current.unwrap_or_default(),
+                                                bytes_total: detail.total.unwrap_or_default(),
                                             })
                                             .build(),
                                         )
@@ -532,8 +532,8 @@ impl DockerExecutor {
                                             .arg(id.clone())
                                             .structured_arg(crate::models::PullProgress {
                                                 status: crate::models::PullProgressStatus::Extracting,
-                                                progress: detail.current.unwrap_or_default(),
-                                                total: detail.total.unwrap_or_default(),
+                                                bytes_processed: detail.current.unwrap_or_default(),
+                                                bytes_total: detail.total.unwrap_or_default(),
                                             })
                                             .build(),
                                         )

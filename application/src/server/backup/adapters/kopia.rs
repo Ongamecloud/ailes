@@ -1,7 +1,7 @@
 use crate::{
     io::{
+        UninterruptedReadExt,
         compression::{CompressionLevel, writer::CompressionWriter},
-        counting_reader::CountingReader,
     },
     models::DirectoryEntry,
     remote::backups::{KopiaBackupConfiguration, RawServerBackup},
@@ -43,23 +43,27 @@ const BACKUP_UUID_TAG: &str = "backup-uuid";
 struct KopiaManifest {
     id: String,
     root_entry: KopiaRootEntry,
-    #[serde(default)]
-    stats: KopiaStats,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct KopiaRootEntry {
     #[serde(rename = "obj")]
     obj: String,
+    // `snapshot create --json` does not emit a top-level `stats` object, so the
+    // size/file totals are read from `rootEntry.summ`, which is present in both
+    // `snapshot create` and `snapshot list` output.
+    #[serde(default)]
+    summ: KopiaSummary,
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct KopiaStats {
+struct KopiaSummary {
     #[serde(default)]
-    total_size: u64,
+    size: u64,
     #[serde(default)]
-    file_count: u64,
+    files: u64,
 }
 
 pub struct KopiaBackup {
@@ -152,6 +156,13 @@ impl KopiaBackup {
         let open = line.get(start..)?.find('(')? + start + 1;
         let close = line.get(open..)?.find(')')? + open;
         Self::parse_human_bytes(line.get(open..close)?)
+    }
+
+    fn extract_labelled_bytes(line: &str, label: &str, terminator: &str) -> Option<u64> {
+        let start = line.find(label)? + label.len();
+        let rest = line.get(start..)?;
+        let end = rest.find(terminator).unwrap_or(rest.len());
+        Self::parse_human_bytes(rest.get(..end)?)
     }
 
     async fn ensure_connected(
@@ -290,7 +301,7 @@ impl BackupFindExt for KopiaBackup {
             uuid,
             root_oid: manifest.root_entry.obj,
             manifest_id: manifest.id,
-            total_size: manifest.stats.total_size,
+            total_size: manifest.root_entry.summ.size,
             config: Arc::clone(&state.config),
             config_file,
             remote: Arc::new(remote),
@@ -303,7 +314,7 @@ impl BackupCreateExt for KopiaBackup {
     async fn create(
         server: &crate::server::Server,
         uuid: uuid::Uuid,
-        progress: Arc<AtomicU64>,
+        progress: crate::server::filesystem::archive::create::ArchiveProgress,
         total: Arc<AtomicU64>,
         ignore: ignore::gitignore::Gitignore,
         ignore_raw: compact_str::CompactString,
@@ -322,29 +333,31 @@ impl BackupCreateExt for KopiaBackup {
         let source_path = server.filesystem.base_path.clone();
 
         let total_task = {
-            let total = Arc::clone(&total);
-            let server = server.clone();
+            let filesystem = server.filesystem.clone();
             let ignore = ignore.clone();
+            let total = Arc::clone(&total);
+            let progress = progress.clone();
 
             async move {
-                let mut walker = server
-                    .filesystem
-                    .async_walk_dir(Path::new(""))
-                    .await?
-                    .with_is_ignored(ignore.into());
-                let mut total_files = 0;
-                while let Some(Ok((_, path))) = walker.next_entry().await {
-                    let metadata = match server.filesystem.async_symlink_metadata(&path).await {
-                        Ok(metadata) => metadata,
-                        Err(_) => continue,
-                    };
-                    total.fetch_add(metadata.len(), Ordering::Relaxed);
-                    if !metadata.is_dir() {
-                        total_files += 1;
-                    }
-                }
+                tokio::task::spawn_blocking(move || {
+                    let mut walker = filesystem
+                        .walk_dir(Path::new(""))?
+                        .with_is_ignored(ignore.into());
+                    while let Some(Ok((_, path))) = walker.next_entry() {
+                        let metadata = match filesystem.symlink_metadata(&path) {
+                            Ok(metadata) => metadata,
+                            Err(_) => continue,
+                        };
 
-                Ok::<_, anyhow::Error>(total_files)
+                        total.fetch_add(metadata.len(), Ordering::Relaxed);
+                        if !metadata.is_dir() {
+                            progress.increment_files();
+                        }
+                    }
+
+                    Ok::<_, anyhow::Error>(())
+                })
+                .await?
             }
         };
 
@@ -371,108 +384,80 @@ impl BackupCreateExt for KopiaBackup {
             }
         }
 
-        let snapshot_task = {
-            let config_file = config_file.clone();
-            let remote = remote.clone();
-            let source_path = source_path.clone();
-            let progress = Arc::clone(&progress);
+        let mut command = Self::get_tokio_command(&config_file, &remote);
+        command
+            .arg("--progress")
+            .arg("--progress-update-interval")
+            .arg("1s")
+            .arg("--progress-estimation-type")
+            .arg("rough")
+            .arg("snapshot")
+            .arg("create")
+            .arg(&source_path)
+            .arg("--json")
+            .arg("--description")
+            .arg(format!("wings backup {uuid}"));
+
+        command
+            .arg("--tags")
+            .arg(format!("{BACKUP_UUID_TAG}:{uuid}"));
+        for (key, value) in &remote.tags {
+            command.arg("--tags").arg(format!("{key}:{value}"));
+        }
+
+        let mut child = command
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()?;
+
+        let progress_task = {
+            let progress = progress.clone();
+            let stderr = child.stderr.take();
 
             async move {
-                let mut command = Self::get_tokio_command(&config_file, &remote);
-                command
-                    .arg("--progress")
-                    .arg("--progress-update-interval")
-                    .arg("1s")
-                    .arg("--progress-estimation-type")
-                    .arg("rough")
-                    .arg("snapshot")
-                    .arg("create")
-                    .arg(&source_path)
-                    .arg("--json")
-                    .arg("--description")
-                    .arg(format!("wings backup {uuid}"));
-
-                command
-                    .arg("--tags")
-                    .arg(format!("{BACKUP_UUID_TAG}:{uuid}"));
-                for (key, value) in &remote.tags {
-                    command.arg("--tags").arg(format!("{key}:{value}"));
-                }
-
-                let mut child = command
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::piped())
-                    .spawn()?;
-
-                let progress_task = {
-                    let progress = Arc::clone(&progress);
-                    let stderr = child.stderr.take();
-
-                    async move {
-                        let Some(stderr) = stderr else {
-                            return;
-                        };
-
-                        let mut segments = tokio::io::BufReader::new(stderr).split(b'\r');
-                        while let Ok(Some(segment)) = segments.next_segment().await {
-                            let line = String::from_utf8_lossy(&segment);
-
-                            fn extract_trailing_bytes(line: &str, label: &str) -> Option<u64> {
-                                let start = line.find(label)? + label.len();
-                                let rest = line.get(start..)?;
-                                let end = rest.find(',').unwrap_or(rest.len());
-                                KopiaBackup::parse_human_bytes(rest.get(..end)?)
-                            }
-
-                            let hashed = Self::extract_parenthesised_bytes(&line, "hashed ");
-                            let cached = Self::extract_parenthesised_bytes(&line, "cached ");
-                            let uploaded = extract_trailing_bytes(&line, "uploaded ");
-
-                            progress.store(
-                                (hashed.unwrap_or(0) + cached.unwrap_or(0))
-                                    .max(uploaded.unwrap_or(0)),
-                                Ordering::SeqCst,
-                            );
-                        }
-                    }
+                let Some(stderr) = stderr else {
+                    return;
                 };
 
-                let (output, ()) = tokio::join!(child.wait_with_output(), progress_task);
-                let output = output?;
-                if !output.status.success() {
-                    return Err(anyhow::anyhow!(
-                        "failed to create Kopia snapshot: {}",
-                        String::from_utf8_lossy(&output.stderr)
-                    ));
-                }
+                let mut segments = tokio::io::BufReader::new(stderr).split(b'\r');
+                while let Ok(Some(segment)) = segments.next_segment().await {
+                    let line = String::from_utf8_lossy(&segment);
 
-                let manifest: KopiaManifest = serde_json::from_slice(&output.stdout)?;
-                Ok::<_, anyhow::Error>(manifest)
+                    let hashed = Self::extract_parenthesised_bytes(&line, "hashed ");
+                    let cached = Self::extract_parenthesised_bytes(&line, "cached ");
+                    let uploaded = Self::extract_labelled_bytes(&line, "uploaded ", ",");
+
+                    progress.store_bytes(
+                        (hashed.unwrap_or(0) + cached.unwrap_or(0)).max(uploaded.unwrap_or(0)),
+                    );
+                }
             }
         };
 
-        let (total_files, manifest) = tokio::join!(total_task, snapshot_task);
-        let total_files = total_files?;
-        let manifest = manifest?;
+        let (output, _, total_result) =
+            tokio::join!(child.wait_with_output(), progress_task, total_task);
+        total_result?;
+        let output = output?;
+        if !output.status.success() {
+            return Err(anyhow::anyhow!(
+                "failed to create Kopia snapshot: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
 
-        progress.store(total.load(Ordering::SeqCst), Ordering::SeqCst);
+        let manifest: KopiaManifest = serde_json::from_slice(&output.stdout)?;
+        let summary = &manifest.root_entry.summ;
 
-        let size = if manifest.stats.total_size > 0 {
-            manifest.stats.total_size
-        } else {
-            total.load(Ordering::SeqCst)
-        };
-        let files = if manifest.stats.file_count > 0 {
-            manifest.stats.file_count
-        } else {
-            total_files
-        };
+        progress.store_bytes(total.load(Ordering::Relaxed));
+        if summary.files > 0 {
+            progress.store_files(summary.files);
+        }
 
         Ok(RawServerBackup {
             checksum: manifest.id,
             checksum_type: "kopia".into(),
-            size,
-            files,
+            size: summary.size,
+            files: summary.files,
             successful: true,
             browsable: true,
             streaming: true,
@@ -623,11 +608,11 @@ impl BackupExt for KopiaBackup {
     async fn restore(
         &self,
         server: &crate::server::Server,
-        progress: Arc<AtomicU64>,
+        progress: crate::server::filesystem::archive::create::ArchiveProgress,
         total: Arc<AtomicU64>,
         _download_url: Option<compact_str::CompactString>,
     ) -> Result<(), anyhow::Error> {
-        total.store(self.total_size, Ordering::SeqCst);
+        total.store(self.total_size, Ordering::Relaxed);
 
         let mut child = Self::get_tokio_command(&self.config_file, &self.remote)
             .arg("--progress")
@@ -655,9 +640,9 @@ impl BackupExt for KopiaBackup {
                     continue;
                 };
 
-                progress.store(restored, Ordering::SeqCst);
+                progress.store_bytes(restored);
                 if let Some(enqueued) = Self::extract_parenthesised_bytes(&line, " of ") {
-                    total.store(enqueued, Ordering::SeqCst);
+                    total.store(enqueued, Ordering::Relaxed);
                 }
                 server.log_daemon(line);
             }
@@ -668,7 +653,7 @@ impl BackupExt for KopiaBackup {
             return Err(anyhow::anyhow!("failed to restore Kopia backup"));
         }
 
-        progress.store(total.load(Ordering::SeqCst), Ordering::SeqCst);
+        progress.store_bytes(total.load(Ordering::Relaxed));
         server.filesystem.rerun_disk_checker();
 
         Ok(())
@@ -1519,7 +1504,7 @@ impl VirtualReadableFilesystem for VirtualKopiaBackup {
         path: &(dyn AsRef<Path> + Send + Sync),
         archive_format: StreamableArchiveFormat,
         compression_level: CompressionLevel,
-        bytes_archived: Option<Arc<AtomicU64>>,
+        progress: crate::server::filesystem::archive::create::ArchiveProgress,
         is_ignored: IsIgnoredFn,
     ) -> Result<tokio::io::ReadHalf<tokio::io::SimplexStream>, anyhow::Error> {
         let base_path = path.as_ref().to_path_buf();
@@ -1591,18 +1576,18 @@ impl VirtualReadableFilesystem for VirtualKopiaBackup {
                             }
                             FileType::File => {
                                 zip.start_file(name, options)?;
+                                progress.increment_files();
+
                                 let mut reader = open_object(&entry.oid)?;
                                 let mut buffer = vec![0; crate::BUFFER_SIZE];
                                 loop {
-                                    let read = reader.read(&mut buffer)?;
-                                    if read == 0 {
+                                    let read = reader.read_uninterrupted(&mut buffer)?;
+                                    if crate::unlikely(read == 0) {
                                         break;
                                     }
                                     let chunk = buffer.get(..read).unwrap_or_default();
                                     zip.write_all(chunk)?;
-                                    if let Some(counter) = &bytes_archived {
-                                        counter.fetch_add(read as u64, Ordering::SeqCst);
-                                    }
+                                    progress.increment_bytes(read as u64);
                                 }
                             }
                             _ => {}
@@ -1642,19 +1627,14 @@ impl VirtualReadableFilesystem for VirtualKopiaBackup {
                                 header.set_entry_type(tar::EntryType::Regular);
                                 header.set_size(entry.size);
                                 let reader = open_object(&entry.oid)?;
-                                let reader: Box<dyn Read> = match &bytes_archived {
-                                    Some(counter) => Box::new(CountingReader::new_with_bytes_read(
-                                        reader,
-                                        counter.clone(),
-                                    )),
-                                    None => Box::new(reader),
-                                };
+                                let reader = progress.counting_reader(reader);
                                 let mut reader =
                                     crate::io::fixed_reader::FixedReader::new_with_fixed_bytes(
                                         reader,
                                         entry.size as usize,
                                     );
                                 tar.append_data(&mut header, &entry.relative, &mut reader)?;
+                                progress.increment_files();
                             }
                             _ => {}
                         }

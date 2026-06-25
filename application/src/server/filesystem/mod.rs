@@ -1,5 +1,4 @@
 use crate::{
-    io::counting_reader::AsyncCountingReader,
     routes::MimeCacheValue,
     server::filesystem::virtualfs::{
         DirectoryStreamWalkFn, VirtualReadableFilesystem, VirtualWritableFilesystem,
@@ -711,7 +710,7 @@ impl Filesystem {
     #[allow(clippy::too_many_arguments)]
     pub async fn copy_path(
         &self,
-        progress: Arc<AtomicU64>,
+        progress: crate::server::filesystem::archive::create::ArchiveProgress,
         server: &crate::server::Server,
         metadata: virtualfs::FileMetadata,
         path: PathBuf,
@@ -723,17 +722,19 @@ impl Filesystem {
             if filesystem.is_primary_server_fs() && destination_filesystem.is_primary_server_fs() {
                 server
                     .filesystem
-                    .async_quota_copy(&path, &destination_path, server, Some(&progress))
+                    .async_quota_copy(
+                        &path,
+                        &destination_path,
+                        server,
+                        progress.clone_bytes().as_ref(),
+                    )
                     .await?;
                 destination_filesystem
                     .async_set_permissions(&destination_path, metadata.permissions)
                     .await?;
             } else {
                 let file_read = filesystem.async_read_file(&path, None).await?;
-                let mut reader = AsyncCountingReader::new_with_bytes_read(
-                    file_read.reader,
-                    Arc::clone(&progress),
-                );
+                let mut reader = progress.async_counting_reader(file_read.reader);
 
                 if let Some(parent) = destination_path.parent()
                     && !parent.as_os_str().is_empty()
@@ -751,6 +752,8 @@ impl Filesystem {
                 tokio::io::copy(&mut reader, &mut writer).await?;
                 writer.shutdown().await?;
             }
+
+            progress.increment_files();
         } else {
             let ignored = server.filesystem.get_ignored();
             let mut walker = filesystem
@@ -766,7 +769,7 @@ impl Filesystem {
                         let source_path = Arc::new(path);
                         let destination_path = Arc::new(destination_path);
                         let destination_filesystem = destination_filesystem.clone();
-                        let progress = Arc::clone(&progress);
+                        let progress = progress.clone();
 
                         move |_, path: PathBuf, stream| {
                             let server = server.clone();
@@ -774,7 +777,7 @@ impl Filesystem {
                             let source_path = Arc::clone(&source_path);
                             let destination_path = Arc::clone(&destination_path);
                             let destination_filesystem = destination_filesystem.clone();
-                            let progress = Arc::clone(&progress);
+                            let progress = progress.clone();
 
                             async move {
                                 let metadata =
@@ -804,17 +807,14 @@ impl Filesystem {
                                                 &path,
                                                 &destination_path,
                                                 &server,
-                                                Some(&progress),
+                                                progress.clone_bytes().as_ref(),
                                             )
                                             .await?;
                                         destination_filesystem
                                             .async_set_permissions(&destination_path, metadata.permissions)
                                             .await?;
                                     } else {
-                                        let mut reader = AsyncCountingReader::new_with_bytes_read(
-                                            stream,
-                                            Arc::clone(&progress),
-                                        );
+                                        let mut reader = progress.async_counting_reader(stream);
 
                                         let mut writer = destination_filesystem
                                             .async_create_file(&destination_path)
@@ -826,17 +826,22 @@ impl Filesystem {
                                         tokio::io::copy(&mut reader, &mut writer).await?;
                                         writer.shutdown().await?;
                                     }
+
+                                    progress.increment_files();
                                 } else if metadata.file_type.is_dir() {
                                     destination_filesystem.async_create_dir_all(&destination_path).await?;
                                     destination_filesystem
                                         .async_set_permissions(&destination_path, metadata.permissions)
                                         .await?;
 
-                                    progress.fetch_add(metadata.size, Ordering::Relaxed);
-                                } else if metadata.file_type.is_symlink() && let Ok(target) = filesystem.async_read_symlink(&path).await
-                                    && let Err(err) = destination_filesystem.async_create_symlink(&target, &destination_path).await {
+                                    progress.increment_bytes(metadata.size);
+                                } else if metadata.file_type.is_symlink() && let Ok(target) = filesystem.async_read_symlink(&path).await {
+                                    if let Err(err) = destination_filesystem.async_create_symlink(&target, &destination_path).await {
                                         tracing::debug!(path = %destination_path.display(), "failed to create symlink from copy: {:?}", err);
+                                    } else {
+                                        progress.increment_files();
                                     }
+                                }
 
                                 Ok(())
                             }
@@ -1115,7 +1120,7 @@ impl Filesystem {
         #[cfg(unix)]
         {
             use rayon::prelude::*;
-            use std::{collections::VecDeque, os::fd::AsFd};
+            use std::os::fd::AsFd;
 
             const CHANNEL_CAPACITY: usize = 1 << 16;
             const CHUNK: usize = 8192;
@@ -1223,21 +1228,11 @@ impl Filesystem {
             });
 
             let lister = async move {
-                let mut stack = VecDeque::new();
-                stack.push_back(root_rel);
+                let mut entries = self.async_walk_dir("").await?;
 
-                while let Some(dir) = stack.pop_front() {
-                    let mut entries = self.async_read_dir(&dir).await?;
-
-                    while let Some(Ok((file_type, entry_name))) = entries.next_entry().await {
-                        let child = dir.join(entry_name);
-
-                        if file_type.is_dir() {
-                            stack.push_back(child.clone());
-                        }
-                        if tx.send(child).await.is_err() {
-                            return Ok(());
-                        }
+                while let Some(Ok((_, entry_path))) = entries.next_entry().await {
+                    if tx.send(entry_path).await.is_err() {
+                        return Ok(());
                     }
                 }
 

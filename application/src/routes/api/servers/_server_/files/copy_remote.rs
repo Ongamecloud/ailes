@@ -109,8 +109,9 @@ mod post {
             total_size += directory_entry.size;
         }
 
-        let progress = Arc::new(AtomicU64::new(0));
-        let total = Arc::new(AtomicU64::new(total_size));
+        let bytes_processed = Arc::new(AtomicU64::new(0));
+        let bytes_total = Arc::new(AtomicU64::new(total_size));
+        let files_processed = Arc::new(AtomicU64::new(0));
 
         if data.url.is_empty() {
             let destination_server = match state
@@ -150,8 +151,9 @@ mod post {
                         destination_server: data.destination_server,
                         destination_path: PathBuf::from(&data.destination_path),
                         start_time: chrono::Utc::now(),
-                        progress: progress.clone(),
-                        total: total.clone(),
+                        bytes_processed: bytes_processed.clone(),
+                        bytes_total: bytes_total.clone(),
+                        files_processed: files_processed.clone(),
                     },
                     {
                         let server = server.clone();
@@ -161,7 +163,8 @@ mod post {
                         let destination_server = destination_server.clone();
                         let destination_path = Arc::new(destination_path);
                         let destination_filesystem = destination_filesystem.clone();
-                        let progress = progress.clone();
+                        let bytes_processed = bytes_processed.clone();
+                        let files_processed = files_processed.clone();
 
                         async move {
                             let inner = async {
@@ -183,7 +186,8 @@ mod post {
                                             let destination_server = destination_server.clone();
                                             let destination_path = Arc::new(destination_path);
                                             let destination_filesystem = destination_filesystem.clone();
-                                            let progress = Arc::clone(&progress);
+                                            let bytes_processed = Arc::clone(&bytes_processed);
+                                            let files_processed = Arc::clone(&files_processed);
 
                                             move |_, path: PathBuf, stream| {
                                                 let server = server.clone();
@@ -192,7 +196,8 @@ mod post {
                                                 let destination_server = destination_server.clone();
                                                 let destination_path = Arc::clone(&destination_path);
                                                 let destination_filesystem = destination_filesystem.clone();
-                                                let progress = Arc::clone(&progress);
+                                                let bytes_processed = Arc::clone(&bytes_processed);
+                                                let files_processed = Arc::clone(&files_processed);
 
                                                 async move {
                                                     let metadata =
@@ -222,13 +227,13 @@ mod post {
                                                                     &source_path,
                                                                     &destination_path,
                                                                     &destination_server,
-                                                                    Some(&progress),
+                                                                    Some(&bytes_processed),
                                                                 )
                                                                 .await?;
                                                         } else {
                                                             let mut reader = AsyncCountingReader::new_with_bytes_read(
                                                                 stream,
-                                                                Arc::clone(&progress),
+                                                                Arc::clone(&bytes_processed),
                                                             );
 
                                                             let mut writer = destination_filesystem
@@ -241,17 +246,22 @@ mod post {
                                                             tokio::io::copy(&mut reader, &mut writer).await?;
                                                             writer.shutdown().await?;
                                                         }
+
+                                                        files_processed.fetch_add(1, Ordering::Relaxed);
                                                     } else if metadata.file_type.is_dir() {
                                                         destination_filesystem.async_create_dir_all(&destination_path).await?;
                                                         destination_filesystem
                                                             .async_set_permissions(&destination_path, metadata.permissions)
                                                             .await?;
 
-                                                        progress.fetch_add(metadata.size, Ordering::Relaxed);
-                                                    } else if metadata.file_type.is_symlink() && let Ok(target) = filesystem.async_read_symlink(&source_path).await
-                                                        && let Err(err) = destination_filesystem.async_create_symlink(&target, &destination_path).await {
+                                                        bytes_processed.fetch_add(metadata.size, Ordering::Relaxed);
+                                                    } else if metadata.file_type.is_symlink() && let Ok(target) = filesystem.async_read_symlink(&source_path).await {
+                                                        if let Err(err) = destination_filesystem.async_create_symlink(&target, &destination_path).await {
                                                             tracing::debug!(path = %destination_path.display(), "failed to create symlink from copy: {:?}", err);
+                                                        } else {
+                                                            files_processed.fetch_add(1, Ordering::Relaxed);
                                                         }
+                                                    }
 
                                                     Ok(())
                                                 }
@@ -284,8 +294,9 @@ mod post {
                         destination_server: data.destination_server,
                         destination_path: PathBuf::from(data.destination_path),
                         start_time: chrono::Utc::now(),
-                        progress: progress.clone(),
-                        total: total.clone(),
+                        bytes_processed: bytes_processed.clone(),
+                        bytes_total: bytes_total.clone(),
+                        files_processed: files_processed.clone(),
                     },
                     async move {
                         let _tx = tx;
@@ -354,13 +365,15 @@ mod post {
                         destination_server: data.destination_server,
                         destination_path: PathBuf::from(data.destination_path),
                         start_time: chrono::Utc::now(),
-                        progress: progress.clone(),
-                        total: total.clone(),
+                        bytes_processed: bytes_processed.clone(),
+                        bytes_total: bytes_total.clone(),
+                        files_processed: files_processed.clone(),
                     },
                     {
                         let root = root.clone();
                         let files = data.files.clone();
                         let server = server.clone();
+                        let files_processed = files_processed.clone();
 
                         async move {
                             let (checksum_sender, checksum_receiver) =
@@ -384,7 +397,7 @@ mod post {
                                         data.compression_level.unwrap_or_else(|| {
                                             state.config.load().system.backups.compression_level
                                         }),
-                                        Some(progress),
+                                        crate::server::filesystem::archive::create::ArchiveProgress::new(bytes_processed, files_processed),
                                         is_ignored,
                                     )
                                     .await?;
@@ -445,7 +458,7 @@ mod post {
                                 .build()?
                                 .post(&data.url)
                                 .header("Authorization", &data.token)
-                                .header("Total-Bytes", total.load(Ordering::Relaxed))
+                                .header("Total-Bytes", bytes_total.load(Ordering::Relaxed))
                                 .header("Root-Files", serde_json::to_string(&data.files)?)
                                 .multipart(form)
                                 .send();

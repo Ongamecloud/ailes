@@ -145,7 +145,7 @@ mod get {
                 payload.file_paths.into_iter().map(PathBuf::from).collect(),
                 data.archive_format,
                 state.config.load().system.backups.compression_level,
-                None,
+                crate::server::filesystem::archive::create::ArchiveProgress::default(),
                 ignore,
             )
             .await?;

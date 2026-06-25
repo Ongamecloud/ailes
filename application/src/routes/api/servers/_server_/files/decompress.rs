@@ -105,8 +105,8 @@ mod post {
                     path: source,
                     destination_path: root.clone(),
                     start_time: chrono::Utc::now(),
-                    progress: progress.clone(),
-                    total: total.clone(),
+                    bytes_processed: progress.clone(),
+                    bytes_total: total.clone(),
                 },
                 {
                     let root = root.clone();

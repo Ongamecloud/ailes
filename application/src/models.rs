@@ -106,21 +106,23 @@ pub enum PullProgressStatus {
 #[derive(ToSchema, Serialize)]
 pub struct PullProgress {
     pub status: PullProgressStatus,
-    pub progress: i64,
-    pub total: i64,
+    pub bytes_processed: i64,
+    pub bytes_total: i64,
 }
 
 #[derive(ToSchema, Serialize)]
 pub struct TransferProgress {
-    pub archive_progress: u64,
-    pub network_progress: u64,
-    pub total: u64,
+    pub archive_bytes_processed: u64,
+    pub network_bytes_processed: u64,
+    pub bytes_total: u64,
+    pub files_processed: u64,
 }
 
 #[derive(ToSchema, Serialize)]
-pub struct Progress {
-    pub progress: u64,
-    pub total: u64,
+pub struct BackupProgress {
+    pub bytes_processed: u64,
+    pub bytes_total: u64,
+    pub files_processed: u64,
 }
 
 #[derive(ToSchema, Serialize, Deserialize, Clone)]

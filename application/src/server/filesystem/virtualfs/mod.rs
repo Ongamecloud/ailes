@@ -15,7 +15,7 @@ use parking_lot::RwLock;
 use std::{
     ops::Bound,
     path::{Path, PathBuf},
-    sync::{Arc, atomic::AtomicU64},
+    sync::Arc,
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite},
@@ -499,7 +499,7 @@ pub trait VirtualReadableFilesystem: Send + Sync {
         path: &(dyn AsRef<Path> + Send + Sync),
         archive_format: StreamableArchiveFormat,
         compression_level: CompressionLevel,
-        bytes_archived: Option<Arc<AtomicU64>>,
+        progress: super::archive::create::ArchiveProgress,
         is_ignored: IsIgnoredFn,
     ) -> Result<tokio::io::ReadHalf<tokio::io::SimplexStream>, anyhow::Error>;
     async fn async_read_dir_files_archive(
@@ -508,7 +508,7 @@ pub trait VirtualReadableFilesystem: Send + Sync {
         file_paths: Vec<PathBuf>,
         archive_format: StreamableArchiveFormat,
         compression_level: CompressionLevel,
-        bytes_archived: Option<Arc<AtomicU64>>,
+        progress: super::archive::create::ArchiveProgress,
         is_ignored: IsIgnoredFn,
     ) -> Result<tokio::io::ReadHalf<tokio::io::SimplexStream>, anyhow::Error> {
         let root_path = path.as_ref().to_path_buf();
@@ -524,7 +524,7 @@ pub trait VirtualReadableFilesystem: Send + Sync {
             path,
             archive_format,
             compression_level,
-            bytes_archived,
+            progress,
             IsIgnoredFn::from(is_ignored),
         )
         .await

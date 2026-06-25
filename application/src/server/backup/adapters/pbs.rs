@@ -2,7 +2,6 @@ use crate::{
     io::{
         SafeSliceExt,
         compression::{CompressionLevel, writer::CompressionWriter},
-        counting_reader::CountingReader,
         fixed_reader::FixedReader,
         limited_reader::AsyncLimitedReader,
         limited_writer::LimitedWriter,
@@ -111,7 +110,7 @@ impl BackupCreateExt for PbsBackup {
     async fn create(
         server: &crate::server::Server,
         uuid: uuid::Uuid,
-        progress: Arc<AtomicU64>,
+        progress: crate::server::filesystem::archive::create::ArchiveProgress,
         total: Arc<AtomicU64>,
         ignore: ignore::gitignore::Gitignore,
         _ignore_raw: compact_str::CompactString,
@@ -141,19 +140,15 @@ impl BackupCreateExt for PbsBackup {
                     .async_walk_dir(Path::new(""))
                     .await?
                     .with_is_ignored(ignore.into());
-                let mut total_files = 0u64;
                 while let Some(Ok((_, path))) = walker.next_entry().await {
                     let metadata = match server.filesystem.async_symlink_metadata(&path).await {
                         Ok(metadata) => metadata,
                         Err(_) => continue,
                     };
                     total.fetch_add(metadata.len(), Ordering::Relaxed);
-                    if !metadata.is_dir() {
-                        total_files += 1;
-                    }
                 }
 
-                Ok::<_, anyhow::Error>(total_files)
+                Ok::<_, anyhow::Error>(())
             }
         };
 
@@ -162,7 +157,7 @@ impl BackupCreateExt for PbsBackup {
         let archive_task = {
             let server = server.clone();
             let ignore = ignore.clone();
-            let progress = Arc::clone(&progress);
+            let progress = progress.clone();
 
             async move {
                 let sources = server.filesystem.async_read_dir_all(Path::new("")).await?;
@@ -183,7 +178,7 @@ impl BackupCreateExt for PbsBackup {
                     writer,
                     Path::new(""),
                     sources,
-                    Some(progress),
+                    progress.clone(),
                     ignore.into(),
                     CreatePxarOptions {
                         catalog_archive_name: pbs_client::writer::ARCHIVE_PXAR_NAME.to_string(),
@@ -259,14 +254,15 @@ impl BackupCreateExt for PbsBackup {
             }
         };
 
-        let (total_files, _, (size, checksum)) =
-            tokio::try_join!(total_task, archive_task, pbs_task)?;
+        let (_, _, (size, checksum)) = tokio::try_join!(total_task, archive_task, pbs_task)?;
 
         Ok(RawServerBackup {
             checksum,
             checksum_type: "sha256".into(),
             size,
-            files: total_files,
+            files: progress
+                .clone_files()
+                .map_or(0, |files| files.load(Ordering::Relaxed)),
             successful: true,
             browsable: true,
             streaming: true,
@@ -564,7 +560,7 @@ impl BackupExt for PbsBackup {
     async fn restore(
         &self,
         server: &crate::server::Server,
-        progress: Arc<AtomicU64>,
+        progress: crate::server::filesystem::archive::create::ArchiveProgress,
         total: Arc<AtomicU64>,
         _download_url: Option<compact_str::CompactString>,
     ) -> Result<(), anyhow::Error> {
@@ -587,17 +583,17 @@ impl BackupExt for PbsBackup {
 
         let (pxar_reader, pxar_writer) = tokio::io::simplex(crate::BUFFER_SIZE);
 
-        let fetch_task = async move {
+        let fetch_task = async {
             let mut pxar_writer = pxar_writer;
             reader
-                .reassemble_archive(&mut pxar_writer, Some(progress))
+                .reassemble_archive(&mut pxar_writer, progress.clone_bytes())
                 .await?;
             pxar_writer.shutdown().await?;
 
             Ok::<_, anyhow::Error>(())
         };
 
-        let extract_task = async move {
+        let extract_task = async {
             let reader = AsyncLimitedReader::new_with_bytes_per_second(
                 pxar_reader,
                 server
@@ -672,6 +668,8 @@ impl BackupExt for PbsBackup {
                             tokio::io::copy(&mut contents, &mut writer).await?;
                         }
                         writer.flush().await?;
+
+                        progress.increment_files();
                     }
                     EntryKind::Symlink(target) => {
                         if let Err(err) = server
@@ -686,6 +684,8 @@ impl BackupExt for PbsBackup {
                                 .async_set_times(path.as_path(), mtime, None)
                                 .await?;
                         }
+
+                        progress.increment_files();
                     }
                 }
             }
@@ -1484,7 +1484,7 @@ impl VirtualReadableFilesystem for PbsVirtualFilesystem {
         path: &(dyn AsRef<Path> + Send + Sync),
         archive_format: StreamableArchiveFormat,
         compression_level: CompressionLevel,
-        bytes_archived: Option<Arc<AtomicU64>>,
+        progress: crate::server::filesystem::archive::create::ArchiveProgress,
         is_ignored: IsIgnoredFn,
     ) -> Result<tokio::io::ReadHalf<tokio::io::SimplexStream>, anyhow::Error> {
         let base_path = path.as_ref().to_path_buf();
@@ -1547,6 +1547,7 @@ impl VirtualReadableFilesystem for PbsVirtualFilesystem {
                             }
                             FileType::File => {
                                 zip.start_file(name, options)?;
+                                progress.increment_files();
                                 let mut reader =
                                     archive.open_reader_blocking(&entry.archive_path, None)?;
                                 let mut buffer = vec![0; crate::BUFFER_SIZE];
@@ -1557,9 +1558,7 @@ impl VirtualReadableFilesystem for PbsVirtualFilesystem {
                                     }
                                     let chunk = buffer.get(..read).unwrap_or_default();
                                     zip.write_all(chunk)?;
-                                    if let Some(counter) = &bytes_archived {
-                                        counter.fetch_add(read as u64, Ordering::SeqCst);
-                                    }
+                                    progress.increment_bytes(read as u64);
                                 }
                             }
                             _ => {}
@@ -1600,22 +1599,18 @@ impl VirtualReadableFilesystem for PbsVirtualFilesystem {
                                 header.set_size(entry.size);
                                 let reader =
                                     archive.open_reader_blocking(&entry.archive_path, None)?;
-                                let reader: Box<dyn Read> = match &bytes_archived {
-                                    Some(counter) => Box::new(CountingReader::new_with_bytes_read(
-                                        reader,
-                                        counter.clone(),
-                                    )),
-                                    None => Box::new(reader),
-                                };
+                                let reader = progress.counting_reader(reader);
                                 let mut reader =
                                     FixedReader::new_with_fixed_bytes(reader, entry.size as usize);
                                 tar.append_data(&mut header, &entry.relative, &mut reader)?;
+                                progress.increment_files();
                             }
                             FileType::Symlink => {
                                 header.set_entry_type(tar::EntryType::Symlink);
                                 header.set_size(0);
                                 if let Some(target) = &entry.symlink {
                                     tar.append_link(&mut header, &entry.relative, target)?;
+                                    progress.increment_files();
                                 }
                             }
                             _ => {}
@@ -1698,16 +1693,11 @@ impl VirtualReadableFilesystem for PbsVirtualFilesystem {
                             FileType::File => {
                                 let reader =
                                     archive.open_reader_blocking(&entry.archive_path, None)?;
-                                let reader: Box<dyn Read> = match &bytes_archived {
-                                    Some(counter) => Box::new(CountingReader::new_with_bytes_read(
-                                        reader,
-                                        counter.clone(),
-                                    )),
-                                    None => Box::new(reader),
-                                };
+                                let reader = progress.counting_reader(reader);
                                 let mut reader =
                                     FixedReader::new_with_fixed_bytes(reader, entry.size as usize);
                                 itaf_enc.add_file(name, &meta, entry.size, &mut reader)?;
+                                progress.increment_files();
                             }
                             FileType::Symlink => {
                                 if let Some(target) = &entry.symlink
@@ -1715,6 +1705,7 @@ impl VirtualReadableFilesystem for PbsVirtualFilesystem {
                                 {
                                     let target = target.to_string_lossy();
                                     itaf_enc.add_symlink(name, &target, false, &meta)?;
+                                    progress.increment_files();
                                 }
                             }
                             _ => {}
