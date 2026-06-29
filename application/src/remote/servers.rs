@@ -1,4 +1,4 @@
-use super::client::Client;
+use super::{ResponseExt, client::Client};
 use crate::server::installation::InstallationScript;
 use serde::Deserialize;
 use serde_json::json;
@@ -23,7 +23,8 @@ pub async fn get_servers_paged(
             ))
             .send()
             .await?
-            .error_for_status()?
+            .error_for_remote_status()
+            .await?
             .text()
             .await?,
     )?;
@@ -44,7 +45,8 @@ pub async fn get_server(client: &Client, uuid: uuid::Uuid) -> Result<RawServer, 
             .get(format!("{}/servers/{}", client.url, uuid))
             .send()
             .await?
-            .error_for_status()?
+            .error_for_remote_status()
+            .await?
             .text()
             .await?,
     )?;
@@ -62,7 +64,8 @@ pub async fn get_server_install_script(
             .get(format!("{}/servers/{}/install", client.url, uuid))
             .send()
             .await?
-            .error_for_status()?
+            .error_for_remote_status()
+            .await?
             .text()
             .await?,
     )?;
@@ -85,7 +88,8 @@ pub async fn set_server_install(
         }))
         .send()
         .await?
-        .error_for_status()?;
+        .error_for_remote_status()
+        .await?;
 
     Ok(())
 }
@@ -110,7 +114,8 @@ pub async fn set_server_transfer(
         }))
         .send()
         .await?
-        .error_for_status()?;
+        .error_for_remote_status()
+        .await?;
 
     Ok(())
 }
@@ -132,7 +137,8 @@ pub async fn set_server_startup_variable(
         }))
         .send()
         .await?
-        .error_for_status()?;
+        .error_for_remote_status()
+        .await?;
 
     Ok(())
 }
@@ -152,7 +158,8 @@ pub async fn set_server_startup_command(
         }))
         .send()
         .await?
-        .error_for_status()?;
+        .error_for_remote_status()
+        .await?;
 
     Ok(())
 }
@@ -175,7 +182,8 @@ pub async fn set_server_startup_docker_image(
         }))
         .send()
         .await?
-        .error_for_status()?;
+        .error_for_remote_status()
+        .await?;
 
     Ok(())
 }

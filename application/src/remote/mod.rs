@@ -21,6 +21,61 @@ pub fn into_json<T: DeserializeOwned>(value: String) -> Result<T, anyhow::Error>
     }
 }
 
+#[derive(Debug)]
+pub struct ApiError {
+    pub status: reqwest::StatusCode,
+    pub errors: Vec<String>,
+}
+
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.errors.is_empty() {
+            write!(f, "remote api request failed with status {}", self.status)
+        } else {
+            write!(
+                f,
+                "remote api request failed with status {}: {}",
+                self.status,
+                self.errors.join(", ")
+            )
+        }
+    }
+}
+
+impl std::error::Error for ApiError {}
+
+#[derive(Deserialize)]
+struct ApiErrorBody {
+    errors: Vec<String>,
+}
+
+pub trait ResponseExt: Sized {
+    async fn error_for_remote_status(self) -> Result<reqwest::Response, anyhow::Error>;
+}
+
+impl ResponseExt for reqwest::Response {
+    async fn error_for_remote_status(self) -> Result<reqwest::Response, anyhow::Error> {
+        let status = self.status();
+        if status.is_client_error() || status.is_server_error() {
+            let body = self.text().await.unwrap_or_default();
+            let errors = serde_json::from_str::<ApiErrorBody>(&body)
+                .map(|parsed| parsed.errors)
+                .unwrap_or_else(|_| {
+                    let body = body.trim();
+                    if body.is_empty() {
+                        Vec::new()
+                    } else {
+                        vec![body.chars().take(200).collect()]
+                    }
+                });
+
+            return Err(ApiError { status, errors }.into());
+        }
+
+        Ok(self)
+    }
+}
+
 #[derive(Deserialize, Serialize, Default)]
 pub struct Pagination {
     current_page: usize,
@@ -52,7 +107,8 @@ pub async fn get_sftp_auth(
             }))
             .send()
             .await?
-            .error_for_status()?
+            .error_for_remote_status()
+            .await?
             .text()
             .await?,
     )?;
@@ -87,7 +143,8 @@ pub async fn send_activity(
         }))
         .send()
         .await?
-        .error_for_status()?;
+        .error_for_remote_status()
+        .await?;
 
     Ok(())
 }
@@ -104,7 +161,8 @@ pub async fn send_schedule_status(
         }))
         .send()
         .await?
-        .error_for_status()?;
+        .error_for_remote_status()
+        .await?;
 
     Ok(())
 }
@@ -115,7 +173,8 @@ pub async fn reset_state(client: &Client) -> Result<(), anyhow::Error> {
         .post(format!("{}/servers/reset", client.url))
         .send()
         .await?
-        .error_for_status()?;
+        .error_for_remote_status()
+        .await?;
 
     Ok(())
 }

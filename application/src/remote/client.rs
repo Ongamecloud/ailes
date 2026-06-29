@@ -104,6 +104,13 @@ impl Client {
             return false;
         }
 
+        if let Some(api_err) = err.downcast_ref::<super::ApiError>()
+            && api_err.status.is_client_error()
+            && attempt > 3
+        {
+            return false;
+        }
+
         true
     }
 

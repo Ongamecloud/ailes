@@ -1,4 +1,4 @@
-use super::client::Client;
+use super::{ResponseExt, client::Client};
 use crate::server::backup::adapters::BackupAdapter;
 use compact_str::ToCompactString;
 use serde::{Deserialize, Serialize};
@@ -77,7 +77,8 @@ pub async fn set_backup_status(
         .json(data)
         .send()
         .await?
-        .error_for_status()?;
+        .error_for_remote_status()
+        .await?;
 
     Ok(())
 }
@@ -97,7 +98,8 @@ pub async fn set_backup_restore_status(
         }))
         .send()
         .await?
-        .error_for_status()?;
+        .error_for_remote_status()
+        .await?;
 
     Ok(())
 }
@@ -113,7 +115,8 @@ pub async fn backup_upload_urls(
             .get(format!("{}/backups/{}?size={}", client.url, uuid, size))
             .send()
             .await?
-            .error_for_status()?
+            .error_for_remote_status()
+            .await?
             .text()
             .await?,
     )?;
@@ -141,7 +144,8 @@ pub async fn backup_s3_part_urls(
             ))
             .send()
             .await?
-            .error_for_status()?
+            .error_for_remote_status()
+            .await?
             .text()
             .await?,
     )?;
@@ -165,7 +169,8 @@ pub async fn backup_restic_configuration(
             .get(format!("{}/backups/{}/restic", client.url, uuid))
             .send()
             .await?
-            .error_for_status()?
+            .error_for_remote_status()
+            .await?
             .text()
             .await?,
     )?;
@@ -183,7 +188,8 @@ pub async fn backup_pbs_configuration(
             .get(format!("{}/backups/{}/pbs", client.url, uuid))
             .send()
             .await?
-            .error_for_status()?
+            .error_for_remote_status()
+            .await?
             .text()
             .await?,
     )?;
@@ -201,7 +207,8 @@ pub async fn backup_kopia_configuration(
             .get(format!("{}/backups/{}/kopia", client.url, uuid))
             .send()
             .await?
-            .error_for_status()?
+            .error_for_remote_status()
+            .await?
             .text()
             .await?,
     )?;
@@ -227,7 +234,8 @@ pub async fn create_backup(
             }))
             .send()
             .await?
-            .error_for_status()?
+            .error_for_remote_status()
+            .await?
             .text()
             .await?,
     )?;

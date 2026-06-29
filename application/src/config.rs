@@ -274,7 +274,7 @@ fn system_file_history_anchor_interval() -> u64 {
     4
 }
 fn system_file_history_keep_chains() -> u64 {
-    2
+    5
 }
 fn system_file_history_file_size_cap() -> u64 {
     1024 * 1024
