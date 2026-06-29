@@ -1300,23 +1300,32 @@ impl Config {
         connect_info: ConnectInfo<std::net::SocketAddr>,
     ) -> std::net::IpAddr {
         let cfg = self.load();
-        for cidr in &cfg.api.trusted_proxies {
-            if cidr.contains(&connect_info.ip()) {
-                if let Some(forwarded) = headers.get("X-Forwarded-For")
-                    && let Ok(forwarded) = forwarded.to_str()
-                    && let Some(ip) = forwarded.split(',').next()
-                {
-                    return ip.trim().parse().unwrap_or_else(|_| connect_info.ip());
-                }
 
-                if let Some(forwarded) = headers.get("X-Real-IP")
-                    && let Ok(forwarded) = forwarded.to_str()
-                {
-                    return forwarded
-                        .trim()
-                        .parse()
-                        .unwrap_or_else(|_| connect_info.ip());
-                }
+        let trusted = headers
+            .get("X-Real-Ip-Token")
+            .and_then(|token| token.to_str().ok())
+            == Some(cfg.token.as_str())
+            || cfg
+                .api
+                .trusted_proxies
+                .iter()
+                .any(|cidr| cidr.contains(&connect_info.ip()));
+
+        if trusted {
+            if let Some(forwarded) = headers.get("X-Forwarded-For")
+                && let Ok(forwarded) = forwarded.to_str()
+                && let Some(ip) = forwarded.split(',').next()
+            {
+                return ip.trim().parse().unwrap_or_else(|_| connect_info.ip());
+            }
+
+            if let Some(forwarded) = headers.get("X-Real-IP")
+                && let Ok(forwarded) = forwarded.to_str()
+            {
+                return forwarded
+                    .trim()
+                    .parse()
+                    .unwrap_or_else(|_| connect_info.ip());
             }
         }
 
