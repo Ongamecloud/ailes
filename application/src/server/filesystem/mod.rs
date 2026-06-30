@@ -755,10 +755,19 @@ impl Filesystem {
 
             progress.increment_files();
         } else {
-            let ignored = server.filesystem.get_ignored();
-            let mut walker = filesystem
-                .async_walk_dir_stream(&path, ignored.into())
+            destination_filesystem
+                .async_create_dir_all(&destination_path)
                 .await?;
+            destination_filesystem
+                .async_set_permissions(&destination_path, metadata.permissions)
+                .await?;
+
+            let ignored = if filesystem.is_primary_server_fs() {
+                server.filesystem.get_ignored().into()
+            } else {
+                Default::default()
+            };
+            let mut walker = filesystem.async_walk_dir_stream(&path, ignored).await?;
 
             walker
                 .run_multithreaded(
@@ -783,12 +792,26 @@ impl Filesystem {
                                 let metadata =
                                     match filesystem.async_symlink_metadata(&path).await {
                                         Ok(metadata) => metadata,
-                                        Err(_) => return Ok(()),
+                                        Err(err) => {
+                                            tracing::debug!(
+                                                path = %path.display(),
+                                                "skipping copy entry, failed to stat: {:?}",
+                                                err,
+                                            );
+                                            return Ok(());
+                                        }
                                     };
 
                                 let relative_path = match path.strip_prefix(&*source_path) {
                                     Ok(p) => p,
-                                    Err(_) => return Ok(()),
+                                    Err(_) => {
+                                        tracing::debug!(
+                                            path = %path.display(),
+                                            source = %source_path.display(),
+                                            "skipping copy entry, not under source path",
+                                        );
+                                        return Ok(());
+                                    }
                                 };
                                 let destination_path = destination_path.join(relative_path);
 

@@ -1065,7 +1065,7 @@ impl VirtualReadableFilesystem for PbsVirtualFilesystem {
             return Ok(FileMetadata {
                 file_type: FileType::Dir,
                 permissions: PortablePermissions::from_mode(mode),
-                size: node.size,
+                size: 0,
                 modified: node
                     .has_explicit_entry
                     .then(|| mtime_to_system_time(node.mtime)),

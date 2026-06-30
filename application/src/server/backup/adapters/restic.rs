@@ -1300,7 +1300,7 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
             return Ok(FileMetadata {
                 file_type: FileType::Dir,
                 permissions: PortablePermissions::from_mode(mode),
-                size: node.size,
+                size: 0,
                 modified,
                 created: None,
             });

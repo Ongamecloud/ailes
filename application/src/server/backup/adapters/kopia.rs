@@ -50,9 +50,6 @@ struct KopiaManifest {
 struct KopiaRootEntry {
     #[serde(rename = "obj")]
     obj: String,
-    // `snapshot create --json` does not emit a top-level `stats` object, so the
-    // size/file totals are read from `rootEntry.summ`, which is present in both
-    // `snapshot create` and `snapshot list` output.
     #[serde(default)]
     summ: KopiaSummary,
 }
@@ -727,7 +724,7 @@ struct ParsedDir {
 #[derive(Deserialize)]
 struct RawDirManifest {
     #[serde(default)]
-    entries: Vec<RawDirEntry>,
+    entries: Option<Vec<RawDirEntry>>,
 }
 
 #[derive(Deserialize)]
@@ -760,6 +757,7 @@ fn parse_dir(bytes: &[u8]) -> Result<ParsedDir, anyhow::Error> {
 
     let mut entries: Vec<(CompactString, KopiaEntry)> = raw
         .entries
+        .unwrap_or_default()
         .into_iter()
         .filter_map(|e| {
             if e.name.is_empty() {
@@ -989,7 +987,7 @@ impl VirtualKopiaBackup {
         FileMetadata {
             file_type: FileType::Dir,
             permissions: PortablePermissions::from_mode(0o755),
-            size: self.root_size,
+            size: 0,
             modified: None,
             created: None,
         }
@@ -999,7 +997,11 @@ impl VirtualKopiaBackup {
         FileMetadata {
             file_type: entry.file_type,
             permissions: PortablePermissions::from_mode(entry.mode),
-            size: entry.size,
+            size: if entry.file_type.is_dir() {
+                0
+            } else {
+                entry.size
+            },
             modified: Some(entry.mtime.into()),
             created: None,
         }
@@ -1123,7 +1125,18 @@ impl VirtualKopiaBackup {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), anyhow::Error>> + Send + 'a>>
     {
         Box::pin(async move {
-            let dir = self.load_dir(&oid).await?;
+            let dir = match self.load_dir(&oid).await {
+                Ok(dir) => dir,
+                Err(err) => {
+                    tracing::warn!(
+                        rel = %rel.display(),
+                        oid = %oid,
+                        "kopia flatten_walk failed to load directory, skipping subtree: {:?}",
+                        err,
+                    );
+                    return Ok(());
+                }
+            };
 
             for (name, entry) in dir.entries.iter() {
                 if entry.file_type.is_dir() {
@@ -1348,8 +1361,18 @@ impl VirtualReadableFilesystem for VirtualKopiaBackup {
 
         let base = path.as_ref().to_path_buf();
         let mut flat: Vec<(FileType, PathBuf, String)> = Vec::new();
-        if let Ok(oid) = self.resolve_dir_oid(&base).await {
-            self.flatten_walk(base, oid, &is_ignored, &mut flat).await?;
+        match self.resolve_dir_oid(&base).await {
+            Ok(oid) => {
+                self.flatten_walk(base.clone(), oid, &is_ignored, &mut flat)
+                    .await?;
+            }
+            Err(err) => {
+                tracing::warn!(
+                    base = %base.display(),
+                    "kopia stream walk could not resolve directory oid: {:?}",
+                    err,
+                );
+            }
         }
 
         let entry_wanted_notifier = Arc::new(tokio::sync::Notify::new());
