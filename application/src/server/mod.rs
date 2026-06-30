@@ -24,6 +24,7 @@ pub mod schedule;
 pub mod script;
 pub mod state;
 pub mod transfer;
+pub mod tunnel;
 pub mod websocket;
 
 pub struct InnerServer {

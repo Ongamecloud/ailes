@@ -1645,4 +1645,31 @@ impl super::ServerExecutor for DockerExecutor {
 
         Ok((handle, status_rx))
     }
+
+    async fn resolve_internal_target(
+        &self,
+        server: &super::super::Server,
+    ) -> Result<Option<std::net::IpAddr>, anyhow::Error> {
+        let container_id =
+            match find_running_container(&self.docker, &server.uuid.to_string(), Some("installer"))
+                .await
+            {
+                Some(id) => id,
+                None => return Ok(None),
+            };
+
+        let inspect = self.docker.inspect_container(&container_id, None).await?;
+
+        let network_name = self.app_config.load().docker.network.name.clone();
+        match inspect
+            .network_settings
+            .and_then(|settings| settings.networks)
+            .and_then(|mut networks| networks.remove(&network_name))
+            .and_then(|endpoint| endpoint.ip_address)
+            .filter(|ip| !ip.is_empty())
+        {
+            Some(ip) => Ok(Some(ip.parse()?)),
+            None => Ok(None),
+        }
+    }
 }

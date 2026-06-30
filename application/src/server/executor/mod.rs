@@ -68,4 +68,9 @@ pub trait ServerExecutor: Send + Sync {
         server: &super::Server,
         script: &super::installation::InstallationScript,
     ) -> Result<(Arc<dyn ProcessHandle>, StatusReceiver), anyhow::Error>;
+
+    async fn resolve_internal_target(
+        &self,
+        server: &super::Server,
+    ) -> Result<Option<std::net::IpAddr>, anyhow::Error>;
 }

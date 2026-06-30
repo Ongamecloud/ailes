@@ -67,4 +67,11 @@ impl ServerExecutor for NoopExecutor {
     ) -> Result<(Arc<dyn ProcessHandle>, StatusReceiver), anyhow::Error> {
         Self::unsupported()
     }
+
+    async fn resolve_internal_target(
+        &self,
+        _server: &crate::server::Server,
+    ) -> Result<Option<std::net::IpAddr>, anyhow::Error> {
+        Self::unsupported()
+    }
 }
