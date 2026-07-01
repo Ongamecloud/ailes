@@ -710,6 +710,14 @@ impl BackupExt for S3Backup {
         self.uuid
     }
 
+    async fn download_info(
+        &self,
+    ) -> Result<crate::server::backup::BackupDownloadInfo, anyhow::Error> {
+        Err(anyhow::anyhow!(
+            "this backup adapter does not support downloads"
+        ))
+    }
+
     async fn download(
         &self,
         _state: &crate::routes::State,

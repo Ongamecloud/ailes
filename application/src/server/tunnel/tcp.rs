@@ -67,4 +67,6 @@ pub async fn tunnel(socket: WebSocket, target: SocketAddr) {
         _ = ws_to_tcp => {}
         _ = tcp_to_ws => {}
     }
+
+    let _ = ws_sink.send(Message::Close(None)).await;
 }
