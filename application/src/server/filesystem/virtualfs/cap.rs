@@ -62,6 +62,20 @@ impl VirtualCapFilesystem {
             Ok(())
         }
     }
+
+    async fn async_prepare_directory_entry(
+        &self,
+        path: &(dyn AsRef<Path> + Send + Sync),
+    ) -> Result<crate::server::filesystem::PreparedDirectoryEntry, anyhow::Error> {
+        let metadata = self.inner.async_symlink_metadata(path).await?;
+        let path = self.check_ignored(metadata.file_type().into(), path.as_ref())?;
+
+        Ok(self
+            .server
+            .filesystem
+            .prepare_api_entry_cap(&self.inner, path, metadata)
+            .await)
+    }
 }
 
 #[async_trait::async_trait]
@@ -240,34 +254,76 @@ impl super::VirtualReadableFilesystem for VirtualCapFilesystem {
                     entries,
                 })
             } else {
-                let mut entries = Vec::new();
-                for entry in directory_entries.into_iter().chain(other_entries) {
-                    if let Ok(entry) =
-                        runtime.block_on(this.async_directory_entry(&path.join(&entry)))
-                    {
-                        entries.push(entry);
+                let no_directory_size = !this.is_primary_server_fs;
+
+                let prepare_group = |names: Vec<String>| {
+                    let mut out = Vec::with_capacity(names.len());
+                    for entry in names {
+                        let Ok(prepared) = runtime
+                            .block_on(this.async_prepare_directory_entry(&path.join(&entry)))
+                        else {
+                            continue;
+                        };
+
+                        let key: i128 = match sort {
+                            SizeAsc | SizeDesc => runtime
+                                .block_on(
+                                    this.server
+                                        .filesystem
+                                        .prepared_entry_sort_size(&prepared, no_directory_size),
+                                )
+                                .0
+                                .into(),
+                            PhysicalSizeAsc | PhysicalSizeDesc => runtime
+                                .block_on(
+                                    this.server
+                                        .filesystem
+                                        .prepared_entry_sort_size(&prepared, no_directory_size),
+                                )
+                                .1
+                                .into(),
+                            ModifiedAsc | ModifiedDesc => prepared.modified_secs().into(),
+                            CreatedAsc | CreatedDesc => prepared.created_secs().into(),
+                            NameAsc | NameDesc => 0,
+                        };
+
+                        out.push((key, prepared));
                     }
-                }
+                    out
+                };
 
-                entries.sort_by(|a, b| match (a.directory, b.directory) {
-                    (true, false) => std::cmp::Ordering::Less,
-                    (false, true) => std::cmp::Ordering::Greater,
-                    _ => match sort {
-                        SizeAsc => a.size.cmp(&b.size),
-                        SizeDesc => b.size.cmp(&a.size),
-                        PhysicalSizeAsc => a.size_physical.cmp(&b.size_physical),
-                        PhysicalSizeDesc => b.size_physical.cmp(&a.size_physical),
-                        ModifiedAsc => a.modified.cmp(&b.modified),
-                        ModifiedDesc => b.modified.cmp(&a.modified),
-                        CreatedAsc => a.created.cmp(&b.created),
-                        CreatedDesc => b.created.cmp(&a.created),
-                        NameAsc | NameDesc => std::cmp::Ordering::Equal,
-                    },
-                });
+                let mut dir_keyed = prepare_group(directory_entries);
+                let mut file_keyed = prepare_group(other_entries);
 
-                if let Some(per_page) = per_page {
+                let ascending =
+                    matches!(sort, SizeAsc | PhysicalSizeAsc | ModifiedAsc | CreatedAsc);
+                let cmp = |a: &(i128, _), b: &(i128, _)| {
+                    if ascending {
+                        a.0.cmp(&b.0)
+                    } else {
+                        b.0.cmp(&a.0)
+                    }
+                };
+                dir_keyed.sort_by(cmp);
+                file_keyed.sort_by(cmp);
+
+                let merged = dir_keyed.into_iter().chain(file_keyed).map(|(_, p)| p);
+                let paged: Vec<_> = if let Some(per_page) = per_page {
                     let start = (page - 1) * per_page;
-                    entries = entries.into_iter().skip(start).take(per_page).collect();
+                    merged.skip(start).take(per_page).collect()
+                } else {
+                    merged.collect()
+                };
+
+                let mut entries = Vec::with_capacity(paged.len());
+                for prepared in paged {
+                    entries.push(
+                        runtime.block_on(this.server.filesystem.finish_api_entry_cap(
+                            &this.inner,
+                            prepared,
+                            no_directory_size,
+                        )),
+                    );
                 }
 
                 Ok(DirectoryListing {

@@ -1662,6 +1662,17 @@ impl Filesystem {
         metadata: Metadata,
         no_directory_size: bool,
     ) -> crate::models::DirectoryEntry {
+        let prepared = self.prepare_api_entry_cap(filesystem, path, metadata).await;
+        self.finish_api_entry_cap(filesystem, prepared, no_directory_size)
+            .await
+    }
+
+    pub async fn prepare_api_entry_cap(
+        &self,
+        filesystem: &cap::CapFilesystem,
+        path: PathBuf,
+        metadata: Metadata,
+    ) -> PreparedDirectoryEntry {
         let symlink_destination = if metadata.is_symlink() {
             match filesystem.async_read_link(&path).await {
                 Ok(link) => filesystem.async_canonicalize(link).await.ok(),
@@ -1680,6 +1691,54 @@ impl Filesystem {
             } else {
                 None
             };
+
+        PreparedDirectoryEntry {
+            path,
+            metadata,
+            symlink_destination,
+            symlink_destination_metadata,
+        }
+    }
+
+    pub async fn prepared_entry_sort_size(
+        &self,
+        prepared: &PreparedDirectoryEntry,
+        no_directory_size: bool,
+    ) -> (u64, u64) {
+        let real_metadata = prepared
+            .symlink_destination_metadata
+            .as_ref()
+            .unwrap_or(&prepared.metadata);
+        let real_path = prepared
+            .symlink_destination
+            .as_ref()
+            .unwrap_or(&prepared.path);
+
+        if real_metadata.is_dir() {
+            if !no_directory_size && !self.config.load().api.disable_directory_size {
+                let space = self.disk_usage.read().await.get_size(real_path);
+
+                space.map_or((0, 0), |s| (s.get_logical(), s.get_physical()))
+            } else {
+                (0, 0)
+            }
+        } else {
+            (real_metadata.size_logical(), real_metadata.size_physical())
+        }
+    }
+
+    pub async fn finish_api_entry_cap(
+        &self,
+        filesystem: &cap::CapFilesystem,
+        prepared: PreparedDirectoryEntry,
+        no_directory_size: bool,
+    ) -> crate::models::DirectoryEntry {
+        let PreparedDirectoryEntry {
+            path,
+            metadata,
+            symlink_destination,
+            symlink_destination_metadata,
+        } = prepared;
 
         let mime_key = crate::routes::MimeCacheKey::from(&metadata);
         let detected_mime =
@@ -1737,6 +1796,39 @@ impl Filesystem {
             symlink_destination_metadata,
         )
         .await
+    }
+}
+
+pub struct PreparedDirectoryEntry {
+    pub path: PathBuf,
+    pub metadata: Metadata,
+    pub symlink_destination: Option<PathBuf>,
+    pub symlink_destination_metadata: Option<Metadata>,
+}
+
+impl PreparedDirectoryEntry {
+    pub fn modified_secs(&self) -> i64 {
+        self.metadata
+            .modified()
+            .map(|t| {
+                t.into_std()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default()
+            .as_secs() as i64
+    }
+
+    pub fn created_secs(&self) -> i64 {
+        self.metadata
+            .created()
+            .map(|t| {
+                t.into_std()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default()
+            .as_secs() as i64
     }
 }
 

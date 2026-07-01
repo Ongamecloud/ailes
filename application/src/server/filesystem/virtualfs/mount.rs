@@ -163,6 +163,25 @@ impl VirtualReadableFilesystem for VirtualMountFilesystem {
     ) -> Result<DirectoryListing, anyhow::Error> {
         let listing_path = path.as_ref();
 
+        let projects_virtual_dir = self.mounts.iter().any(|mount| {
+            let remaining = if listing_path == Path::new("") {
+                Some(mount.relative_target.as_path())
+            } else if mount.relative_target.starts_with(listing_path) {
+                mount.relative_target.strip_prefix(listing_path).ok()
+            } else {
+                None
+            };
+
+            remaining.is_some_and(|remaining| remaining.components().next().is_some())
+        });
+
+        if !projects_virtual_dir {
+            return self
+                .inner
+                .async_read_dir(path, per_page, page, is_ignored, sort)
+                .await;
+        }
+
         let inner_listing = match self
             .inner
             .async_read_dir(path, None, 1, is_ignored.clone(), sort)

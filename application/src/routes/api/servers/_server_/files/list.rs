@@ -74,14 +74,23 @@ mod get {
         server: GetServer,
         Query(data): Query<Params>,
     ) -> ApiResponseResult {
+        let cfg_limit = state.config.load().api.directory_entry_limit;
         let per_page = match data.per_page {
             Some(per_page) => Some(per_page),
-            None => match state.config.load().api.directory_entry_limit {
+            None => match cfg_limit {
                 0 => None,
                 limit => Some(limit),
             },
         };
         let page = data.page.unwrap_or(1);
+
+        tracing::info!(
+            raw_per_page = ?data.per_page,
+            raw_page = ?data.page,
+            cfg_directory_entry_limit = cfg_limit,
+            effective_per_page = ?per_page,
+            "files/list params",
+        );
 
         let ignore = if data.ignored.is_empty() {
             None
@@ -95,10 +104,12 @@ mod get {
             ignore_builder.build().ok()
         };
 
+        let t_route = std::time::Instant::now();
         let (root, filesystem) = server
             .filesystem
             .resolve_readable_fs(&server, Path::new(&data.root))
             .await;
+        let t_resolve = t_route.elapsed();
 
         let metadata = filesystem.async_metadata(&root).await;
         if let Ok(metadata) = metadata {
@@ -129,9 +140,20 @@ mod get {
             Default::default()
         };
 
+        let t_predir = t_route.elapsed();
         let entries = filesystem
             .async_read_dir(&root, per_page, page, is_ignored, data.sort)
             .await?;
+        let t_readdir = t_route.elapsed();
+
+        tracing::info!(
+            directory = %root.display(),
+            resolve_ms = t_resolve.as_secs_f64() * 1000.0,
+            pre_readdir_ms = t_predir.as_secs_f64() * 1000.0,
+            read_dir_ms = (t_readdir - t_predir).as_secs_f64() * 1000.0,
+            total_ms = t_readdir.as_secs_f64() * 1000.0,
+            "files/list route timing",
+        );
 
         ApiResponse::new_serialized(Response {
             total: entries.total_entries,
