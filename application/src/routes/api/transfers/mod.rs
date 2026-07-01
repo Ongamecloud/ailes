@@ -243,10 +243,11 @@ mod post {
                                     let archive = itaf::decoder::ItafDecoder::new(&mut reader)?;
                                     let mut directory_entries = chunked_vec::ChunkedVec::new();
                                     let mut last_parent = None;
-                                    let mut entries = archive.entries();
+                                    let entries = archive.entries();
 
                                     let mut read_buffer = vec![0; crate::TRANSFER_BUFFER_SIZE];
-                                    while let Some(Ok(mut entry)) = entries.next() {
+                                    for entry in entries {
+                                        let mut entry = entry?;
                                         let destination_path = entry.enclosed_path();
                                         if destination_path.as_os_str().is_empty()
                                             || destination_path.is_absolute()
@@ -382,10 +383,11 @@ mod post {
                                     let mut archive = tar::Archive::new(reader);
                                     let mut directory_entries = chunked_vec::ChunkedVec::new();
                                     let mut last_parent = None;
-                                    let mut entries = archive.entries()?;
+                                    let entries = archive.entries()?;
 
                                     let mut read_buffer = vec![0; crate::TRANSFER_BUFFER_SIZE];
-                                    while let Some(Ok(mut entry)) = entries.next() {
+                                    for entry in entries {
+                                        let mut entry = entry?;
                                         let path = entry.path()?;
 
                                         if path.is_absolute() {

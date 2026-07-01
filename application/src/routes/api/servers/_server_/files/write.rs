@@ -181,7 +181,10 @@ mod post {
         let mut file = filesystem.async_create_file(&path).await?;
         let mut stream = body.into_data_stream();
 
-        while let Some(Ok(chunk)) = stream.next().await {
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|err| {
+                std::io::Error::other(format!("failed to read request body: {err}"))
+            })?;
             file.write_all(&chunk).await?;
         }
 

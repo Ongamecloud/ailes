@@ -775,10 +775,11 @@ impl BackupExt for ResticBackup {
                     let mut archive = zip::ZipWriter::new_stream(writer);
 
                     let mut subtar = tar::Archive::new(child.into_stdout()?);
-                    let mut entries = subtar.entries()?;
+                    let entries = subtar.entries()?;
 
                     let mut read_buffer = vec![0; crate::BUFFER_SIZE];
-                    while let Some(Ok(mut entry)) = entries.next() {
+                    for entry in entries {
+                        let mut entry = entry?;
                         let header = entry.header().clone();
                         let relative = entry.path()?;
 
@@ -901,9 +902,10 @@ impl BackupExt for ResticBackup {
 
                     let mut dir_stack = Vec::new();
                     let mut restic_tar = tar::Archive::new(child.into_stdout()?);
-                    let mut entries = restic_tar.entries()?;
+                    let entries = restic_tar.entries()?;
 
-                    while let Some(Ok(entry)) = entries.next() {
+                    for entry in entries {
+                        let entry = entry?;
                         let header = entry.header().clone();
                         let relative = entry.path()?.to_path_buf();
 
@@ -1624,9 +1626,10 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
                             tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
                                 let runtime = tokio::runtime::Handle::current();
                                 let mut restic_tar = tar::Archive::new(child.into_stdout()?);
-                                let mut entries = restic_tar.entries()?;
+                                let entries = restic_tar.entries()?;
 
-                                while let Some(Ok(mut entry)) = entries.next() {
+                                for entry in entries {
+                                    let mut entry = entry?;
                                     let header = entry.header().clone();
                                     let relative = path.join(entry.path()?);
 
@@ -1857,10 +1860,11 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
                     let mut zip = zip::ZipWriter::new_stream(writer);
 
                     let mut restic_tar = tar::Archive::new(child.take_stdout()?);
-                    let mut entries = restic_tar.entries()?;
+                    let entries = restic_tar.entries()?;
 
                     let mut read_buffer = vec![0; crate::BUFFER_SIZE];
-                    while let Some(Ok(mut entry)) = entries.next() {
+                    for entry in entries {
+                        let mut entry = entry?;
                         let header = entry.header().clone();
                         let relative = entry.path()?.to_path_buf();
 
@@ -1940,9 +1944,10 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
                     let mut tar = tar::Builder::new(writer);
 
                     let mut restic_tar = tar::Archive::new(child.take_stdout()?);
-                    let mut entries = restic_tar.entries()?;
+                    let entries = restic_tar.entries()?;
 
-                    while let Some(Ok(entry)) = entries.next() {
+                    for entry in entries {
+                        let entry = entry?;
                         let mut header = entry.header().clone();
                         let relative = entry.path()?.to_path_buf();
 
@@ -1998,9 +2003,10 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
 
                     let mut dir_stack = Vec::new();
                     let mut restic_tar = tar::Archive::new(child.take_stdout()?);
-                    let mut entries = restic_tar.entries()?;
+                    let entries = restic_tar.entries()?;
 
-                    while let Some(Ok(entry)) = entries.next() {
+                    for entry in entries {
+                        let entry = entry?;
                         let header = entry.header().clone();
                         let relative = entry.path()?.to_path_buf();
 
@@ -2224,9 +2230,10 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
                                 let mut child = spawn_restic(true, &entry_path)?;
 
                                 let mut restic_tar = tar::Archive::new(child.take_stdout()?);
-                                let mut entries = restic_tar.entries()?;
+                                let entries = restic_tar.entries()?;
 
-                                while let Some(Ok(mut entry)) = entries.next() {
+                                for entry in entries {
+                                    let mut entry = entry?;
                                     let header = entry.header().clone();
                                     let relative = entry_path.join(entry.path()?);
 
@@ -2355,9 +2362,10 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
                                 let mut child = spawn_restic(true, &entry_path)?;
 
                                 let mut restic_tar = tar::Archive::new(child.take_stdout()?);
-                                let mut entries = restic_tar.entries()?;
+                                let entries = restic_tar.entries()?;
 
-                                while let Some(Ok(entry)) = entries.next() {
+                                for entry in entries {
+                                    let entry = entry?;
                                     let mut header = entry.header().clone();
                                     let relative = entry.path()?.to_path_buf();
 
@@ -2501,9 +2509,10 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
                                 let base_depth = dir_stack.len();
                                 let mut child = spawn_restic(true, &entry_path)?;
                                 let mut restic_tar = tar::Archive::new(child.take_stdout()?);
-                                let mut entries = restic_tar.entries()?;
+                                let entries = restic_tar.entries()?;
 
-                                while let Some(Ok(entry)) = entries.next() {
+                                for entry in entries {
+                                    let entry = entry?;
                                     let header = entry.header().clone();
                                     let relative = entry.path()?.to_path_buf();
 

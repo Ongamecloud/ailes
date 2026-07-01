@@ -506,10 +506,11 @@ impl BackupExt for KopiaBackup {
                         .stdout
                         .ok_or_else(|| anyhow::anyhow!("kopia restore produced no stdout"))?;
                     let mut subtar = tar::Archive::new(stdout);
-                    let mut entries = subtar.entries()?;
+                    let entries = subtar.entries()?;
 
                     let mut read_buffer = vec![0; crate::BUFFER_SIZE];
-                    while let Some(Ok(mut entry)) = entries.next() {
+                    for entry in entries {
+                        let mut entry = entry?;
                         let header = entry.header().clone();
                         let relative = entry.path()?;
 
@@ -1335,9 +1336,10 @@ impl VirtualReadableFilesystem for VirtualKopiaBackup {
                         .ok_or_else(|| anyhow::anyhow!("kopia restore produced no stdout"))?;
 
                     let mut subtar = tar::Archive::new(stdout);
-                    let mut entries = subtar.entries()?;
+                    let entries = subtar.entries()?;
 
-                    while let Some(Ok(mut entry)) = entries.next() {
+                    for entry in entries {
+                        let mut entry = entry?;
                         let header = entry.header().clone();
                         let relative = entry.path()?.to_path_buf();
                         if relative.as_os_str().is_empty() || relative.as_os_str() == "." {
@@ -1521,10 +1523,11 @@ impl VirtualReadableFilesystem for VirtualKopiaBackup {
                     let mut zip = zip::ZipWriter::new_stream(writer);
 
                     let mut subtar = tar::Archive::new(stdout);
-                    let mut entries = subtar.entries()?;
+                    let entries = subtar.entries()?;
 
                     let mut read_buffer = vec![0; crate::BUFFER_SIZE];
-                    while let Some(Ok(mut entry)) = entries.next() {
+                    for entry in entries {
+                        let mut entry = entry?;
                         let header = entry.header().clone();
                         let relative = entry.path()?.to_path_buf();
                         if relative.as_os_str().is_empty() || relative.as_os_str() == "." {
@@ -1611,9 +1614,10 @@ impl VirtualReadableFilesystem for VirtualKopiaBackup {
                     let mut tar = tar::Builder::new(writer);
 
                     let mut subtar = tar::Archive::new(stdout);
-                    let mut entries = subtar.entries()?;
+                    let entries = subtar.entries()?;
 
-                    while let Some(Ok(entry)) = entries.next() {
+                    for entry in entries {
+                        let entry = entry?;
                         let mut header = entry.header().clone();
                         let relative = entry.path()?.to_path_buf();
                         if relative.as_os_str().is_empty() || relative.as_os_str() == "." {

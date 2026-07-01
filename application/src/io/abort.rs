@@ -10,10 +10,9 @@ use std::{
 pub struct AbortListener(Arc<AtomicBool>);
 
 impl AbortListener {
-    #[cold]
     #[inline(always)]
     pub fn is_aborted(&self) -> bool {
-        self.0.load(Ordering::Relaxed)
+        crate::unlikely(self.0.load(Ordering::Relaxed))
     }
 }
 

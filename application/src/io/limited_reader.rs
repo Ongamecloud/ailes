@@ -1,3 +1,4 @@
+use crate::io::SafeSliceMutExt;
 use std::{
     io::{Read, Seek, SeekFrom},
     pin::Pin,
@@ -6,11 +7,13 @@ use std::{
 };
 use tokio::io::{AsyncRead, AsyncSeek, ReadBuf};
 
+const WINDOW: Duration = Duration::from_secs(1);
+
 pub struct LimitedReader<R: Read> {
     inner: R,
     bytes_per_second: u64,
-    last_read_time: Instant,
-    bytes_read_since_last_check: u64,
+    window_start: Instant,
+    bytes_read_in_window: u64,
 }
 
 impl<R: Read> LimitedReader<R> {
@@ -18,8 +21,8 @@ impl<R: Read> LimitedReader<R> {
         Self {
             inner,
             bytes_per_second,
-            last_read_time: Instant::now(),
-            bytes_read_since_last_check: 0,
+            window_start: Instant::now(),
+            bytes_read_in_window: 0,
         }
     }
 }
@@ -35,33 +38,26 @@ impl<R: Read> Read for LimitedReader<R> {
         }
 
         let now = Instant::now();
-        let elapsed = now.duration_since(self.last_read_time).as_secs_f64();
+        if now.duration_since(self.window_start) >= WINDOW {
+            self.window_start = now;
+            self.bytes_read_in_window = 0;
+        }
 
-        let bytes_allowed = (elapsed * self.bytes_per_second as f64) as u64;
-
-        if self.bytes_read_since_last_check >= bytes_allowed {
-            let time_since_last_read = now.duration_since(self.last_read_time);
-            if time_since_last_read < Duration::from_secs(1) {
-                let bytes_over = self.bytes_read_since_last_check - bytes_allowed;
-                let sleep_secs = bytes_over as f64 / self.bytes_per_second as f64;
-                let sleep_duration = Duration::from_secs_f64(sleep_secs);
-
-                let max_sleep = Duration::from_secs(1) - time_since_last_read;
-                let actual_sleep = sleep_duration.min(max_sleep);
-
-                if !actual_sleep.is_zero() {
-                    std::thread::sleep(actual_sleep);
-                }
+        let mut budget = self.bytes_per_second - self.bytes_read_in_window;
+        if budget == 0 {
+            let sleep = WINDOW.saturating_sub(now.duration_since(self.window_start));
+            if !sleep.is_zero() {
+                std::thread::sleep(sleep);
             }
+
+            self.window_start = Instant::now();
+            self.bytes_read_in_window = 0;
+            budget = self.bytes_per_second;
         }
 
-        let bytes_read = self.inner.read(buf)?;
-        self.bytes_read_since_last_check += bytes_read as u64;
-
-        if now.duration_since(self.last_read_time) >= Duration::from_secs(1) {
-            self.last_read_time = now;
-            self.bytes_read_since_last_check = 0;
-        }
+        let to_read = buf.len().min(budget as usize);
+        let bytes_read = self.inner.read(buf.get_slice_mut(..to_read)?)?;
+        self.bytes_read_in_window += bytes_read as u64;
 
         Ok(bytes_read)
     }
@@ -76,8 +72,8 @@ impl<R: Read + Seek> Seek for LimitedReader<R> {
 pub struct AsyncLimitedReader<R: AsyncRead + Unpin> {
     inner: R,
     bytes_per_second: u64,
-    last_read_time: Instant,
-    bytes_read_since_last_check: u64,
+    window_start: Instant,
+    bytes_read_in_window: u64,
     delay_future: Option<Pin<Box<tokio::time::Sleep>>>,
 }
 
@@ -86,42 +82,9 @@ impl<R: AsyncRead + Unpin> AsyncLimitedReader<R> {
         Self {
             inner,
             bytes_per_second,
-            last_read_time: Instant::now(),
-            bytes_read_since_last_check: 0,
+            window_start: Instant::now(),
+            bytes_read_in_window: 0,
             delay_future: None,
-        }
-    }
-
-    fn calculate_delay(&self) -> Option<Duration> {
-        let now = Instant::now();
-        let elapsed = now.duration_since(self.last_read_time).as_secs_f64();
-
-        let bytes_allowed = (elapsed * self.bytes_per_second as f64) as u64;
-
-        if self.bytes_read_since_last_check > bytes_allowed {
-            let time_since_last_read = now.duration_since(self.last_read_time);
-            if time_since_last_read < Duration::from_secs(1) {
-                let bytes_over = self.bytes_read_since_last_check - bytes_allowed;
-                let sleep_secs = bytes_over as f64 / self.bytes_per_second as f64;
-                let sleep_duration = Duration::from_secs_f64(sleep_secs);
-
-                let max_sleep = Duration::from_secs(1) - time_since_last_read;
-                let actual_sleep = sleep_duration.min(max_sleep);
-
-                if !actual_sleep.is_zero() {
-                    return Some(actual_sleep);
-                }
-            }
-        }
-
-        None
-    }
-
-    fn check_reset_counters(&mut self) {
-        let now = Instant::now();
-        if now.duration_since(self.last_read_time) >= Duration::from_secs(1) {
-            self.last_read_time = now;
-            self.bytes_read_since_last_check = 0;
         }
     }
 }
@@ -146,28 +109,47 @@ impl<R: AsyncRead + Unpin> AsyncRead for AsyncLimitedReader<R> {
             match delay.as_mut().poll(cx) {
                 Poll::Ready(_) => {
                     this.delay_future = None;
+                    this.window_start = Instant::now();
+                    this.bytes_read_in_window = 0;
                 }
                 Poll::Pending => return Poll::Pending,
             }
         }
 
-        if this.delay_future.is_none()
-            && let Some(delay_duration) = this.calculate_delay()
-        {
-            let delay = Box::pin(tokio::time::sleep(delay_duration));
-            this.delay_future = Some(delay);
-            return self.poll_read(cx, buf);
+        let now = Instant::now();
+        if now.duration_since(this.window_start) >= WINDOW {
+            this.window_start = now;
+            this.bytes_read_in_window = 0;
         }
 
-        let filled_before = buf.filled().len();
+        let budget = this.bytes_per_second - this.bytes_read_in_window;
+        if budget == 0 {
+            let sleep = WINDOW.saturating_sub(now.duration_since(this.window_start));
+            let mut delay = Box::pin(tokio::time::sleep(sleep));
 
-        match Pin::new(&mut this.inner).poll_read(cx, buf) {
+            match delay.as_mut().poll(cx) {
+                Poll::Ready(_) => {
+                    this.window_start = Instant::now();
+                    this.bytes_read_in_window = 0;
+                }
+                Poll::Pending => {
+                    this.delay_future = Some(delay);
+                    return Poll::Pending;
+                }
+            }
+        }
+
+        let budget = this.bytes_per_second - this.bytes_read_in_window;
+        let to_read = buf.remaining().min(budget as usize);
+
+        let mut tmp = ReadBuf::new(buf.initialize_unfilled_to(to_read));
+
+        match Pin::new(&mut this.inner).poll_read(cx, &mut tmp) {
             Poll::Ready(Ok(())) => {
-                let filled_after = buf.filled().len();
-                let bytes_read = filled_after - filled_before;
+                let bytes_read = tmp.filled().len();
 
-                this.bytes_read_since_last_check += bytes_read as u64;
-                this.check_reset_counters();
+                buf.advance(bytes_read);
+                this.bytes_read_in_window += bytes_read as u64;
 
                 Poll::Ready(Ok(()))
             }
@@ -183,5 +165,101 @@ impl<R: AsyncRead + AsyncSeek + Unpin> AsyncSeek for AsyncLimitedReader<R> {
 
     fn poll_complete(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<u64>> {
         Pin::new(&mut self.get_mut().inner).poll_complete(cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+    use tokio::io::AsyncReadExt;
+
+    fn read_all<R: Read>(mut r: R) -> usize {
+        let mut buf = [0; 1024];
+        let mut total = 0;
+        loop {
+            let n = r.read(&mut buf).unwrap();
+            if n == 0 {
+                break;
+            }
+            total += n;
+        }
+        total
+    }
+
+    async fn read_all_async<R: AsyncRead + Unpin>(mut r: R) -> usize {
+        let mut buf = [0; 1024];
+        let mut total = 0;
+        loop {
+            let n = r.read(&mut buf).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            total += n;
+        }
+        total
+    }
+
+    // LimitedReader
+
+    #[test]
+    fn limited_reader_clamps_read_to_window_budget() {
+        let mut r = LimitedReader::new_with_bytes_per_second(Cursor::new(vec![0; 1024]), 100);
+
+        let mut buf = [0; 1024];
+        assert_eq!(r.read(&mut buf).unwrap(), 100);
+    }
+
+    #[test]
+    fn limited_reader_zero_limit_passes_through() {
+        let mut r = LimitedReader::new_with_bytes_per_second(Cursor::new(vec![0; 1024]), 0);
+
+        let mut buf = [0; 1024];
+        assert_eq!(r.read(&mut buf).unwrap(), 1024);
+    }
+
+    #[test]
+    fn limited_reader_enforces_rate_over_time() {
+        let r = LimitedReader::new_with_bytes_per_second(Cursor::new(vec![0; 250]), 100);
+
+        // 250 bytes at 100 B/s: 100 in the first window, the rest needs 2 more windows
+        let start = Instant::now();
+        assert_eq!(read_all(r), 250);
+        assert!(start.elapsed() >= Duration::from_secs(2));
+    }
+
+    // AsyncLimitedReader
+
+    #[test]
+    fn async_limited_reader_clamps_read_to_window_budget() {
+        tokio_test::block_on(async {
+            let mut r =
+                AsyncLimitedReader::new_with_bytes_per_second(Cursor::new(vec![0; 1024]), 100);
+
+            let mut buf = [0; 1024];
+            assert_eq!(r.read(&mut buf).await.unwrap(), 100);
+        });
+    }
+
+    #[test]
+    fn async_limited_reader_zero_limit_passes_through() {
+        tokio_test::block_on(async {
+            let mut r =
+                AsyncLimitedReader::new_with_bytes_per_second(Cursor::new(vec![0; 1024]), 0);
+
+            let mut buf = [0; 1024];
+            assert_eq!(r.read(&mut buf).await.unwrap(), 1024);
+        });
+    }
+
+    #[test]
+    fn async_limited_reader_enforces_rate_over_time() {
+        tokio_test::block_on(async {
+            let r = AsyncLimitedReader::new_with_bytes_per_second(Cursor::new(vec![0; 250]), 100);
+
+            let start = Instant::now();
+            assert_eq!(read_all_async(r).await, 250);
+            assert!(start.elapsed() >= Duration::from_secs(2));
+        });
     }
 }

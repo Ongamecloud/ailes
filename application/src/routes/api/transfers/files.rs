@@ -192,11 +192,12 @@ mod post {
                                         {
                                             let archive =
                                                 itaf::decoder::ItafDecoder::new(&mut reader)?;
-                                            let mut entries = archive.entries();
+                                            let entries = archive.entries();
 
                                             let mut read_buffer =
                                                 vec![0; crate::TRANSFER_BUFFER_SIZE];
-                                            while let Some(Ok(mut entry)) = entries.next() {
+                                            for entry in entries {
+                                                let mut entry = entry?;
                                                 let rel = entry.enclosed_path();
                                                 if rel.as_os_str().is_empty() || rel.is_absolute()
                                                 {
@@ -287,10 +288,11 @@ mod post {
                                         } else {
                                             let mut archive = tar::Archive::new(reader);
                                             archive.set_ignore_zeros(true);
-                                            let mut entries = archive.entries()?;
+                                            let entries = archive.entries()?;
 
                                             let mut read_buffer = vec![0; crate::TRANSFER_BUFFER_SIZE];
-                                            while let Some(Ok(mut entry)) = entries.next() {
+                                            for entry in entries {
+                                                let mut entry = entry?;
                                                 let path = entry.path()?;
 
                                                 if path.is_absolute() {

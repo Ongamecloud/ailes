@@ -1,13 +1,16 @@
+use crate::io::SafeSliceExt;
 use std::{
     io::{Seek, SeekFrom, Write},
     time::{Duration, Instant},
 };
 
+const WINDOW: Duration = Duration::from_secs(1);
+
 pub struct LimitedWriter<W: Write> {
     inner: W,
     bytes_per_second: u64,
-    last_write_time: Instant,
-    bytes_written_since_last_check: u64,
+    window_start: Instant,
+    bytes_written_in_window: u64,
 }
 
 impl<W: Write> LimitedWriter<W> {
@@ -15,8 +18,8 @@ impl<W: Write> LimitedWriter<W> {
         Self {
             inner,
             bytes_per_second,
-            last_write_time: Instant::now(),
-            bytes_written_since_last_check: 0,
+            window_start: Instant::now(),
+            bytes_written_in_window: 0,
         }
     }
 
@@ -37,33 +40,26 @@ impl<W: Write> Write for LimitedWriter<W> {
         }
 
         let now = Instant::now();
-        let elapsed = now.duration_since(self.last_write_time).as_secs_f64();
+        if now.duration_since(self.window_start) >= WINDOW {
+            self.window_start = now;
+            self.bytes_written_in_window = 0;
+        }
 
-        let bytes_allowed = (elapsed * self.bytes_per_second as f64) as u64;
-
-        if self.bytes_written_since_last_check >= bytes_allowed {
-            let time_since_last_write = now.duration_since(self.last_write_time);
-            if time_since_last_write < Duration::from_secs(1) {
-                let bytes_over = self.bytes_written_since_last_check - bytes_allowed;
-                let sleep_secs = bytes_over as f64 / self.bytes_per_second as f64;
-                let sleep_duration = Duration::from_secs_f64(sleep_secs);
-
-                let max_sleep = Duration::from_secs(1) - time_since_last_write;
-                let actual_sleep = sleep_duration.min(max_sleep);
-
-                if !actual_sleep.is_zero() {
-                    std::thread::sleep(actual_sleep);
-                }
+        let mut budget = self.bytes_per_second - self.bytes_written_in_window;
+        if budget == 0 {
+            let sleep = WINDOW.saturating_sub(now.duration_since(self.window_start));
+            if !sleep.is_zero() {
+                std::thread::sleep(sleep);
             }
+
+            self.window_start = Instant::now();
+            self.bytes_written_in_window = 0;
+            budget = self.bytes_per_second;
         }
 
-        let bytes_written = self.inner.write(buf)?;
-        self.bytes_written_since_last_check += bytes_written as u64;
-
-        if now.duration_since(self.last_write_time) >= Duration::from_secs(1) {
-            self.last_write_time = now;
-            self.bytes_written_since_last_check = 0;
-        }
+        let to_write = buf.len().min(budget as usize);
+        let bytes_written = self.inner.write(buf.get_slice(..to_write)?)?;
+        self.bytes_written_in_window += bytes_written as u64;
 
         Ok(bytes_written)
     }
@@ -76,5 +72,38 @@ impl<W: Write> Write for LimitedWriter<W> {
 impl<W: Write + Seek> Seek for LimitedWriter<W> {
     fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
         self.inner.seek(pos)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // LimitedWriter
+
+    #[test]
+    fn limited_writer_clamps_write_to_window_budget() {
+        let mut w = LimitedWriter::new_with_bytes_per_second(Vec::new(), 100);
+
+        assert_eq!(w.write(&[0; 1024]).unwrap(), 100);
+    }
+
+    #[test]
+    fn limited_writer_zero_limit_passes_through() {
+        let mut w = LimitedWriter::new_with_bytes_per_second(Vec::new(), 0);
+
+        assert_eq!(w.write(&[0; 1024]).unwrap(), 1024);
+    }
+
+    #[test]
+    fn limited_writer_enforces_rate_over_time() {
+        let mut w = LimitedWriter::new_with_bytes_per_second(Vec::new(), 100);
+
+        // 250 bytes at 100 B/s: 100 in the first window, the rest needs 2 more windows
+        let start = Instant::now();
+        w.write_all(&[0; 250]).unwrap();
+
+        assert_eq!(w.into_inner().len(), 250);
+        assert!(start.elapsed() >= Duration::from_secs(2));
     }
 }

@@ -496,11 +496,12 @@ impl Archive {
                     let mut archive = tar::Archive::new(reader);
                     archive.set_ignore_zeros(true);
                     let mut directory_entries = chunked_vec::ChunkedVec::new();
-                    let mut entries = archive.entries()?;
+                    let entries = archive.entries()?;
 
                     let mut read_buffer = vec![0; crate::BUFFER_SIZE];
                     let mut last_parent = None;
-                    while let Some(Ok(mut entry)) = entries.next() {
+                    for entry in entries {
+                        let mut entry = entry?;
                         let path = entry.path()?;
 
                         if path.is_absolute() {
@@ -1151,10 +1152,15 @@ impl Archive {
                         scope: &rayon::Scope,
                         listener: &AbortListener,
                         progress: &Option<Arc<AtomicU64>>,
+                        error: &Arc<RwLock<Option<std::io::Error>>>,
                         server: &crate::server::Server,
                         destination: &Path,
                         entry: ddup_bak::archive::entries::Entry,
                     ) -> Result<(), anyhow::Error> {
+                        if error.read().is_some() {
+                            return Ok(());
+                        }
+
                         let destination_path = destination.join(entry.name());
                         if server
                             .filesystem
@@ -1182,6 +1188,7 @@ impl Archive {
                                         scope,
                                         listener,
                                         progress,
+                                        error,
                                         server,
                                         &destination_path,
                                         entry,
@@ -1211,6 +1218,7 @@ impl Archive {
                                     None => Box::new(reader),
                                 };
 
+                                let error = Arc::clone(error);
                                 scope.spawn(move |_| {
                                     let mut run = || -> Result<(), std::io::Error> {
                                         crate::io::copy(&mut reader, &mut writer)?;
@@ -1225,6 +1233,8 @@ impl Archive {
                                             "failed to extract file from archive: {:#?}",
                                             err
                                         );
+
+                                        error.write().replace(err);
                                     }
                                 });
                             }
@@ -1250,12 +1260,15 @@ impl Archive {
                         Ok(())
                     }
 
-                    pool.in_place_scope(|scope| {
+                    let error = Arc::new(RwLock::new(None));
+
+                    pool.in_place_scope(|scope| -> Result<(), anyhow::Error> {
                         for entry in archive.into_entries() {
                             recursive_traverse(
                                 scope,
                                 &listener,
                                 &progress,
+                                &error,
                                 &self.server,
                                 &destination,
                                 entry,
@@ -1263,7 +1276,13 @@ impl Archive {
                         }
 
                         Ok(())
-                    })
+                    })?;
+
+                    if let Some(err) = error.write().take() {
+                        return Err(err.into());
+                    }
+
+                    Ok(())
                 })
                 .await??;
 

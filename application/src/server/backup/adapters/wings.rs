@@ -427,10 +427,11 @@ impl BackupExt for WingsBackup {
 
                     let mut archive = tar::Archive::new(reader);
                     let mut directory_entries = Vec::new();
-                    let mut entries = archive.entries()?;
+                    let entries = archive.entries()?;
 
                     let mut read_buffer = vec![0; crate::BUFFER_SIZE];
-                    while let Some(Ok(mut entry)) = entries.next() {
+                    for entry in entries {
+                        let mut entry = entry?;
                         let path = entry.path()?;
 
                         if path.is_absolute() {
