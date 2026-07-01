@@ -1,38 +1,42 @@
 use super::State;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-mod delete {
+mod get {
     use crate::{
         response::{ApiResponse, ApiResponseResult},
         routes::{ApiError, GetState},
-        server::backup::adapters::BackupAdapter,
+        server::backup::{BackupDownloadInfo, adapters::BackupAdapter},
     };
-    use axum::{extract::Path, http::StatusCode};
-    use serde::{Deserialize, Serialize};
+    use axum::{
+        extract::{Path, Query},
+        http::StatusCode,
+    };
+    use serde::Deserialize;
     use utoipa::ToSchema;
 
     #[derive(ToSchema, Deserialize)]
-    pub struct Payload {
+    pub struct Params {
         adapter: BackupAdapter,
     }
 
-    #[derive(ToSchema, Serialize)]
-    struct Response {}
-
-    #[utoipa::path(delete, path = "/", responses(
-        (status = ACCEPTED, body = inline(Response)),
-        (status = NOT_FOUND, body = ApiError),
-    ), params(
+    #[utoipa::path(get, path = "/", params(
         (
             "backup" = uuid::Uuid,
             description = "The backup uuid",
             example = "123e4567-e89b-12d3-a456-426614174000",
         ),
-    ), request_body = inline(Payload))]
+        (
+            "adapter" = BackupAdapter, Query,
+            description = "The backup adapter to use",
+        ),
+    ), responses(
+        (status = OK, body = inline(BackupDownloadInfo)),
+        (status = NOT_FOUND, body = ApiError),
+    ))]
     pub async fn route(
         state: GetState,
         Path(backup_id): Path<uuid::Uuid>,
-        crate::Payload(data): crate::Payload<Payload>,
+        Query(data): Query<Params>,
     ) -> ApiResponseResult {
         let backup = match state
             .backup_manager
@@ -47,25 +51,12 @@ mod delete {
             }
         };
 
-        tokio::spawn(async move {
-            if let Err(err) = backup.delete(&state).await {
-                tracing::error!(
-                    backup = %backup.uuid(),
-                    adapter = ?backup.adapter(),
-                    "failed to delete backup: {:#?}",
-                    err
-                );
-            }
-        });
-
-        ApiResponse::new_serialized(Response {})
-            .with_status(StatusCode::ACCEPTED)
-            .ok()
+        ApiResponse::new_serialized(backup.download_info().await?).ok()
     }
 }
 
 pub fn router(state: &State) -> OpenApiRouter<State> {
     OpenApiRouter::new()
-        .routes(routes!(delete::route))
+        .routes(routes!(get::route))
         .with_state(state.clone())
 }

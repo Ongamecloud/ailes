@@ -117,6 +117,19 @@ pub enum FilesystemOperation {
         #[schema(value_type = u64)]
         files_processed: Arc<AtomicU64>,
     },
+    ExportBackup {
+        backup: uuid::Uuid,
+        #[schema(value_type = String)]
+        destination_path: PathBuf,
+
+        start_time: chrono::DateTime<chrono::Utc>,
+        #[serde(serialize_with = "serialize_arc")]
+        #[schema(value_type = u64)]
+        bytes_processed: Arc<AtomicU64>,
+        #[serde(serialize_with = "serialize_arc")]
+        #[schema(value_type = u64)]
+        bytes_total: Arc<AtomicU64>,
+    },
 }
 
 pub struct Operation {

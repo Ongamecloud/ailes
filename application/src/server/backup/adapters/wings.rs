@@ -322,6 +322,21 @@ impl BackupExt for WingsBackup {
         self.uuid
     }
 
+    async fn download_info(
+        &self,
+    ) -> Result<crate::server::backup::BackupDownloadInfo, anyhow::Error> {
+        let size = tokio::fs::metadata(&self.path)
+            .await
+            .ok()
+            .map(|metadata| metadata.len());
+
+        Ok(crate::server::backup::BackupDownloadInfo {
+            file_name: format!("{}.{}", self.uuid, self.format.extension()),
+            archive_format: Some(self.format),
+            size,
+        })
+    }
+
     async fn download(
         &self,
         _state: &crate::routes::State,
