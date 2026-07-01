@@ -331,7 +331,6 @@ impl BackupExt for WingsBackup {
             .map(|metadata| metadata.len());
 
         Ok(crate::server::backup::BackupDownloadInfo {
-            file_name: format!("{}.{}", self.uuid, self.format.extension()),
             archive_format: Some(self.format),
             size,
         })

@@ -16,7 +16,6 @@ pub mod transfer;
 
 #[derive(Clone, ToSchema, Serialize)]
 pub struct BackupDownloadInfo {
-    pub file_name: String,
     pub archive_format: Option<ArchiveFormat>,
     pub size: Option<u64>,
 }
@@ -171,7 +170,6 @@ pub trait BackupExt {
 
     async fn download_info(&self) -> Result<BackupDownloadInfo, anyhow::Error> {
         Ok(BackupDownloadInfo {
-            file_name: format!("{}.tar.gz", self.uuid()),
             archive_format: None,
             size: None,
         })
