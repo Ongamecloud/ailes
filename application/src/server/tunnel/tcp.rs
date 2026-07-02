@@ -36,17 +36,19 @@ pub async fn tunnel(socket: WebSocket, target: SocketAddr) {
     };
 
     let tcp_to_ws = async {
-        let mut buffer = vec![0; crate::BUFFER_SIZE];
+        let mut buffer = bytes::BytesMut::with_capacity(crate::BUFFER_SIZE);
         let mut ping = tokio::time::interval(PING_INTERVAL);
         ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
+            buffer.reserve(crate::BUFFER_SIZE);
+
             tokio::select! {
-                read = tcp_read.read(&mut buffer) => match read {
+                read = tcp_read.read_buf(&mut buffer) => match read {
                     Ok(0) | Err(_) => break,
-                    Ok(bytes_read) => {
-                        if let Some(slice) = buffer.get(..bytes_read) && ws_sink
-                            .send(Message::Binary(Bytes::copy_from_slice(slice)))
+                    Ok(_) => {
+                        if ws_sink
+                            .send(Message::Binary(buffer.split().freeze()))
                             .await
                             .is_err()
                         {

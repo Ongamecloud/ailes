@@ -196,7 +196,8 @@ impl Server {
 
                     if let Some(done_vec) = &startup_configuration.done {
                         if startup_configuration.strip_ansi {
-                            let mut result_line = line.to_compact_string();
+                            let mut result_line =
+                                compact_str::CompactString::with_capacity(line.len());
                             let mut chars = line.chars().peekable();
 
                             while let Some(c) = chars.next() {

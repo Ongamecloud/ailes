@@ -198,11 +198,20 @@ impl BackupCreateExt for PbsBackup {
             let config = config.clone();
             let backup_id = backup_id.clone();
             let server_uuid = server.uuid;
+            let compression_threads = server
+                .app_state
+                .config
+                .load()
+                .system
+                .backups
+                .pbs
+                .create_threads;
 
             async move {
                 let mut writer = PbsBackupWriter::connect(&config, &backup_id, backup_time).await?;
 
-                let known_chunks = match writer.previous_archive_digests(ARCHIVE_NAME).await {
+                let result = async {
+                    let known_chunks = match writer.previous_archive_digests(ARCHIVE_NAME).await {
                     Ok(digests) => digests,
                     Err(err) => {
                         tracing::debug!(
@@ -213,7 +222,9 @@ impl BackupCreateExt for PbsBackup {
                     }
                 };
 
-                let archive = writer.upload_archive(archive_reader, known_chunks).await?;
+                let archive = writer
+                    .upload_archive(archive_reader, known_chunks, compression_threads)
+                    .await?;
 
                 let catalog = catalog_rx
                     .await
@@ -223,6 +234,7 @@ impl BackupCreateExt for PbsBackup {
                         pbs_client::catalog::CATALOG_NAME,
                         std::io::Cursor::new(catalog),
                         Default::default(),
+                        compression_threads,
                     )
                     .await?;
 
@@ -248,9 +260,14 @@ impl BackupCreateExt for PbsBackup {
                 manifest.add_file(archive.file);
                 manifest.add_file(catalog_file.file);
                 manifest.add_file(meta_file);
-                writer.finish(&manifest).await?;
+                    writer.finish(&manifest).await?;
 
-                Ok::<_, anyhow::Error>((archive.size, checksum))
+                    Ok::<_, anyhow::Error>((archive.size, checksum))
+                }
+                .await;
+
+                writer.close().await;
+                result
             }
         };
 
@@ -297,8 +314,12 @@ impl BackupExt for PbsBackup {
         let (pxar_reader, mut pxar_writer) = tokio::io::simplex(crate::BUFFER_SIZE);
         let (reader, writer) = tokio::io::simplex(crate::BUFFER_SIZE);
 
+        let download_concurrency = state.config.load().system.backups.pbs.download_concurrency;
         tokio::spawn(async move {
-            if let Err(err) = session.reassemble_archive(&mut pxar_writer, None).await {
+            if let Err(err) = session
+                .reassemble_archive(&mut pxar_writer, None, download_concurrency)
+                .await
+            {
                 tracing::error!("failed to reassemble PBS archive for download: {:?}", err);
             }
             let _ = pxar_writer.shutdown().await;
@@ -586,7 +607,18 @@ impl BackupExt for PbsBackup {
         let fetch_task = async {
             let mut pxar_writer = pxar_writer;
             reader
-                .reassemble_archive(&mut pxar_writer, progress.clone_bytes())
+                .reassemble_archive(
+                    &mut pxar_writer,
+                    progress.clone_bytes(),
+                    server
+                        .app_state
+                        .config
+                        .load()
+                        .system
+                        .backups
+                        .pbs
+                        .download_concurrency,
+                )
                 .await?;
             pxar_writer.shutdown().await?;
 

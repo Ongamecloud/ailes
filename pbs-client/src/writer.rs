@@ -84,8 +84,9 @@ impl PbsBackupWriter {
         &mut self,
         reader: R,
         known_chunks: HashSet<[u8; 32]>,
+        compression_threads: usize,
     ) -> Result<UploadedArchive, PbsError> {
-        self.upload_archive_named(ARCHIVE_NAME, reader, known_chunks)
+        self.upload_archive_named(ARCHIVE_NAME, reader, known_chunks, compression_threads)
             .await
     }
 
@@ -94,6 +95,7 @@ impl PbsBackupWriter {
         archive_name: &str,
         reader: R,
         known_chunks: HashSet<[u8; 32]>,
+        compression_threads: usize,
     ) -> Result<UploadedArchive, PbsError> {
         let wid = self
             .transport
@@ -113,22 +115,38 @@ impl PbsBackupWriter {
             let stream = chunker.as_stream();
             tokio::pin!(stream);
 
-            while let Some(chunk) = stream.next().await {
-                let message = match chunk {
+            let mut messages = stream
+                .map(move |chunk| match chunk {
                     Ok(chunk) => {
                         let digest = datablob::sha256(&chunk.data);
                         if known.contains(&digest) {
-                            Ok(ChunkMessage::Known {
-                                digest,
-                                size: chunk.data.len() as u64,
-                            })
+                            futures::future::Either::Left(std::future::ready(Ok(
+                                ChunkMessage::Known {
+                                    digest,
+                                    size: chunk.data.len() as u64,
+                                },
+                            )))
                         } else {
                             known.insert(digest);
-                            Ok(ChunkMessage::New(datablob::encode_blob(&chunk.data)))
+                            futures::future::Either::Right(async move {
+                                tokio::task::spawn_blocking(move || {
+                                    ChunkMessage::New(datablob::encode_blob_with_digest(
+                                        &chunk.data,
+                                        digest,
+                                    ))
+                                })
+                                .await
+                                .map_err(|err| err.to_string())
+                            })
                         }
                     }
-                    Err(err) => Err(err.to_string()),
-                };
+                    Err(err) => {
+                        futures::future::Either::Left(std::future::ready(Err(err.to_string())))
+                    }
+                })
+                .buffered(compression_threads.max(1));
+
+            while let Some(message) = messages.next().await {
                 let failed = message.is_err();
 
                 if tx.send(message).await.is_err() || failed {
@@ -276,5 +294,9 @@ impl PbsBackupWriter {
         self.transport.post("finish", &[]).await?;
 
         Ok(())
+    }
+
+    pub async fn close(&self) {
+        self.transport.close().await;
     }
 }

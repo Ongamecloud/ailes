@@ -17,12 +17,15 @@ mod delete {
     #[derive(ToSchema, Deserialize)]
     pub struct Payload {
         adapter: BackupAdapter,
+        #[serde(default)]
+        foreground: bool,
     }
 
     #[derive(ToSchema, Serialize)]
     struct Response {}
 
     #[utoipa::path(delete, path = "/", responses(
+        (status = OK, body = inline(Response)),
         (status = ACCEPTED, body = inline(Response)),
         (status = NOT_FOUND, body = ApiError),
     ), params(
@@ -49,6 +52,12 @@ mod delete {
                     .ok();
             }
         };
+
+        if data.foreground {
+            backup.delete(&state).await?;
+
+            return ApiResponse::new_serialized(Response {}).ok();
+        }
 
         tokio::spawn(async move {
             if let Err(err) = backup.delete(&state).await {

@@ -1,4 +1,5 @@
 use super::{config::PbsConfig, datablob, error::PbsError, h2::H2Transport, writer::ARCHIVE_NAME};
+use futures::StreamExt;
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
@@ -34,10 +35,7 @@ impl PbsBackupReader {
             .await
     }
 
-    pub async fn download_chunk_plaintext(
-        &mut self,
-        digest: &[u8; 32],
-    ) -> Result<Vec<u8>, PbsError> {
+    pub async fn download_chunk_plaintext(&self, digest: &[u8; 32]) -> Result<Vec<u8>, PbsError> {
         let encoded = self
             .transport
             .download("chunk", &[("digest", hex::encode(digest))])
@@ -52,13 +50,38 @@ impl PbsBackupReader {
         parse_dynamic_index(&index)
     }
 
+    pub async fn close(&self) {
+        self.transport.close().await;
+    }
+
     pub async fn reassemble_archive<W: AsyncWrite + Unpin>(
         mut self,
         writer: &mut W,
         progress: Option<Arc<AtomicU64>>,
+        download_concurrency: usize,
     ) -> Result<(), PbsError> {
-        for digest in self.archive_chunk_digests().await? {
-            let plaintext = self.download_chunk_plaintext(&digest).await?;
+        let result = self
+            .reassemble_archive_inner(writer, progress, download_concurrency)
+            .await;
+        self.close().await;
+        result
+    }
+
+    async fn reassemble_archive_inner<W: AsyncWrite + Unpin>(
+        &mut self,
+        writer: &mut W,
+        progress: Option<Arc<AtomicU64>>,
+        download_concurrency: usize,
+    ) -> Result<(), PbsError> {
+        let digests = self.archive_chunk_digests().await?;
+
+        let this = &*self;
+        let mut chunks = futures::stream::iter(digests)
+            .map(|digest| async move { this.download_chunk_plaintext(&digest).await })
+            .buffered(download_concurrency.max(1));
+
+        while let Some(plaintext) = chunks.next().await {
+            let plaintext = plaintext?;
             if let Some(progress) = &progress {
                 progress.fetch_add(plaintext.len() as u64, Ordering::SeqCst);
             }

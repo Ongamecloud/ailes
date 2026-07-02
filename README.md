@@ -187,6 +187,13 @@ system:
       # how many threads to use when restoring a zfs backup (snapshot)
       restore_threads: 4
 
+    # settings for the pbs backup driver
+    pbs:
+      # how many threads to use when creating a pbs backup
+      create_threads: 4
+      # how many download streams to use when restoring a pbs backup
+      download_concurrency: 4
+
 docker:
   # the docker-compatible socket or http address to connect to
   socket: /var/run/docker.sock

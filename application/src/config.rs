@@ -352,6 +352,13 @@ fn system_backup_zfs_restore_threads() -> usize {
     4
 }
 
+fn system_backup_pbs_create_threads() -> usize {
+    4
+}
+fn system_backup_pbs_download_concurrency() -> usize {
+    4
+}
+
 fn docker_socket() -> String {
     #[cfg(unix)]
     {
@@ -852,6 +859,14 @@ nestify::nest! {
                 pub zfs: #[derive(ToSchema, Deserialize, Serialize, DefaultFromSerde)] #[serde(default)] pub struct SystemBackupsZfs {
                     #[serde(default = "system_backup_zfs_restore_threads")]
                     pub restore_threads: usize,
+                },
+                #[serde(default)]
+                #[schema(inline)]
+                pub pbs: #[derive(ToSchema, Deserialize, Serialize, DefaultFromSerde)] #[serde(default)] pub struct SystemBackupsPbs {
+                    #[serde(default = "system_backup_pbs_create_threads")]
+                    pub create_threads: usize,
+                    #[serde(default = "system_backup_pbs_download_concurrency")]
+                    pub download_concurrency: usize,
                 },
             },
 
