@@ -36,6 +36,17 @@ pub enum ScheduleAction {
     Ensure {
         condition: super::conditions::ScheduleCondition,
     },
+    If {
+        condition: super::conditions::ScheduleCondition,
+    },
+    ElseIf {
+        condition: super::conditions::ScheduleCondition,
+    },
+    Else,
+    EndIf,
+    Exit {
+        successful: bool,
+    },
     Format {
         format: String,
         output_into: ScheduleVariable,
@@ -57,6 +68,12 @@ pub enum ScheduleAction {
         timeout: u64,
 
         output_into: Option<ScheduleVariable>,
+    },
+    WaitForState {
+        ignore_failure: bool,
+
+        state: crate::server::state::ServerState,
+        timeout: u64,
     },
     SendPower {
         ignore_failure: bool,
@@ -96,10 +113,16 @@ pub enum ScheduleAction {
         destination: ScheduleDynamicParameter,
     },
     DeleteFiles {
+        #[serde(default)]
+        ignore_failure: bool,
+
         root: ScheduleDynamicParameter,
         files: Vec<compact_str::CompactString>,
     },
     RenameFiles {
+        #[serde(default)]
+        ignore_failure: bool,
+
         root: ScheduleDynamicParameter,
         files: Vec<crate::models::RenameFile>,
     },
@@ -143,17 +166,23 @@ impl ScheduleAction {
         match self {
             ScheduleAction::Sleep { .. } => false,
             ScheduleAction::Ensure { .. } => false,
+            ScheduleAction::If { .. } => false,
+            ScheduleAction::ElseIf { .. } => false,
+            ScheduleAction::Else => false,
+            ScheduleAction::EndIf => false,
+            ScheduleAction::Exit { .. } => false,
             ScheduleAction::Format { .. } => false,
             ScheduleAction::MatchRegex { .. } => false,
             ScheduleAction::WaitForConsoleLine { ignore_failure, .. } => *ignore_failure,
+            ScheduleAction::WaitForState { ignore_failure, .. } => *ignore_failure,
             ScheduleAction::SendPower { ignore_failure, .. } => *ignore_failure,
             ScheduleAction::SendCommand { ignore_failure, .. } => *ignore_failure,
             ScheduleAction::CreateBackup { ignore_failure, .. } => *ignore_failure,
             ScheduleAction::CreateDirectory { ignore_failure, .. } => *ignore_failure,
             ScheduleAction::WriteFile { ignore_failure, .. } => *ignore_failure,
             ScheduleAction::CopyFile { ignore_failure, .. } => *ignore_failure,
-            ScheduleAction::DeleteFiles { .. } => false,
-            ScheduleAction::RenameFiles { .. } => false,
+            ScheduleAction::DeleteFiles { ignore_failure, .. } => *ignore_failure,
+            ScheduleAction::RenameFiles { ignore_failure, .. } => *ignore_failure,
             ScheduleAction::CompressFiles { ignore_failure, .. } => *ignore_failure,
             ScheduleAction::DecompressFile { ignore_failure, .. } => *ignore_failure,
             ScheduleAction::UpdateStartupVariable { ignore_failure, .. } => *ignore_failure,
@@ -176,6 +205,13 @@ impl ScheduleAction {
         }
 
         match self {
+            // control-flow markers are interpreted by the schedule executor and
+            // never reach this method
+            ScheduleAction::If { .. }
+            | ScheduleAction::ElseIf { .. }
+            | ScheduleAction::Else
+            | ScheduleAction::EndIf
+            | ScheduleAction::Exit { .. } => {}
             ScheduleAction::Sleep { duration } => {
                 tokio::time::sleep(std::time::Duration::from_millis(*duration)).await;
             }
@@ -319,6 +355,28 @@ impl ScheduleAction {
                 }
 
                 return Err("timeout while waiting for matching console output.".into());
+            }
+            ScheduleAction::WaitForState {
+                state: target_state,
+                timeout,
+                ..
+            } => {
+                let state_waiter = async {
+                    while server.state.get_state() != *target_state {
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                };
+
+                if tokio::time::timeout(std::time::Duration::from_millis(*timeout), state_waiter)
+                    .await
+                    .is_err()
+                {
+                    return Err(format!(
+                        "timeout while waiting for server state `{}`.",
+                        target_state.to_str()
+                    )
+                    .into());
+                }
             }
             ScheduleAction::SendPower { action, .. } => match action {
                 crate::models::ServerPowerAction::Start => {
@@ -911,7 +969,7 @@ impl ScheduleAction {
                     timestamp: chrono::Utc::now(),
                 });
             }
-            ScheduleAction::DeleteFiles { root, files } => {
+            ScheduleAction::DeleteFiles { root, files, .. } => {
                 let raw_root = match execution_context.resolve_parameter(root) {
                     Some(root) => root,
                     None => {
@@ -941,12 +999,23 @@ impl ScheduleAction {
                         continue;
                     }
 
-                    if filesystem.is_primary_server_fs() {
-                        server.filesystem.truncate_path(&source).await.ok();
+                    let result = if filesystem.is_primary_server_fs() {
+                        server.filesystem.truncate_path(&source).await
                     } else if metadata.file_type.is_dir() {
-                        filesystem.async_remove_dir_all(&source).await.ok();
+                        filesystem.async_remove_dir_all(&source).await
                     } else {
-                        filesystem.async_remove_file(&source).await.ok();
+                        filesystem.async_remove_file(&source).await
+                    };
+
+                    if let Err(err) = result {
+                        tracing::error!(
+                            server = %server.uuid,
+                            path = %source.display(),
+                            "failed to delete file: {:#?}",
+                            err
+                        );
+
+                        return Err(format!("failed to delete `{file}`").into());
                     }
                 }
 
@@ -962,7 +1031,7 @@ impl ScheduleAction {
                     timestamp: chrono::Utc::now(),
                 });
             }
-            ScheduleAction::RenameFiles { root, files } => {
+            ScheduleAction::RenameFiles { root, files, .. } => {
                 let raw_root = match execution_context.resolve_parameter(root) {
                     Some(root) => Path::new(root),
                     None => {
@@ -1007,16 +1076,22 @@ impl ScheduleAction {
                         continue;
                     }
 
-                    if filesystem.is_primary_server_fs() {
-                        if let Err(err) = server.filesystem.rename_path(from, to).await {
-                            tracing::debug!(
-                                server = %server.uuid,
-                                "failed to rename file: {:#?}",
-                                err
-                            );
-                        }
+                    let result = if filesystem.is_primary_server_fs() {
+                        server.filesystem.rename_path(from, to).await
                     } else {
-                        filesystem.async_rename(&from, &to).await.ok();
+                        filesystem.async_rename(&from, &to).await
+                    };
+
+                    if let Err(err) = result {
+                        tracing::error!(
+                            server = %server.uuid,
+                            "failed to rename file: {:#?}",
+                            err
+                        );
+
+                        return Err(
+                            format!("failed to rename `{}` to `{}`", file.from, file.to).into()
+                        );
                     }
                 }
 

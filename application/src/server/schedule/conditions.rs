@@ -2,9 +2,9 @@ use super::actions::{ScheduleDynamicParameter, ScheduleVariable};
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
 
-#[derive(Clone, Copy, Deserialize, Serialize)]
+#[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum SchedulePreConditionComparator {
+pub enum ScheduleConditionComparator {
     SmallerThan,
     SmallerThanOrEquals,
     Equal,
@@ -12,160 +12,16 @@ pub enum SchedulePreConditionComparator {
     GreaterThanOrEquals,
 }
 
-#[derive(Clone, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case", tag = "type")]
-pub enum SchedulePreCondition {
-    None,
-    And {
-        conditions: Vec<SchedulePreCondition>,
-    },
-    Or {
-        conditions: Vec<SchedulePreCondition>,
-    },
-    Not {
-        condition: Box<SchedulePreCondition>,
-    },
-    ServerState {
-        state: crate::server::state::ServerState,
-    },
-    Uptime {
-        comparator: SchedulePreConditionComparator,
-        value: u64,
-    },
-    CpuUsage {
-        comparator: SchedulePreConditionComparator,
-        value: f64,
-    },
-    MemoryUsage {
-        comparator: SchedulePreConditionComparator,
-        value: u64,
-    },
-    DiskUsage {
-        comparator: SchedulePreConditionComparator,
-        value: u64,
-    },
-    FileExists {
-        file: compact_str::CompactString,
-    },
-}
-
-impl SchedulePreCondition {
-    pub fn evaluate<'a>(
-        &'a self,
-        server: &'a crate::server::Server,
-    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
-        Box::pin(async move {
-            match self {
-                SchedulePreCondition::None => true,
-                SchedulePreCondition::And { conditions } => {
-                    for condition in conditions {
-                        if !condition.evaluate(server).await {
-                            return false;
-                        }
-                    }
-
-                    true
-                }
-                SchedulePreCondition::Or { conditions } => {
-                    for condition in conditions {
-                        if condition.evaluate(server).await {
-                            return true;
-                        }
-                    }
-
-                    false
-                }
-                SchedulePreCondition::Not { condition } => !condition.evaluate(server).await,
-                SchedulePreCondition::ServerState { state: cond_state } => {
-                    server.state.get_state() == *cond_state
-                }
-                SchedulePreCondition::Uptime { comparator, value } => {
-                    let resource_usage = server.resource_usage().await;
-
-                    match comparator {
-                        SchedulePreConditionComparator::SmallerThan => {
-                            resource_usage.uptime < *value
-                        }
-                        SchedulePreConditionComparator::SmallerThanOrEquals => {
-                            resource_usage.uptime <= *value
-                        }
-                        SchedulePreConditionComparator::Equal => resource_usage.uptime == *value,
-                        SchedulePreConditionComparator::GreaterThan => {
-                            resource_usage.uptime > *value
-                        }
-                        SchedulePreConditionComparator::GreaterThanOrEquals => {
-                            resource_usage.uptime >= *value
-                        }
-                    }
-                }
-                SchedulePreCondition::CpuUsage { comparator, value } => {
-                    let resource_usage = server.resource_usage().await;
-
-                    match comparator {
-                        SchedulePreConditionComparator::SmallerThan => {
-                            resource_usage.cpu_absolute < *value
-                        }
-                        SchedulePreConditionComparator::SmallerThanOrEquals => {
-                            resource_usage.cpu_absolute <= *value
-                        }
-                        SchedulePreConditionComparator::Equal => {
-                            resource_usage.cpu_absolute == *value
-                        }
-                        SchedulePreConditionComparator::GreaterThan => {
-                            resource_usage.cpu_absolute > *value
-                        }
-                        SchedulePreConditionComparator::GreaterThanOrEquals => {
-                            resource_usage.cpu_absolute >= *value
-                        }
-                    }
-                }
-                SchedulePreCondition::MemoryUsage { comparator, value } => {
-                    let resource_usage = server.resource_usage().await;
-
-                    match comparator {
-                        SchedulePreConditionComparator::SmallerThan => {
-                            resource_usage.memory_bytes < *value
-                        }
-                        SchedulePreConditionComparator::SmallerThanOrEquals => {
-                            resource_usage.memory_bytes <= *value
-                        }
-                        SchedulePreConditionComparator::Equal => {
-                            resource_usage.memory_bytes == *value
-                        }
-                        SchedulePreConditionComparator::GreaterThan => {
-                            resource_usage.memory_bytes > *value
-                        }
-                        SchedulePreConditionComparator::GreaterThanOrEquals => {
-                            resource_usage.memory_bytes >= *value
-                        }
-                    }
-                }
-                SchedulePreCondition::DiskUsage { comparator, value } => {
-                    let resource_usage = server.resource_usage().await;
-
-                    match comparator {
-                        SchedulePreConditionComparator::SmallerThan => {
-                            resource_usage.disk_bytes < *value
-                        }
-                        SchedulePreConditionComparator::SmallerThanOrEquals => {
-                            resource_usage.disk_bytes <= *value
-                        }
-                        SchedulePreConditionComparator::Equal => {
-                            resource_usage.disk_bytes == *value
-                        }
-                        SchedulePreConditionComparator::GreaterThan => {
-                            resource_usage.disk_bytes > *value
-                        }
-                        SchedulePreConditionComparator::GreaterThanOrEquals => {
-                            resource_usage.disk_bytes >= *value
-                        }
-                    }
-                }
-                SchedulePreCondition::FileExists { file } => {
-                    server.filesystem.async_symlink_metadata(file).await.is_ok()
-                }
-            }
-        })
+impl ScheduleConditionComparator {
+    #[inline]
+    pub fn compare_f64(self, lhs: f64, rhs: f64) -> bool {
+        match self {
+            ScheduleConditionComparator::SmallerThan => lhs < rhs,
+            ScheduleConditionComparator::SmallerThanOrEquals => lhs <= rhs,
+            ScheduleConditionComparator::Equal => lhs == rhs,
+            ScheduleConditionComparator::GreaterThan => lhs > rhs,
+            ScheduleConditionComparator::GreaterThanOrEquals => lhs >= rhs,
+        }
     }
 }
 
@@ -181,6 +37,21 @@ pub enum ScheduleCondition {
     },
     Not {
         condition: Box<ScheduleCondition>,
+    },
+    ServerState {
+        state: crate::server::state::ServerState,
+    },
+    Uptime {
+        comparator: ScheduleConditionComparator,
+        value: u64,
+    },
+    ResourceUsage {
+        metric: super::ScheduleResourceMetric,
+        comparator: ScheduleConditionComparator,
+        value: f64,
+    },
+    FileExists {
+        file: compact_str::CompactString,
     },
     VariableExists {
         variable: ScheduleVariable,
@@ -206,15 +77,15 @@ pub enum ScheduleCondition {
 impl ScheduleCondition {
     pub fn evaluate<'a>(
         &'a self,
-        _server: &'a crate::server::Server,
-        execution_context: &'a mut super::ScheduleExecutionContext,
+        server: &'a crate::server::Server,
+        execution_context: &'a super::ScheduleExecutionContext,
     ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
         Box::pin(async move {
             match self {
                 ScheduleCondition::None => true,
                 ScheduleCondition::And { conditions } => {
                     for condition in conditions {
-                        if !condition.evaluate(_server, execution_context).await {
+                        if !condition.evaluate(server, execution_context).await {
                             return false;
                         }
                     }
@@ -223,7 +94,7 @@ impl ScheduleCondition {
                 }
                 ScheduleCondition::Or { conditions } => {
                     for condition in conditions {
-                        if condition.evaluate(_server, execution_context).await {
+                        if condition.evaluate(server, execution_context).await {
                             return true;
                         }
                     }
@@ -231,7 +102,32 @@ impl ScheduleCondition {
                     false
                 }
                 ScheduleCondition::Not { condition } => {
-                    !condition.evaluate(_server, execution_context).await
+                    !condition.evaluate(server, execution_context).await
+                }
+                ScheduleCondition::ServerState { state: cond_state } => {
+                    server.state.get_state() == *cond_state
+                }
+                ScheduleCondition::Uptime { comparator, value } => {
+                    let resource_usage = server.resource_usage().await;
+
+                    comparator.compare_f64(resource_usage.uptime as f64, *value as f64)
+                }
+                ScheduleCondition::ResourceUsage {
+                    metric,
+                    comparator,
+                    value,
+                } => {
+                    let resource_usage = server.resource_usage().await;
+                    let current = match metric {
+                        super::ScheduleResourceMetric::Cpu => resource_usage.cpu_absolute,
+                        super::ScheduleResourceMetric::Memory => resource_usage.memory_bytes as f64,
+                        super::ScheduleResourceMetric::Disk => resource_usage.disk_bytes as f64,
+                    };
+
+                    comparator.compare_f64(current, *value)
+                }
+                ScheduleCondition::FileExists { file } => {
+                    server.filesystem.async_symlink_metadata(file).await.is_ok()
                 }
                 ScheduleCondition::VariableExists { variable } => execution_context
                     .get_variable_by_str(&variable.variable)

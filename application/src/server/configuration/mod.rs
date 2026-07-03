@@ -31,7 +31,7 @@ pub struct Schedule {
     #[schema(value_type = serde_json::Value)]
     pub triggers: Vec<super::schedule::ScheduleTrigger>,
     #[schema(value_type = serde_json::Value)]
-    pub condition: super::schedule::conditions::SchedulePreCondition,
+    pub condition: super::schedule::conditions::ScheduleCondition,
     #[schema(value_type = Vec<serde_json::Value>)]
     pub actions: Vec<ScheduleAction>,
 }

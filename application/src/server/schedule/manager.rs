@@ -134,6 +134,35 @@ impl ScheduleManager {
     }
 
     #[tracing::instrument(skip(self))]
+    pub async fn execute_schedule_completion_trigger(
+        &self,
+        completed_schedule: uuid::Uuid,
+        successful: bool,
+    ) {
+        tracing::debug!("executing schedule completion trigger");
+
+        let schedules = self.schedules.read().await;
+
+        for schedule in schedules.iter() {
+            if schedule.uuid == completed_schedule {
+                continue;
+            }
+
+            for trigger in schedule.triggers.iter() {
+                if let ScheduleTrigger::ScheduleCompletion {
+                    schedule: trigger_schedule,
+                    successful: trigger_successful,
+                } = trigger
+                    && *trigger_schedule == completed_schedule
+                    && *trigger_successful == successful
+                {
+                    schedule.trigger(false);
+                }
+            }
+        }
+    }
+
+    #[tracing::instrument(skip(self))]
     pub async fn execute_crash_trigger(&self) {
         tracing::debug!("executing crash schedule trigger");
 

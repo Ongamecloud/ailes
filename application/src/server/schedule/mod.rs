@@ -9,6 +9,14 @@ pub mod actions;
 pub mod conditions;
 pub mod manager;
 
+#[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ScheduleResourceMetric {
+    Cpu,
+    Memory,
+    Disk,
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum ScheduleTrigger {
@@ -23,6 +31,17 @@ pub enum ScheduleTrigger {
     },
     BackupStatus {
         status: crate::models::ServerBackupStatus,
+    },
+    ScheduleCompletion {
+        schedule: uuid::Uuid,
+        successful: bool,
+    },
+    ResourceUsage {
+        metric: ScheduleResourceMetric,
+        comparator: conditions::ScheduleConditionComparator,
+        value: f64,
+        #[serde(default)]
+        for_seconds: u64,
     },
     ConsoleLine {
         contains: compact_str::CompactString,
@@ -51,6 +70,30 @@ impl PartialEq for ScheduleTrigger {
                 ScheduleTrigger::BackupStatus { status: s1 },
                 ScheduleTrigger::BackupStatus { status: s2 },
             ) => s1 == s2,
+            (
+                ScheduleTrigger::ScheduleCompletion {
+                    schedule: s1,
+                    successful: su1,
+                },
+                ScheduleTrigger::ScheduleCompletion {
+                    schedule: s2,
+                    successful: su2,
+                },
+            ) => s1 == s2 && su1 == su2,
+            (
+                ScheduleTrigger::ResourceUsage {
+                    metric: m1,
+                    comparator: c1,
+                    value: v1,
+                    for_seconds: f1,
+                },
+                ScheduleTrigger::ResourceUsage {
+                    metric: m2,
+                    comparator: c2,
+                    value: v2,
+                    for_seconds: f2,
+                },
+            ) => m1 == m2 && c1 == c2 && v1 == v2 && f1 == f2,
             (
                 ScheduleTrigger::ConsoleLine {
                     contains: c1,
@@ -122,10 +165,70 @@ impl ScheduleExecutionContext {
     }
 }
 
+struct ConditionFrame {
+    parent_active: bool,
+    active: bool,
+    branch_taken: bool,
+}
+
+pub const MAX_IF_DEPTH: usize = 8;
+
+fn validate_action_structure(
+    actions: &[super::configuration::ScheduleAction],
+) -> Result<(), (uuid::Uuid, Cow<'static, str>)> {
+    let mut stack: Vec<(uuid::Uuid, bool)> = Vec::new();
+
+    for action in actions {
+        match &action.action {
+            actions::ScheduleAction::If { .. } => {
+                if stack.len() >= MAX_IF_DEPTH {
+                    return Err((action.uuid, "maximum `if` nesting depth exceeded".into()));
+                }
+
+                stack.push((action.uuid, false));
+            }
+            actions::ScheduleAction::ElseIf { .. } => match stack.last() {
+                None => {
+                    return Err((action.uuid, "`else_if` without a matching `if`".into()));
+                }
+                Some((_, true)) => {
+                    return Err((
+                        action.uuid,
+                        "`else_if` after `else` in the same block".into(),
+                    ));
+                }
+                Some((_, false)) => {}
+            },
+            actions::ScheduleAction::Else => match stack.last_mut() {
+                None => {
+                    return Err((action.uuid, "`else` without a matching `if`".into()));
+                }
+                Some((_, else_seen)) => {
+                    if *else_seen {
+                        return Err((action.uuid, "multiple `else` in the same block".into()));
+                    }
+
+                    *else_seen = true;
+                }
+            },
+            actions::ScheduleAction::EndIf if stack.pop().is_none() => {
+                return Err((action.uuid, "`end_if` without a matching `if`".into()));
+            }
+            _ => {}
+        }
+    }
+
+    if let Some((uuid, _)) = stack.pop() {
+        return Err((uuid, "`if` block is never closed with `end_if`".into()));
+    }
+
+    Ok(())
+}
+
 pub struct Schedule {
     pub uuid: uuid::Uuid,
     pub triggers: Vec<ScheduleTrigger>,
-    pub condition: Arc<RwLock<conditions::SchedulePreCondition>>,
+    pub condition: Arc<RwLock<conditions::ScheduleCondition>>,
     pub raw_actions: Arc<RwLock<Arc<Vec<super::configuration::ScheduleAction>>>>,
     pub status: Arc<RwLock<ScheduleStatus>>,
     pub completion_status: Arc<Mutex<Option<ApiScheduleCompletionStatus>>>,
@@ -247,7 +350,7 @@ impl Schedule {
     fn create_executor_task(
         server: crate::server::Server,
         uuid: uuid::Uuid,
-        condition: Arc<RwLock<conditions::SchedulePreCondition>>,
+        condition: Arc<RwLock<conditions::ScheduleCondition>>,
         raw_actions: Arc<RwLock<Arc<Vec<super::configuration::ScheduleAction>>>>,
         next_execution_context: Arc<Mutex<Option<ScheduleExecutionContext>>>,
         executor_notifier: Arc<tokio::sync::Notify>,
@@ -264,7 +367,18 @@ impl Schedule {
                     _ = executor_notifier.notified() => false,
                 };
 
-                if !skip_condition && !condition.read().await.evaluate(&server).await {
+                let mut execution_context = match next_execution_context.lock().await.take() {
+                    Some(context) => context,
+                    None => ScheduleExecutionContext::new(uuid),
+                };
+
+                if !skip_condition
+                    && !condition
+                        .read()
+                        .await
+                        .evaluate(&server, &execution_context)
+                        .await
+                {
                     continue;
                 }
 
@@ -273,11 +387,6 @@ impl Schedule {
                 let raw_actions_lock = raw_actions.read().await;
                 let raw_actions = Arc::clone(&*raw_actions_lock);
                 drop(raw_actions_lock);
-
-                let mut execution_context = match next_execution_context.lock().await.take() {
-                    Some(context) => context,
-                    None => ScheduleExecutionContext::new(uuid),
-                };
 
                 let mut errors = HashMap::new();
                 let mut successful = true;
@@ -291,52 +400,145 @@ impl Schedule {
                     )
                     .ok();
 
-                for raw_action in raw_actions.iter() {
-                    let mut status_lock = status.write().await;
-                    status_lock.running = true;
-                    status_lock.step = Some(raw_action.uuid);
-                    drop(status_lock);
+                let send_step_status = |step: uuid::Uuid, skipped: bool| {
+                    let mut builder =
+                        WebsocketMessage::builder(WebsocketEvent::ServerScheduleStepStatus)
+                            .arg(uuid.to_compact_string())
+                            .arg(step.to_compact_string());
+                    if skipped {
+                        builder = builder.arg("skipped");
+                    }
+
+                    server.websocket.send(builder.build()).ok();
+                };
+
+                if let Err((action_uuid, err)) = validate_action_structure(&raw_actions) {
+                    successful = false;
+                    errors.insert(action_uuid, err.clone());
+                    status.write().await.errors.insert(action_uuid, err.clone());
 
                     server
                         .websocket
                         .send(
-                            WebsocketMessage::builder(WebsocketEvent::ServerScheduleStepStatus)
+                            WebsocketMessage::builder(WebsocketEvent::ServerScheduleStepError)
                                 .arg(uuid.to_compact_string())
-                                .arg(raw_action.uuid.to_compact_string())
+                                .arg(action_uuid.to_compact_string())
+                                .arg(err.to_compact_string())
                                 .build(),
                         )
                         .ok();
+                } else {
+                    let mut condition_stack: Vec<ConditionFrame> = Vec::new();
 
-                    match raw_action
-                        .action
-                        .execute(&server.app_state, &server, &mut execution_context)
-                        .await
-                    {
-                        Ok(()) => {}
-                        Err(err) => {
-                            errors.insert(raw_action.uuid, err.clone());
-                            status
-                                .write()
-                                .await
-                                .errors
-                                .insert(raw_action.uuid, err.clone());
+                    for raw_action in raw_actions.iter() {
+                        let mut status_lock = status.write().await;
+                        status_lock.running = true;
+                        status_lock.step = Some(raw_action.uuid);
+                        drop(status_lock);
 
-                            server
-                                .websocket
-                                .send(
-                                    WebsocketMessage::builder(
-                                        WebsocketEvent::ServerScheduleStepError,
-                                    )
-                                    .arg(uuid.to_compact_string())
-                                    .arg(raw_action.uuid.to_compact_string())
-                                    .arg(err.to_compact_string())
-                                    .build(),
-                                )
-                                .ok();
+                        match &raw_action.action {
+                            actions::ScheduleAction::If { condition } => {
+                                send_step_status(raw_action.uuid, false);
 
-                            if !raw_action.action.ignore_failure() {
-                                successful = false;
+                                let parent_active =
+                                    condition_stack.iter().all(|frame| frame.active);
+                                let active = parent_active
+                                    && condition.evaluate(&server, &execution_context).await;
+
+                                condition_stack.push(ConditionFrame {
+                                    parent_active,
+                                    active,
+                                    branch_taken: active,
+                                });
+
+                                continue;
+                            }
+                            actions::ScheduleAction::ElseIf { condition } => {
+                                send_step_status(raw_action.uuid, false);
+
+                                if let Some(frame) = condition_stack.last() {
+                                    let active = frame.parent_active
+                                        && !frame.branch_taken
+                                        && condition.evaluate(&server, &execution_context).await;
+
+                                    if let Some(frame) = condition_stack.last_mut() {
+                                        frame.active = active;
+                                        frame.branch_taken |= active;
+                                    }
+                                }
+
+                                continue;
+                            }
+                            actions::ScheduleAction::Else => {
+                                send_step_status(raw_action.uuid, false);
+
+                                if let Some(frame) = condition_stack.last_mut() {
+                                    frame.active = frame.parent_active && !frame.branch_taken;
+                                    frame.branch_taken = true;
+                                }
+
+                                continue;
+                            }
+                            actions::ScheduleAction::EndIf => {
+                                send_step_status(raw_action.uuid, false);
+                                condition_stack.pop();
+
+                                continue;
+                            }
+                            actions::ScheduleAction::Exit {
+                                successful: exit_successful,
+                            } => {
+                                if !condition_stack.iter().all(|frame| frame.active) {
+                                    send_step_status(raw_action.uuid, true);
+                                    continue;
+                                }
+
+                                send_step_status(raw_action.uuid, false);
+                                successful = *exit_successful;
+
                                 break;
+                            }
+                            _ => {}
+                        }
+
+                        if !condition_stack.iter().all(|frame| frame.active) {
+                            send_step_status(raw_action.uuid, true);
+                            continue;
+                        }
+
+                        send_step_status(raw_action.uuid, false);
+
+                        match raw_action
+                            .action
+                            .execute(&server.app_state, &server, &mut execution_context)
+                            .await
+                        {
+                            Ok(()) => {}
+                            Err(err) => {
+                                errors.insert(raw_action.uuid, err.clone());
+                                status
+                                    .write()
+                                    .await
+                                    .errors
+                                    .insert(raw_action.uuid, err.clone());
+
+                                server
+                                    .websocket
+                                    .send(
+                                        WebsocketMessage::builder(
+                                            WebsocketEvent::ServerScheduleStepError,
+                                        )
+                                        .arg(uuid.to_compact_string())
+                                        .arg(raw_action.uuid.to_compact_string())
+                                        .arg(err.to_compact_string())
+                                        .build(),
+                                    )
+                                    .ok();
+
+                                if !raw_action.action.ignore_failure() {
+                                    successful = false;
+                                    break;
+                                }
                             }
                         }
                     }
@@ -364,6 +566,11 @@ impl Schedule {
                     errors,
                     timestamp: chrono::Utc::now(),
                 });
+
+                server
+                    .schedules
+                    .execute_schedule_completion_trigger(uuid, successful)
+                    .await;
             }
         })
     }
@@ -380,7 +587,9 @@ impl Schedule {
             .filter(|t| {
                 matches!(
                     t,
-                    ScheduleTrigger::Cron { .. } | ScheduleTrigger::ConsoleLine { .. }
+                    ScheduleTrigger::Cron { .. }
+                        | ScheduleTrigger::ConsoleLine { .. }
+                        | ScheduleTrigger::ResourceUsage { .. }
                 )
             })
             .count();
@@ -433,6 +642,61 @@ impl Schedule {
                                 ))
                                 .await;
                                 executor_notifier.notify_one();
+                            }
+                        }
+                    }));
+                }
+                ScheduleTrigger::ResourceUsage {
+                    metric,
+                    comparator,
+                    value,
+                    for_seconds,
+                } => {
+                    tasks.push(tokio::task::spawn({
+                        let executor_notifier = Arc::clone(&executor_notifier);
+                        let server = server.clone();
+
+                        async move {
+                            let mut met_since: Option<std::time::Instant> = None;
+                            let mut fired = false;
+
+                            loop {
+                                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+                                if matches!(
+                                    metric,
+                                    ScheduleResourceMetric::Cpu | ScheduleResourceMetric::Memory
+                                ) && server.state.get_state()
+                                    != crate::server::state::ServerState::Running
+                                {
+                                    met_since = None;
+                                    fired = false;
+                                    continue;
+                                }
+
+                                let resource_usage = server.resource_usage().await;
+                                let current = match metric {
+                                    ScheduleResourceMetric::Cpu => resource_usage.cpu_absolute,
+                                    ScheduleResourceMetric::Memory => {
+                                        resource_usage.memory_bytes as f64
+                                    }
+                                    ScheduleResourceMetric::Disk => {
+                                        resource_usage.disk_bytes as f64
+                                    }
+                                };
+
+                                if comparator.compare_f64(current, value) {
+                                    let since =
+                                        met_since.get_or_insert_with(std::time::Instant::now);
+
+                                    if !fired && since.elapsed().as_secs() >= for_seconds {
+                                        fired = true;
+                                        executor_notifier.notify_one();
+                                    }
+                                } else {
+                                    met_since = None;
+                                    fired = false;
+                                }
                             }
                         }
                     }));
@@ -516,5 +780,119 @@ impl Drop for Schedule {
             task.abort();
         }
         self.executor_task.abort();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server::configuration::ScheduleAction as RawAction;
+
+    fn raw(action: actions::ScheduleAction) -> RawAction {
+        RawAction {
+            uuid: uuid::Uuid::new_v4(),
+            action,
+        }
+    }
+
+    fn r#if() -> RawAction {
+        raw(actions::ScheduleAction::If {
+            condition: conditions::ScheduleCondition::None,
+        })
+    }
+
+    fn else_if() -> RawAction {
+        raw(actions::ScheduleAction::ElseIf {
+            condition: conditions::ScheduleCondition::None,
+        })
+    }
+
+    fn r#else() -> RawAction {
+        raw(actions::ScheduleAction::Else)
+    }
+
+    fn end_if() -> RawAction {
+        raw(actions::ScheduleAction::EndIf)
+    }
+
+    fn sleep() -> RawAction {
+        raw(actions::ScheduleAction::Sleep { duration: 1 })
+    }
+
+    #[test]
+    fn empty_and_marker_free_lists_are_valid() {
+        assert!(validate_action_structure(&[]).is_ok());
+        assert!(validate_action_structure(&[sleep(), sleep()]).is_ok());
+    }
+
+    #[test]
+    fn balanced_blocks_are_valid() {
+        assert!(validate_action_structure(&[r#if(), sleep(), end_if()]).is_ok());
+        assert!(
+            validate_action_structure(&[
+                r#if(),
+                sleep(),
+                else_if(),
+                sleep(),
+                r#else(),
+                sleep(),
+                end_if(),
+            ])
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn nested_blocks_are_valid() {
+        assert!(
+            validate_action_structure(&[
+                r#if(),
+                r#if(),
+                sleep(),
+                r#else(),
+                sleep(),
+                end_if(),
+                end_if(),
+            ])
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn unclosed_if_reports_the_if_step() {
+        let opening = r#if();
+        let opening_uuid = opening.uuid;
+        let err = validate_action_structure(&[opening, sleep()]).unwrap_err();
+        assert_eq!(err.0, opening_uuid);
+    }
+
+    #[test]
+    fn orphaned_markers_are_rejected() {
+        assert!(validate_action_structure(&[end_if()]).is_err());
+        assert!(validate_action_structure(&[r#else()]).is_err());
+        assert!(validate_action_structure(&[else_if()]).is_err());
+    }
+
+    #[test]
+    fn else_if_after_else_is_rejected() {
+        assert!(validate_action_structure(&[r#if(), r#else(), else_if(), end_if()]).is_err());
+    }
+
+    #[test]
+    fn multiple_else_in_one_block_is_rejected() {
+        assert!(validate_action_structure(&[r#if(), r#else(), r#else(), end_if()]).is_err());
+    }
+
+    #[test]
+    fn nesting_deeper_than_cap_is_rejected() {
+        let mut steps = Vec::new();
+        for _ in 0..=MAX_IF_DEPTH {
+            steps.push(r#if());
+        }
+        for _ in 0..=MAX_IF_DEPTH {
+            steps.push(end_if());
+        }
+
+        assert!(validate_action_structure(&steps).is_err());
     }
 }
