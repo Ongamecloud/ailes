@@ -3,7 +3,7 @@ use std::sync::Arc;
 pub mod docker;
 pub mod noop;
 
-type StatusReceiver = tokio::sync::mpsc::Receiver<(ProcessStatus, super::resources::ResourceUsage)>;
+type StatusReceiver = tokio::sync::mpsc::Receiver<ProcessStatus>;
 
 #[derive(Debug, Clone, Copy)]
 pub enum ProcessStatus {
@@ -14,7 +14,6 @@ pub enum ProcessStatus {
 
 #[async_trait::async_trait]
 pub trait ProcessHandle: Send + Sync {
-    async fn resource_usage(&self) -> Result<super::resources::ResourceUsage, anyhow::Error>;
     async fn logs(
         &self,
         lines: Option<usize>,

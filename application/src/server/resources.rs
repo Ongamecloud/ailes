@@ -24,3 +24,37 @@ nestify::nest! {
         pub uptime: u64,
     }
 }
+
+impl ResourceUsage {
+    /// Resets all metrics tied to a live container, keeping only disk usage.
+    pub fn wipe(&mut self, state: ServerState) {
+        *self = Self {
+            disk_bytes: self.disk_bytes,
+            state,
+            ..Default::default()
+        };
+    }
+}
+
+pub trait ResourceUsageWatchExt {
+    fn publish_disk_usage(&self, disk_bytes: u64);
+    /// Wipes all container-bound metrics, keeping only disk usage.
+    fn wipe(&self, state: ServerState);
+}
+
+impl ResourceUsageWatchExt for tokio::sync::watch::Sender<ResourceUsage> {
+    fn publish_disk_usage(&self, disk_bytes: u64) {
+        self.send_if_modified(|usage| {
+            if usage.disk_bytes == disk_bytes {
+                return false;
+            }
+
+            usage.disk_bytes = disk_bytes;
+            true
+        });
+    }
+
+    fn wipe(&self, state: ServerState) {
+        self.send_modify(|usage| usage.wipe(state));
+    }
+}

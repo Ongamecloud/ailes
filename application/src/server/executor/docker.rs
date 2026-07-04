@@ -1,7 +1,9 @@
-use crate::io::{SafeSliceExt, line_buffer::LineBuffer};
+use crate::{
+    io::{SafeSliceExt, line_buffer::LineBuffer},
+    server::resources::ResourceUsageWatchExt,
+};
 use bollard::errors::Error::DockerResponseServerError;
 use futures::StreamExt;
-use parking_lot::RwLock;
 use rand::distr::SampleString;
 use std::{
     collections::HashMap,
@@ -658,7 +660,8 @@ struct DockerProcessHandle {
     server: Weak<super::super::InnerServer>,
     app_config: Arc<crate::config::Config>,
 
-    resource_usage: Arc<RwLock<super::super::resources::ResourceUsage>>,
+    resource_usage: tokio::sync::watch::Sender<super::super::resources::ResourceUsage>,
+    publish_resource_usage: bool,
     stdin_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
     stdout_ratelimited_rx: tokio::sync::broadcast::Receiver<Arc<compact_str::CompactString>>,
     stdout_rx: tokio::sync::broadcast::Receiver<Arc<compact_str::CompactString>>,
@@ -674,10 +677,8 @@ impl DockerProcessHandle {
         docker: Arc<bollard::Docker>,
         server: &super::super::Server,
         app_config: Arc<crate::config::Config>,
-        status_tx: tokio::sync::mpsc::Sender<(
-            super::ProcessStatus,
-            super::super::resources::ResourceUsage,
-        )>,
+        status_tx: tokio::sync::mpsc::Sender<super::ProcessStatus>,
+        publish_resource_usage: bool,
     ) -> Result<Self, anyhow::Error> {
         let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(150);
         let (stdout_ratelimited_tx, stdout_ratelimited_rx) =
@@ -688,11 +689,14 @@ impl DockerProcessHandle {
             Arc<compact_str::CompactString>,
         >(app_config.load().system.websocket_log_count * 2);
 
-        let resource_usage = Arc::new(RwLock::new(super::super::resources::ResourceUsage {
-            disk_bytes: server.filesystem.limiter_usage().await,
-            state: server.state.get_state(),
-            ..Default::default()
-        }));
+        let resource_usage = server.resource_usage.clone();
+        if publish_resource_usage {
+            let disk_bytes = server.filesystem.limiter_usage().await;
+            resource_usage.send_modify(|usage| {
+                usage.wipe(server.state.get_state());
+                usage.disk_bytes = disk_bytes;
+            });
+        }
 
         let mut attach = docker
             .attach_container(
@@ -790,10 +794,14 @@ impl DockerProcessHandle {
 
         let stats_docker = Arc::clone(&docker);
         let stats_id = container_id.clone();
-        let stats_usage = Arc::clone(&resource_usage);
+        let stats_usage = resource_usage.clone();
         let stats_server = server.clone();
 
         let stats_task = tokio::spawn(async move {
+            if !publish_resource_usage {
+                return;
+            }
+
             let mut prev_cpu_total = 0;
             let mut prev_instant = None;
 
@@ -828,67 +836,67 @@ impl DockerProcessHandle {
                     }
                 };
 
-                let mut usage = stats_usage.write();
+                stats_usage.send_modify(|usage| {
+                    if let Some(memory_stats) = &stats.memory_stats {
+                        let mut memory_bytes = memory_stats.usage.unwrap_or(0);
 
-                if let Some(memory_stats) = &stats.memory_stats {
-                    let mut memory_bytes = memory_stats.usage.unwrap_or(0);
-
-                    if let Some(stats) = &memory_stats.stats {
-                        if let Some(&inactive_file) = stats.get("total_inactive_file")
-                            && inactive_file < memory_bytes
-                        {
-                            memory_bytes -= inactive_file;
-                        } else if let Some(&inactive_file) = stats.get("inactive_file")
-                            && inactive_file < memory_bytes
-                        {
-                            memory_bytes -= inactive_file;
+                        if let Some(stats) = &memory_stats.stats {
+                            if let Some(&inactive_file) = stats.get("total_inactive_file")
+                                && inactive_file < memory_bytes
+                            {
+                                memory_bytes -= inactive_file;
+                            } else if let Some(&inactive_file) = stats.get("inactive_file")
+                                && inactive_file < memory_bytes
+                            {
+                                memory_bytes -= inactive_file;
+                            }
                         }
+
+                        usage.memory_bytes = memory_bytes;
+                        usage.memory_limit_bytes = memory_stats.limit.unwrap_or(0);
                     }
 
-                    usage.memory_bytes = memory_bytes;
-                    usage.memory_limit_bytes = memory_stats.limit.unwrap_or(0);
-                }
+                    usage.disk_bytes = disk_bytes;
+                    usage.state = stats_server.state.get_state();
 
-                usage.disk_bytes = disk_bytes;
-                usage.state = stats_server.state.get_state();
+                    if let Some(networks) = &stats.networks
+                        && let Some(net) = networks.values().next()
+                    {
+                        usage.network.rx_bytes = net.rx_bytes.unwrap_or(0);
+                        usage.network.rx_packets = net.rx_packets.unwrap_or(0);
+                        usage.network.tx_bytes = net.tx_bytes.unwrap_or(0);
+                        usage.network.tx_packets = net.tx_packets.unwrap_or(0);
+                    }
 
-                if let Some(networks) = &stats.networks
-                    && let Some(net) = networks.values().next()
-                {
-                    usage.network.rx_bytes = net.rx_bytes.unwrap_or(0);
-                    usage.network.rx_packets = net.rx_packets.unwrap_or(0);
-                    usage.network.tx_bytes = net.tx_bytes.unwrap_or(0);
-                    usage.network.tx_packets = net.tx_packets.unwrap_or(0);
-                }
+                    if let Some(cpu_stats) = &stats.cpu_stats
+                        && let Some(cpu_usage) = &cpu_stats.cpu_usage
+                    {
+                        let total_usage = cpu_usage.total_usage.unwrap_or(0);
+                        let now = std::time::Instant::now();
 
-                if let Some(cpu_stats) = &stats.cpu_stats
-                    && let Some(cpu_usage) = &cpu_stats.cpu_usage
-                {
-                    let total_usage = cpu_usage.total_usage.unwrap_or(0);
-                    let now = std::time::Instant::now();
+                        usage.cpu_absolute = if let Some(prev) = prev_instant {
+                            let cpu_delta_ns = total_usage.saturating_sub(prev_cpu_total) as f64;
+                            let wall_delta_ns = now.duration_since(prev).as_nanos() as f64;
 
-                    usage.cpu_absolute = if let Some(prev) = prev_instant {
-                        let cpu_delta_ns = total_usage.saturating_sub(prev_cpu_total) as f64;
-                        let wall_delta_ns = now.duration_since(prev).as_nanos() as f64;
-
-                        if wall_delta_ns > 0.0 && cpu_delta_ns > 0.0 {
-                            ((cpu_delta_ns / wall_delta_ns) * 100.0 * 1000.0).round() / 1000.0
+                            if wall_delta_ns > 0.0 && cpu_delta_ns > 0.0 {
+                                ((cpu_delta_ns / wall_delta_ns) * 100.0 * 1000.0).round() / 1000.0
+                            } else {
+                                0.0
+                            }
                         } else {
                             0.0
-                        }
-                    } else {
-                        0.0
-                    };
+                        };
 
-                    prev_cpu_total = total_usage;
-                    prev_instant = Some(now);
-                }
+                        prev_cpu_total = total_usage;
+                        prev_instant = Some(now);
+                    }
+                });
             }
         });
 
         let state_docker = Arc::clone(&docker);
         let state_id = container_id.clone();
-        let state_usage = Arc::clone(&resource_usage);
+        let state_usage = resource_usage.clone();
 
         let state_task = tokio::spawn(async move {
             loop {
@@ -919,15 +927,19 @@ impl DockerProcessHandle {
                                 .signed_duration_since(started_at.with_timezone(&chrono::Utc))
                                 .num_milliseconds()
                                 .max(0) as u64;
-                            state_usage.write().uptime = uptime;
-                            if let Some(host_config) = inspect.host_config
-                                && let Some(cpu_quota) = host_config.cpu_quota
-                                && cpu_quota > 0
-                            {
-                                state_usage.write().cpu_limit_absolute = (cpu_quota / 1000) as u32;
-                            } else {
-                                state_usage.write().cpu_limit_absolute =
-                                    rayon::current_num_threads() as u32 * 100;
+                            if publish_resource_usage {
+                                state_usage.send_modify(|usage| {
+                                    usage.uptime = uptime;
+                                    if let Some(host_config) = inspect.host_config
+                                        && let Some(cpu_quota) = host_config.cpu_quota
+                                        && cpu_quota > 0
+                                    {
+                                        usage.cpu_limit_absolute = (cpu_quota / 1000) as u32;
+                                    } else {
+                                        usage.cpu_limit_absolute =
+                                            rayon::current_num_threads() as u32 * 100;
+                                    }
+                                });
                             }
                         }
                         super::ProcessStatus::Running
@@ -936,7 +948,9 @@ impl DockerProcessHandle {
                         super::ProcessStatus::Paused
                     }
                     _ => {
-                        state_usage.write().uptime = 0;
+                        if publish_resource_usage {
+                            state_usage.send_modify(|usage| usage.uptime = 0);
+                        }
                         super::ProcessStatus::Stopped {
                             exit_code: state.exit_code.unwrap_or(-1) as i32,
                             oom_killed: state.oom_killed.unwrap_or(false),
@@ -944,9 +958,7 @@ impl DockerProcessHandle {
                     }
                 };
 
-                let usage = *state_usage.read();
-
-                if status_tx.send((process_status, usage)).await.is_err() {
+                if status_tx.send(process_status).await.is_err() {
                     break;
                 }
             }
@@ -958,6 +970,7 @@ impl DockerProcessHandle {
             server: Arc::downgrade(&**server),
             app_config,
             resource_usage,
+            publish_resource_usage,
             stdin_tx,
             stdout_ratelimited_rx,
             stdout_rx,
@@ -980,17 +993,17 @@ impl Drop for DockerProcessHandle {
         self.state_task.abort();
         self.stats_task.abort();
         self.stdin_task.abort();
+
+        if self.publish_resource_usage
+            && let Some(server) = self.server.upgrade()
+        {
+            self.resource_usage.wipe(server.state.get_state());
+        }
     }
 }
 
 #[async_trait::async_trait]
 impl super::ProcessHandle for DockerProcessHandle {
-    async fn resource_usage(
-        &self,
-    ) -> Result<super::super::resources::ResourceUsage, anyhow::Error> {
-        Ok(*self.resource_usage.read())
-    }
-
     async fn logs(
         &self,
         lines: Option<usize>,
@@ -1127,8 +1140,7 @@ impl super::ProcessHandle for DockerProcessHandle {
     }
 }
 
-type StatusReceiver =
-    tokio::sync::mpsc::Receiver<(super::ProcessStatus, super::super::resources::ResourceUsage)>;
+type StatusReceiver = tokio::sync::mpsc::Receiver<super::ProcessStatus>;
 
 async fn find_running_container(
     docker: &bollard::Docker,
@@ -1230,6 +1242,7 @@ impl super::ServerExecutor for DockerExecutor {
                 server,
                 Arc::clone(&self.app_config),
                 status_tx,
+                true,
             )
             .await?,
         );
@@ -1254,6 +1267,7 @@ impl super::ServerExecutor for DockerExecutor {
                 server,
                 Arc::clone(&self.app_config),
                 status_tx,
+                true,
             )
             .await?,
         );
@@ -1432,6 +1446,7 @@ impl super::ServerExecutor for DockerExecutor {
                 server,
                 Arc::clone(&self.app_config),
                 status_tx,
+                true,
             )
             .await?,
         );
@@ -1456,6 +1471,7 @@ impl super::ServerExecutor for DockerExecutor {
                 server,
                 Arc::clone(&self.app_config),
                 status_tx,
+                true,
             )
             .await?,
         );
@@ -1639,6 +1655,7 @@ impl super::ServerExecutor for DockerExecutor {
                 server,
                 Arc::clone(&self.app_config),
                 status_tx,
+                false,
             )
             .await?,
         );

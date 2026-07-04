@@ -108,7 +108,7 @@ impl ScheduleCondition {
                     server.state.get_state() == *cond_state
                 }
                 ScheduleCondition::Uptime { comparator, value } => {
-                    let resource_usage = server.resource_usage().await;
+                    let resource_usage = server.resource_usage();
 
                     comparator.compare_f64(resource_usage.uptime as f64, *value as f64)
                 }
@@ -117,7 +117,7 @@ impl ScheduleCondition {
                     comparator,
                     value,
                 } => {
-                    let resource_usage = server.resource_usage().await;
+                    let resource_usage = server.resource_usage();
                     let current = match metric {
                         super::ScheduleResourceMetric::Cpu => resource_usage.cpu_absolute,
                         super::ScheduleResourceMetric::Memory => resource_usage.memory_bytes as f64,

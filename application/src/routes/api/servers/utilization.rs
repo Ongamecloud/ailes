@@ -16,7 +16,7 @@ mod get {
         let mut utilization = HashMap::new();
 
         for server in state.server_manager.get_servers().await.iter() {
-            utilization.insert(server.uuid, server.resource_usage().await);
+            utilization.insert(server.uuid, server.resource_usage());
         }
 
         ApiResponse::new_serialized(utilization).ok()

@@ -26,7 +26,7 @@ mod get {
     ))]
     pub async fn route(server: GetServer) -> ApiResponseResult {
         ApiResponse::new_serialized(Response {
-            utilization: server.resource_usage().await,
+            utilization: server.resource_usage(),
         })
         .ok()
     }

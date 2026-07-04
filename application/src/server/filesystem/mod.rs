@@ -1,7 +1,10 @@
 use crate::{
     routes::MimeCacheValue,
-    server::filesystem::virtualfs::{
-        DirectoryStreamWalkFn, VirtualReadableFilesystem, VirtualWritableFilesystem,
+    server::{
+        filesystem::virtualfs::{
+            DirectoryStreamWalkFn, VirtualReadableFilesystem, VirtualWritableFilesystem,
+        },
+        resources::ResourceUsageWatchExt,
     },
     utils::{PortablePermissions, PortableSizeExt},
 };
@@ -83,6 +86,7 @@ pub struct Filesystem {
     server_notifier: inotify::InotifyServerNotifier,
     use_server_notifier: Arc<AtomicBool>,
 
+    resource_usage: tokio::sync::watch::Sender<crate::server::resources::ResourceUsage>,
     disk_limit: AtomicI64,
     disk_usage_delta_cached: Arc<AtomicI64>,
     disk_usage_cached_logical: Arc<AtomicU64>,
@@ -103,6 +107,7 @@ impl Filesystem {
         app_state: crate::routes::State,
         disk_limit: u64,
         sender: tokio::sync::broadcast::Sender<crate::server::websocket::WebsocketMessage>,
+        resource_usage: tokio::sync::watch::Sender<crate::server::resources::ResourceUsage>,
         config: Arc<crate::config::Config>,
         deny_list: &[compact_str::CompactString],
     ) -> Self {
@@ -143,6 +148,7 @@ impl Filesystem {
                 server_notifier: server_notifier.clone(),
                 use_server_notifier: Arc::clone(&use_server_notifier),
                 last_disk_check: Arc::clone(&last_disk_check),
+                resource_usage: resource_usage.clone(),
             })),
             config: Arc::clone(&config),
 
@@ -152,6 +158,7 @@ impl Filesystem {
             server_notifier,
             use_server_notifier,
 
+            resource_usage,
             disk_limit: AtomicI64::new(disk_limit as i64),
             disk_usage_delta_cached: Arc::new(AtomicI64::new(0)),
             disk_usage_cached_logical,
@@ -937,6 +944,8 @@ impl Filesystem {
 
         self.disk_usage_delta_cached
             .fetch_add(delta.logical, Ordering::Relaxed);
+        self.resource_usage
+            .publish_disk_usage(self.get_physical_cached_size());
 
         true
     }
@@ -1037,6 +1046,7 @@ impl Filesystem {
         self.disk_usage.write().await.truncate();
         self.disk_usage_cached_logical.store(0, Ordering::Relaxed);
         self.disk_usage_cached_physical.store(0, Ordering::Relaxed);
+        self.resource_usage.publish_disk_usage(0);
 
         let mut directory = self.async_read_dir(Path::new("")).await?;
         while let Some(Ok((file_type, path))) = directory.next_entry().await {

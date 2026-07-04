@@ -58,7 +58,7 @@ pub async fn handle_message(
             websocket_handler
                 .send_message(
                     WebsocketMessage::builder(WebsocketEvent::ServerStats)
-                        .structured_arg(server.resource_usage().await)
+                        .structured_arg(server.resource_usage())
                         .build(),
                 )
                 .await;

@@ -333,18 +333,12 @@ impl ServerInstaller {
                                                 }
                                             }
                                             result = status_rx.recv() => {
-                                                if let Some((_, usage)) = result {
-                                                    installer
-                                                        .server
-                                                        .websocket
-                                                        .send(
-                                                            super::websocket::WebsocketMessage::builder(
-                                                                super::websocket::WebsocketEvent::ServerStats,
-                                                            )
-                                                            .structured_arg(usage)
-                                                            .build(),
-                                                        )
-                                                        .ok();
+                                                match result {
+                                                    Some(super::executor::ProcessStatus::Stopped { .. }) | None => {
+                                                        tracing::info!(server = ?installer.server.uuid, "ending server installation process by container exit");
+                                                        break;
+                                                    }
+                                                    _ => {}
                                                 }
                                             }
                                         }
@@ -491,7 +485,7 @@ impl ServerInstaller {
                                             }
                                             result = status_rx.recv() => {
                                                 match result {
-                                                    Some((super::executor::ProcessStatus::Stopped { .. }, _)) | None => {
+                                                    Some(super::executor::ProcessStatus::Stopped { .. }) | None => {
                                                         tracing::info!(server = ?installer.server.uuid, "ending server installation process by container exit");
                                                         break;
                                                     }

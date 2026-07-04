@@ -657,45 +657,52 @@ impl Schedule {
                         let server = server.clone();
 
                         async move {
-                            let mut met_since: Option<std::time::Instant> = None;
+                            let for_duration = std::time::Duration::from_secs(for_seconds);
+                            let mut met_since: Option<tokio::time::Instant> = None;
                             let mut fired = false;
+                            let mut usage_rx = server.subscribe_resource_usage();
 
                             loop {
-                                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                                let usage = *usage_rx.borrow_and_update();
 
-                                if matches!(
+                                let evaluable = !matches!(
                                     metric,
                                     ScheduleResourceMetric::Cpu | ScheduleResourceMetric::Memory
-                                ) && server.state.get_state()
-                                    != crate::server::state::ServerState::Running
-                                {
-                                    met_since = None;
-                                    fired = false;
-                                    continue;
-                                }
-
-                                let resource_usage = server.resource_usage().await;
+                                ) || usage.state
+                                    == crate::server::state::ServerState::Running;
                                 let current = match metric {
-                                    ScheduleResourceMetric::Cpu => resource_usage.cpu_absolute,
-                                    ScheduleResourceMetric::Memory => {
-                                        resource_usage.memory_bytes as f64
-                                    }
-                                    ScheduleResourceMetric::Disk => {
-                                        resource_usage.disk_bytes as f64
-                                    }
+                                    ScheduleResourceMetric::Cpu => usage.cpu_absolute,
+                                    ScheduleResourceMetric::Memory => usage.memory_bytes as f64,
+                                    ScheduleResourceMetric::Disk => usage.disk_bytes as f64,
                                 };
 
-                                if comparator.compare_f64(current, value) {
+                                if evaluable && comparator.compare_f64(current, value) {
                                     let since =
-                                        met_since.get_or_insert_with(std::time::Instant::now);
+                                        *met_since.get_or_insert_with(tokio::time::Instant::now);
 
-                                    if !fired && since.elapsed().as_secs() >= for_seconds {
+                                    if !fired && since.elapsed() >= for_duration {
                                         fired = true;
                                         executor_notifier.notify_one();
                                     }
                                 } else {
                                     met_since = None;
                                     fired = false;
+                                }
+
+                                if !fired && let Some(since) = met_since {
+                                    tokio::select! {
+                                        changed = usage_rx.changed() => {
+                                            if changed.is_err() {
+                                                break;
+                                            }
+                                        }
+                                        _ = tokio::time::sleep_until(since + for_duration) => {
+                                            fired = true;
+                                            executor_notifier.notify_one();
+                                        }
+                                    }
+                                } else if usage_rx.changed().await.is_err() {
+                                    break;
                                 }
                             }
                         }

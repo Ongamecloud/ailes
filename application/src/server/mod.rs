@@ -37,12 +37,13 @@ pub struct InnerServer {
     pub websocket: tokio::sync::broadcast::Sender<websocket::WebsocketMessage>,
     // Dummy receiver to avoid channel being closed
     _websocket_receiver: tokio::sync::broadcast::Receiver<websocket::WebsocketMessage>,
-    websocket_sender: RwLock<Option<tokio::task::JoinHandle<()>>>,
+    status_task: RwLock<Option<tokio::task::JoinHandle<()>>>,
     pub targeted_websocket: tokio::sync::broadcast::Sender<websocket::TargetedWebsocketMessage>,
     // Dummy receiver to avoid channel being closed
     _targeted_websocket_receiver:
         tokio::sync::broadcast::Receiver<websocket::TargetedWebsocketMessage>,
 
+    resource_usage: tokio::sync::watch::Sender<resources::ResourceUsage>,
     process_handle: RwLock<Option<Arc<dyn executor::ProcessHandle>>>,
     process_startup_task: RwLock<Option<tokio::task::JoinHandle<()>>>,
     pub schedules: Arc<schedule::manager::ScheduleManager>,
@@ -78,8 +79,8 @@ impl Drop for InnerServer {
         if let Some(startup_task) = self.process_startup_task.get_mut().take() {
             startup_task.abort();
         }
-        if let Some(websocket_sender) = self.websocket_sender.get_mut().take() {
-            websocket_sender.abort();
+        if let Some(status_task) = self.status_task.get_mut().take() {
+            status_task.abort();
         }
     }
 }
@@ -100,12 +101,14 @@ impl Server {
 
         let (websocket_tx, websocket_rx) = tokio::sync::broadcast::channel(128);
         let (targeted_websocket_tx, targeted_websocket_rx) = tokio::sync::broadcast::channel(128);
+        let (resource_usage, _) = tokio::sync::watch::channel(resources::ResourceUsage::default());
 
         let filesystem = filesystem::Filesystem::new(
             configuration.uuid,
             app_state.clone(),
             configuration.build.disk_space * 1024 * 1024,
             websocket_tx.clone(),
+            resource_usage.clone(),
             Arc::clone(&app_state.config),
             &configuration.egg.file_denylist,
         );
@@ -116,7 +119,7 @@ impl Server {
             &app_state.config,
         )));
 
-        Self(Arc::new(InnerServer {
+        let server = Self(Arc::new(InnerServer {
             uuid: configuration.uuid,
             app_state,
 
@@ -125,10 +128,11 @@ impl Server {
 
             websocket: websocket_tx.clone(),
             _websocket_receiver: websocket_rx,
-            websocket_sender: RwLock::new(None),
+            status_task: RwLock::new(None),
             targeted_websocket: targeted_websocket_tx,
             _targeted_websocket_receiver: targeted_websocket_rx,
 
+            resource_usage,
             process_handle: RwLock::new(None),
             process_startup_task: RwLock::new(None),
             schedules: Arc::clone(&schedules),
@@ -152,7 +156,41 @@ impl Server {
 
             user_permissions: permissions::UserPermissionsMap::default(),
             filesystem,
-        }))
+        }));
+
+        server.spawn_stats_forwarder();
+
+        server
+    }
+
+    fn spawn_stats_forwarder(&self) {
+        let weak = Arc::downgrade(&self.0);
+        let mut usage_rx = self.resource_usage.subscribe();
+
+        tokio::spawn(async move {
+            while usage_rx.changed().await.is_ok() {
+                let Some(server) = weak.upgrade() else {
+                    break;
+                };
+
+                let mut usage = *usage_rx.borrow_and_update();
+                usage.state = server.state.get_state();
+
+                server
+                    .websocket
+                    .send(
+                        websocket::WebsocketMessage::builder(
+                            websocket::WebsocketEvent::ServerStats,
+                        )
+                        .structured_arg(usage)
+                        .build(),
+                    )
+                    .ok();
+                drop(server);
+
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+        });
     }
 
     #[cfg(test)]
@@ -266,40 +304,23 @@ impl Server {
         }
     }
 
-    fn setup_websocket_sender(
+    fn setup_status_task(
         &self,
-        mut status_rx: tokio::sync::mpsc::Receiver<(
-            executor::ProcessStatus,
-            resources::ResourceUsage,
-        )>,
+        mut status_rx: tokio::sync::mpsc::Receiver<executor::ProcessStatus>,
     ) -> Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
         tracing::debug!(
             server = %self.uuid,
-            "setting up websocket sender"
+            "setting up status task"
         );
         let server = self.clone();
 
         Box::pin(async move {
-            let old_sender = server.clone().websocket_sender.write().await.replace(tokio::spawn(async move {
+            let old_sender = server.clone().status_task.write().await.replace(tokio::spawn(async move {
                 loop {
-                    let (process_status, usage) = match status_rx.recv().await {
-                        Some((process_status, usage)) => (process_status, usage),
+                    let process_status = match status_rx.recv().await {
+                        Some(process_status) => process_status,
                         None => break,
                     };
-
-                    let message = websocket::WebsocketMessage::builder(
-                        websocket::WebsocketEvent::ServerStats,
-                    )
-                    .structured_arg(usage)
-                    .build();
-
-                    if let Err(err) = server.websocket.send(message) {
-                        tracing::error!(
-                            server = %server.uuid,
-                            "failed to send websocket message: {}",
-                            err
-                        );
-                    }
 
                     server.filesystem.disk_checker_state_dirty.store(true, Ordering::Relaxed);
 
@@ -587,23 +608,17 @@ impl Server {
         None
     }
 
-    pub async fn resource_usage(&self) -> resources::ResourceUsage {
-        if let Some(container) = self.process_handle.read().await.as_ref() {
-            container
-                .resource_usage()
-                .await
-                .unwrap_or_else(|_| resources::ResourceUsage {
-                    disk_bytes: 0,
-                    state: self.state.get_state(),
-                    ..Default::default()
-                })
-        } else {
-            resources::ResourceUsage {
-                disk_bytes: self.filesystem.limiter_usage().await,
-                state: self.state.get_state(),
-                ..Default::default()
-            }
-        }
+    pub fn subscribe_resource_usage(
+        &self,
+    ) -> tokio::sync::watch::Receiver<resources::ResourceUsage> {
+        self.resource_usage.subscribe()
+    }
+
+    pub fn resource_usage(&self) -> resources::ResourceUsage {
+        let mut usage = *self.resource_usage.borrow();
+        usage.state = self.state.get_state();
+
+        usage
     }
 
     pub async fn update_configuration(
@@ -757,7 +772,7 @@ impl Server {
             .setup_server_process(&self.clone())
             .await?;
 
-        self.setup_websocket_sender(status_rx).await;
+        self.setup_status_task(status_rx).await;
         self.setup_startup_task(&*process_handle).await;
         *self.process_handle.write().await = Some(process_handle);
 
@@ -782,7 +797,7 @@ impl Server {
         {
             Ok((process_handle, status_rx)) => {
                 self.crash_handled.store(true, Ordering::SeqCst);
-                self.setup_websocket_sender(status_rx).await;
+                self.setup_status_task(status_rx).await;
                 self.setup_startup_task(&*process_handle).await;
                 *self.process_handle.write().await = Some(process_handle);
 
@@ -1327,7 +1342,7 @@ impl Server {
         }
 
         self.process_handle.write().await.take();
-        if let Some(handle) = self.websocket_sender.write().await.take() {
+        if let Some(handle) = self.status_task.write().await.take() {
             handle.abort();
         }
         if let Some(handle) = self.process_startup_task.write().await.take() {
@@ -1373,7 +1388,7 @@ impl Server {
         json!({
             "state": self.state.get_state(),
             "is_suspended": self.suspended.load(Ordering::SeqCst),
-            "utilization": self.resource_usage().await,
+            "utilization": self.resource_usage(),
             "configuration": *self.configuration.read().await,
         })
     }
