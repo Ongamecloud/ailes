@@ -311,6 +311,7 @@ impl ServerInstaller {
                                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                                     handle.start().await.context("Failed to start installation container")?;
 
+                                    let mut seen_running = false;
                                     loop {
                                         tokio::select! {
                                             result = stdout_rx.recv() => {
@@ -334,10 +335,14 @@ impl ServerInstaller {
                                             }
                                             result = status_rx.recv() => {
                                                 match result {
-                                                    Some(super::executor::ProcessStatus::Stopped { .. }) | None => {
+                                                    Some(super::executor::ProcessStatus::Running) => {
+                                                        seen_running = true;
+                                                    }
+                                                    Some(super::executor::ProcessStatus::Stopped { .. }) if seen_running => {
                                                         tracing::info!(server = ?installer.server.uuid, "ending server installation process by container exit");
                                                         break;
                                                     }
+                                                    None => break,
                                                     _ => {}
                                                 }
                                             }

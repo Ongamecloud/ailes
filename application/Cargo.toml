@@ -44,7 +44,7 @@ bytes = { workspace = true }
 ignore = "0.4.23"
 sha1 = "0.11.0"
 futures = { workspace = true }
-russh = "0.61.0"
+russh = "0.62.1"
 russh-sftp = "2.1.1"
 md5 = "0.8.0"
 human_bytes = "0.4.3"
@@ -67,7 +67,7 @@ lzma-rust2 = { version = "0.16.1", features = ["optimization"] }
 bzip2 = "0.6.0"
 zstd = { workspace = true }
 base64 = "0.22.1"
-chunked_vec = "=0.3.4"
+chunked_vec = "=0.5.1"
 async-channel = "2.5.0"
 lzzzz = "2.0.0"
 xmltree = { version = "0.12.0", features = ["attribute-order"] }
