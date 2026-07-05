@@ -361,15 +361,10 @@ impl ScheduleAction {
                 timeout,
                 ..
             } => {
-                let state_waiter = async {
-                    while server.state.get_state() != *target_state {
-                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                    }
-                };
-
-                if tokio::time::timeout(std::time::Duration::from_millis(*timeout), state_waiter)
+                if !server
+                    .state
+                    .wait_for_state(*target_state, std::time::Duration::from_millis(*timeout))
                     .await
-                    .is_err()
                 {
                     return Err(format!(
                         "timeout while waiting for server state `{}`.",

@@ -993,7 +993,7 @@ impl Server {
                 .state
                 .execute_action(
                     state::ServerState::Starting,
-                    |_| async {
+                    async || {
                         server.filesystem.setup().await;
                         server.filesystem.get_disk_limiter().startup().await?;
 
@@ -1148,7 +1148,7 @@ impl Server {
                 .state
                 .execute_action(
                     state::ServerState::Stopping,
-                    |_| async {
+                    async || {
                         server.stopping.store(true, Ordering::SeqCst);
 
                         if let Some(process_handle) = server.process_handle.read().await.as_ref()
@@ -1249,27 +1249,22 @@ impl Server {
 
                 server.restarting.store(true, Ordering::SeqCst);
 
-                let deadline = tokio::time::Instant::now() + timeout;
-                loop {
-                    if server.state.get_state() != state::ServerState::Stopping {
-                        break;
-                    }
-                    if tokio::time::Instant::now() >= deadline {
-                        tracing::info!(
+                if !server
+                    .state
+                    .wait_while_state(state::ServerState::Stopping, timeout)
+                    .await
+                {
+                    tracing::info!(
+                        server = %server.uuid,
+                        "kill timeout reached during restart, killing server"
+                    );
+                    if let Err(err) = server.kill(true).await {
+                        tracing::error!(
                             server = %server.uuid,
-                            "kill timeout reached during restart, killing server"
+                            "failed to kill server during restart: {}",
+                            err
                         );
-                        if let Err(err) = server.kill(true).await {
-                            tracing::error!(
-                                server = %server.uuid,
-                                "failed to kill server during restart: {}",
-                                err
-                            );
-                        }
-                        break;
                     }
-
-                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
                 }
             } else {
                 server.start(aquire_timeout, true).await?;
@@ -1308,12 +1303,12 @@ impl Server {
                 server.stop(None, skip_schedules).await?;
             }
 
-            let deadline = tokio::time::Instant::now() + timeout;
-            while tokio::time::Instant::now() < deadline {
-                if server.state.get_state() == state::ServerState::Offline {
-                    return Ok(());
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            if server
+                .state
+                .wait_for_state(state::ServerState::Offline, timeout)
+                .await
+            {
+                return Ok(());
             }
 
             tracing::info!(

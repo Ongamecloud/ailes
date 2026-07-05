@@ -2,7 +2,7 @@ use compact_str::ToCompactString;
 use serde::{Deserialize, Serialize};
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, AtomicU8, Ordering},
+    atomic::{AtomicBool, Ordering},
 };
 use utoipa::ToSchema;
 
@@ -31,8 +31,8 @@ impl ServerState {
 }
 
 pub struct ServerStateLock {
-    state: AtomicU8,
-    locked: AtomicBool,
+    state: tokio::sync::watch::Sender<ServerState>,
+    locked: tokio::sync::Mutex<()>,
     pending_restart: AtomicBool,
     sender: tokio::sync::broadcast::Sender<super::websocket::WebsocketMessage>,
     schedule_manager: Arc<super::schedule::manager::ScheduleManager>,
@@ -44,8 +44,8 @@ impl ServerStateLock {
         schedule_manager: Arc<super::schedule::manager::ScheduleManager>,
     ) -> Self {
         Self {
-            state: AtomicU8::new(0),
-            locked: AtomicBool::new(false),
+            state: tokio::sync::watch::Sender::new(ServerState::default()),
+            locked: tokio::sync::Mutex::new(()),
             pending_restart: AtomicBool::new(false),
             sender,
             schedule_manager,
@@ -58,7 +58,7 @@ impl ServerStateLock {
             return;
         }
 
-        self.state.store(state as u8, Ordering::SeqCst);
+        self.state.send_replace(state);
         self.schedule_manager
             .execute_server_state_trigger(state)
             .await;
@@ -98,13 +98,52 @@ impl ServerStateLock {
 
     #[inline]
     pub fn get_state(&self) -> ServerState {
-        match self.state.load(Ordering::SeqCst) {
-            0 => ServerState::Offline,
-            1 => ServerState::Starting,
-            2 => ServerState::Stopping,
-            3 => ServerState::Running,
-            _ => ServerState::Offline,
+        *self.state.borrow()
+    }
+
+    /// Subscribes to state transitions. A fresh receiver treats the current
+    /// state as already seen, so `changed()` resolves on the next transition;
+    /// call `borrow_and_update()` first if the current value must be acted on.
+    #[inline]
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<ServerState> {
+        self.state.subscribe()
+    }
+
+    /// Waits until the server state equals `target`, or until `timeout` elapses.
+    /// Returns `true` if the target state was reached, `false` on timeout.
+    pub async fn wait_for_state(&self, target: ServerState, timeout: std::time::Duration) -> bool {
+        self.wait_until(|s| s == target, timeout).await
+    }
+
+    /// Waits until the server state differs from `target`, or until `timeout` elapses.
+    /// Returns `true` if the state moved away from `target`, `false` on timeout.
+    pub async fn wait_while_state(
+        &self,
+        target: ServerState,
+        timeout: std::time::Duration,
+    ) -> bool {
+        self.wait_until(|s| s != target, timeout).await
+    }
+
+    async fn wait_until<F>(&self, predicate: F, timeout: std::time::Duration) -> bool
+    where
+        F: Fn(ServerState) -> bool,
+    {
+        let mut rx = self.subscribe();
+        if predicate(*rx.borrow_and_update()) {
+            return true;
         }
+        let fut = async {
+            loop {
+                if rx.changed().await.is_err() {
+                    return false;
+                }
+                if predicate(*rx.borrow_and_update()) {
+                    return true;
+                }
+            }
+        };
+        tokio::time::timeout(timeout, fut).await.is_ok()
     }
 
     #[inline]
@@ -119,7 +158,7 @@ impl ServerStateLock {
     /// If `aquire_timeout` is `Some`, it will wait for the specified duration to acquire the lock.
     /// If the lock is not acquired within the timeout, it returns `Ok(false)`.
     pub async fn execute_action<
-        F: FnOnce(bool) -> Fut,
+        F: FnOnce() -> Fut,
         Fut: Future<Output = Result<(), anyhow::Error>>,
     >(
         &self,
@@ -129,41 +168,26 @@ impl ServerStateLock {
     ) -> Result<bool, anyhow::Error> {
         let old_state = self.get_state();
 
-        let mut aquired = false;
-        if let Some(timeout) = aquire_timeout {
-            let instant = std::time::Instant::now();
-            while instant.elapsed() < timeout {
-                if !self.locked.load(Ordering::SeqCst) {
-                    aquired = true;
-                    break;
-                }
-
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let _guard = if let Some(timeout) = aquire_timeout {
+            match tokio::time::timeout(timeout, self.locked.lock()).await {
+                Ok(guard) => guard,
+                Err(_) => return Ok(false),
             }
-        } else if self.locked.load(Ordering::SeqCst) {
-            return Ok(false);
         } else {
-            aquired = true;
-        }
-
-        if !aquired {
-            return Ok(false);
-        }
-
-        self.locked.store(true, Ordering::SeqCst);
+            match self.locked.try_lock() {
+                Ok(guard) => guard,
+                Err(_) => return Ok(false),
+            }
+        };
 
         self.set_state(state).await;
-        if let Err(err) = action(aquired).await {
-            tracing::error!("failed to execute power action: {:?}", err);
-
-            self.set_state(old_state).await;
-            self.locked.store(false, Ordering::SeqCst);
-
-            Err(err)
-        } else {
-            self.locked.store(false, Ordering::SeqCst);
-
-            Ok(true)
+        match action().await {
+            Ok(()) => Ok(true),
+            Err(err) => {
+                tracing::error!("failed to execute power action: {:?}", err);
+                self.set_state(old_state).await;
+                Err(err)
+            }
         }
     }
 }
@@ -187,7 +211,7 @@ mod tests {
     // ServerStateLock
 
     #[test]
-    fn state_round_trips_through_atomic() {
+    fn state_round_trips() {
         tokio_test::block_on(async {
             let lock = lock();
             for state in [
@@ -199,6 +223,67 @@ mod tests {
                 lock.set_state(state).await;
                 assert_eq!(lock.get_state(), state);
             }
+        });
+    }
+
+    #[test]
+    fn subscriber_observes_latest_state() {
+        tokio_test::block_on(async {
+            let lock = lock();
+            let mut rx = lock.subscribe();
+
+            lock.set_state(ServerState::Starting).await;
+            lock.set_state(ServerState::Running).await;
+
+            rx.changed().await.unwrap();
+            assert_eq!(*rx.borrow_and_update(), ServerState::Running);
+        });
+    }
+
+    #[test]
+    fn wait_for_state_resolves_when_target_reached() {
+        tokio_test::block_on(async {
+            let lock = std::sync::Arc::new(lock());
+            let l2 = lock.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                l2.set_state(ServerState::Running).await;
+            });
+            assert!(
+                lock.wait_for_state(ServerState::Running, Duration::from_secs(1))
+                    .await
+            );
+            assert_eq!(lock.get_state(), ServerState::Running);
+        });
+    }
+
+    #[test]
+    fn wait_for_state_times_out() {
+        tokio_test::block_on(async {
+            let lock = lock();
+            assert!(
+                !lock
+                    .wait_for_state(ServerState::Running, Duration::from_millis(50))
+                    .await
+            );
+        });
+    }
+
+    #[test]
+    fn wait_while_state_resolves_on_transition() {
+        tokio_test::block_on(async {
+            let lock = std::sync::Arc::new(lock());
+            lock.set_state(ServerState::Stopping).await;
+            let l2 = lock.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                l2.set_state(ServerState::Offline).await;
+            });
+            assert!(
+                lock.wait_while_state(ServerState::Stopping, Duration::from_secs(1))
+                    .await
+            );
+            assert_eq!(lock.get_state(), ServerState::Offline);
         });
     }
 
@@ -265,7 +350,7 @@ mod tests {
                 let ran = ran.clone();
                 lock.execute_action(
                     ServerState::Running,
-                    move |_| async move {
+                    async || {
                         ran.store(true, Ordering::SeqCst);
                         anyhow::Ok(())
                     },
@@ -284,11 +369,7 @@ mod tests {
         tokio_test::block_on(async {
             let lock = lock();
             let out = lock
-                .execute_action(
-                    ServerState::Starting,
-                    |_| async move { anyhow::bail!("boom") },
-                    None,
-                )
+                .execute_action(ServerState::Starting, async || anyhow::bail!("boom"), None)
                 .await;
             assert!(out.is_err());
             assert_eq!(lock.get_state(), ServerState::Offline);
@@ -299,19 +380,11 @@ mod tests {
     fn execute_action_releases_lock_after_success() {
         tokio_test::block_on(async {
             let lock = lock();
-            lock.execute_action(
-                ServerState::Running,
-                |_| async move { anyhow::Ok(()) },
-                None,
-            )
-            .await
-            .unwrap();
+            lock.execute_action(ServerState::Running, async || anyhow::Ok(()), None)
+                .await
+                .unwrap();
             let out = lock
-                .execute_action(
-                    ServerState::Stopping,
-                    |_| async move { anyhow::Ok(()) },
-                    None,
-                )
+                .execute_action(ServerState::Stopping, async || anyhow::Ok(()), None)
                 .await;
             assert!(out.unwrap());
             assert_eq!(lock.get_state(), ServerState::Stopping);
@@ -323,18 +396,10 @@ mod tests {
         tokio_test::block_on(async {
             let lock = lock();
             let _ = lock
-                .execute_action(
-                    ServerState::Starting,
-                    |_| async move { anyhow::bail!("x") },
-                    None,
-                )
+                .execute_action(ServerState::Starting, async || anyhow::bail!("x"), None)
                 .await;
             let out = lock
-                .execute_action(
-                    ServerState::Running,
-                    |_| async move { anyhow::Ok(()) },
-                    None,
-                )
+                .execute_action(ServerState::Running, async || anyhow::Ok(()), None)
                 .await;
             assert!(out.unwrap());
         });
@@ -352,7 +417,7 @@ mod tests {
                 let release = release.clone();
                 lock.execute_action(
                     ServerState::Running,
-                    move |_| async move {
+                    async move || {
                         started.notify_one();
                         release.notified().await;
                         anyhow::Ok(())
@@ -367,11 +432,7 @@ mod tests {
                 async move {
                     started.notified().await;
                     let r = lock
-                        .execute_action(
-                            ServerState::Stopping,
-                            |_| async move { anyhow::Ok(()) },
-                            None,
-                        )
+                        .execute_action(ServerState::Stopping, async || anyhow::Ok(()), None)
                         .await;
                     release.notify_one();
                     r
@@ -397,7 +458,7 @@ mod tests {
                 let release = release.clone();
                 lock.execute_action(
                     ServerState::Running,
-                    move |_| async move {
+                    async move || {
                         started.notify_one();
                         release.notified().await;
                         anyhow::Ok(())
@@ -415,7 +476,7 @@ mod tests {
                     let r = l
                         .execute_action(
                             ServerState::Stopping,
-                            move |_| async move {
+                            async || {
                                 ran.store(true, Ordering::SeqCst);
                                 anyhow::Ok(())
                             },
