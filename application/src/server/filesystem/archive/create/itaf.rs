@@ -28,7 +28,7 @@ fn itaf_metadata(metadata: &cap_std::fs::Metadata) -> Metadata {
     Metadata {
         uid: 0,
         gid: 0,
-        mode: PortablePermissions::from(metadata.permissions()).mode,
+        mode: PortablePermissions::from(metadata.permissions()).mode() as u32,
         modified: metadata
             .modified()
             .map(|t| t.into_std())

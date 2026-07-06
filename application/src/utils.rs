@@ -179,23 +179,58 @@ pub fn strip_paths(value: &mut serde_json::Value, paths: &[&str]) {
     }
 }
 
+pub(crate) trait IntoMode {
+    fn into_mode(self) -> u16;
+}
+macro_rules! impl_into_mode {
+    ($($t:ty),*) => {
+        $(impl IntoMode for $t {
+            fn into_mode(self) -> u16 {
+                self as u16
+            }
+        })*
+    };
+}
+impl_into_mode!(i32, u16, u32, u64, usize);
+
+/// PortablePermissions is a wrapper around a u32 representing file permissions in a portable way.
+/// It only covers the lower 9 bits of the mode, which correspond to the standard Unix permission bits (rwx for user, group, and others).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PortablePermissions {
-    pub mode: u32,
+    mode: u16,
 }
 
 impl PortablePermissions {
-    pub fn from_mode(mode: u32) -> Self {
+    /// Creates a new `PortablePermissions` from a given mode, masking to the lower 9 bits.
+    /// This variant specifically sets the file permissions to be at least readable and writable by the owner (0o600).
+    #[inline]
+    pub fn from_mode_file(mode: impl IntoMode) -> Self {
         Self {
-            mode: mode & 0o0777,
+            mode: mode.into_mode() & 0o777 | 0o600,
         }
     }
 
+    /// Creates a new `PortablePermissions` from a given mode, masking to the lower 9 bits.
+    /// This variant specifically sets the directory permissions to be at least readable, writable, and executable by the owner (0o700).
+    #[inline]
+    pub fn from_mode_dir(mode: impl IntoMode) -> Self {
+        Self {
+            mode: mode.into_mode() & 0o777 | 0o700,
+        }
+    }
+
+    /// Returns the underlying mode of the `PortablePermissions`.
+    #[inline]
+    pub fn mode(&self) -> u16 {
+        self.mode
+    }
+
+    #[inline]
     pub fn into_std_permissions(self) -> Option<std::fs::Permissions> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            Some(std::fs::Permissions::from_mode(self.mode))
+            Some(std::fs::Permissions::from_mode(self.mode as _))
         }
         #[cfg(windows)]
         None
@@ -206,7 +241,7 @@ impl PortablePermissions {
 impl From<std::fs::Permissions> for PortablePermissions {
     fn from(perms: std::fs::Permissions) -> Self {
         Self {
-            mode: std::os::unix::fs::PermissionsExt::mode(&perms),
+            mode: std::os::unix::fs::PermissionsExt::mode(&perms) as u16 & 0o777,
         }
     }
 }
@@ -215,7 +250,7 @@ impl From<std::fs::Permissions> for PortablePermissions {
 impl From<cap_std::fs::Permissions> for PortablePermissions {
     fn from(perms: cap_std::fs::Permissions) -> Self {
         Self {
-            mode: cap_std::fs::PermissionsExt::mode(&perms),
+            mode: cap_std::fs::PermissionsExt::mode(&perms) as u16 & 0o777,
         }
     }
 }
@@ -247,7 +282,7 @@ impl PortablePermissionsApplier for std::fs::File {
     fn apply_permissions(&self, new_permissions: PortablePermissions) -> std::io::Result<()> {
         use std::os::unix::fs::PermissionsExt;
 
-        let permissions = std::fs::Permissions::from_mode(new_permissions.mode);
+        let permissions = std::fs::Permissions::from_mode(new_permissions.mode as _);
         self.set_permissions(permissions)
     }
 }
@@ -257,7 +292,7 @@ impl PortablePermissionsApplier for cap_std::fs::File {
     fn apply_permissions(&self, new_permissions: PortablePermissions) -> std::io::Result<()> {
         use cap_std::fs::PermissionsExt;
 
-        let permissions = cap_std::fs::Permissions::from_mode(new_permissions.mode);
+        let permissions = cap_std::fs::Permissions::from_mode(new_permissions.mode as _);
         self.set_permissions(permissions)
     }
 }
@@ -563,16 +598,31 @@ mod tests {
 
     #[test]
     fn portable_permissions_from_mode_masks_to_lower_nine_bits() {
-        assert_eq!(PortablePermissions::from_mode(0o7755).mode, 0o755);
-        assert_eq!(PortablePermissions::from_mode(0o644).mode, 0o644);
-        assert_eq!(PortablePermissions::from_mode(0o1777).mode, 0o777);
+        assert_eq!(PortablePermissions::from_mode_file(0o7755).mode(), 0o755);
+        assert_eq!(PortablePermissions::from_mode_file(0o644).mode(), 0o644);
+        assert_eq!(PortablePermissions::from_mode_file(0o1777).mode(), 0o777);
+    }
+
+    #[test]
+    fn portable_permissions_from_mode_file_sets_owner_read_write() {
+        assert_eq!(PortablePermissions::from_mode_file(0o000).mode(), 0o600);
+        assert_eq!(PortablePermissions::from_mode_file(0o400).mode(), 0o600);
+        assert_eq!(PortablePermissions::from_mode_file(0o200).mode(), 0o600);
+    }
+
+    #[test]
+    fn portable_permissions_from_mode_dir_sets_owner_read_write_execute() {
+        assert_eq!(PortablePermissions::from_mode_dir(0o000).mode(), 0o700);
+        assert_eq!(PortablePermissions::from_mode_dir(0o400).mode(), 0o700);
+        assert_eq!(PortablePermissions::from_mode_dir(0o200).mode(), 0o700);
+        assert_eq!(PortablePermissions::from_mode_dir(0o100).mode(), 0o700);
     }
 
     #[cfg(unix)]
     #[test]
     fn portable_permissions_into_std_roundtrips_on_unix() {
         use std::os::unix::fs::PermissionsExt;
-        let perms = PortablePermissions::from_mode(0o640)
+        let perms = PortablePermissions::from_mode_file(0o640)
             .into_std_permissions()
             .unwrap();
         assert_eq!(perms.mode() & 0o777, 0o640);

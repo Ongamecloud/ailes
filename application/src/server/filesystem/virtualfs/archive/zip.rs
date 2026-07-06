@@ -315,7 +315,7 @@ impl VirtualReadableFilesystem for VirtualZipArchive {
         if path_ref == Path::new("") || path_ref == Path::new("/") {
             return Ok(FileMetadata {
                 file_type: FileType::Dir,
-                permissions: PortablePermissions::from_mode(0o755),
+                permissions: PortablePermissions::from_mode_dir(0o755),
                 size: 0,
                 modified: None,
                 created: None,
@@ -328,11 +328,15 @@ impl VirtualReadableFilesystem for VirtualZipArchive {
             Ok(entry) => Ok(FileMetadata {
                 file_type: Self::zip_entry_to_file_type(&entry),
                 permissions: if let Some(mode) = entry.unix_mode() {
-                    PortablePermissions::from_mode(mode)
+                    if entry.is_dir() {
+                        PortablePermissions::from_mode_dir(mode)
+                    } else {
+                        PortablePermissions::from_mode_file(mode)
+                    }
                 } else if entry.is_dir() {
-                    PortablePermissions::from_mode(0o755)
+                    PortablePermissions::from_mode_dir(0o755)
                 } else {
-                    PortablePermissions::from_mode(0o644)
+                    PortablePermissions::from_mode_file(0o644)
                 },
                 size: entry.size(),
                 modified: crate::server::filesystem::archive::zip_entry_get_modified_time(&entry),
@@ -342,7 +346,7 @@ impl VirtualReadableFilesystem for VirtualZipArchive {
                 if Self::is_virtual_directory(&self.sizes, path_ref) {
                     Ok(FileMetadata {
                         file_type: FileType::Dir,
-                        permissions: PortablePermissions::from_mode(0o755),
+                        permissions: PortablePermissions::from_mode_dir(0o755),
                         size: 0,
                         modified: None,
                         created: None,

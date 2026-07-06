@@ -525,7 +525,7 @@ impl Archive {
                                     .filesystem
                                     .create_chowned_dir_all(&destination_path)?;
                                 if let Ok(permissions) =
-                                    header.mode().map(PortablePermissions::from_mode)
+                                    header.mode().map(PortablePermissions::from_mode_dir)
                                 {
                                     self.server
                                         .filesystem
@@ -549,7 +549,7 @@ impl Archive {
                                 let mut writer = super::file::ServerFile::new(
                                     self.server.clone(),
                                     &destination_path,
-                                    header.mode().map(PortablePermissions::from_mode).ok(),
+                                    header.mode().map(PortablePermissions::from_mode_file).ok(),
                                     header
                                         .mtime()
                                         .map(|t| {
@@ -687,7 +687,7 @@ impl Archive {
                                             .create_chowned_dir_all(&destination_path)?;
                                         server.filesystem.set_permissions(
                                             &destination_path,
-                                            PortablePermissions::from_mode(
+                                            PortablePermissions::from_mode_dir(
                                                 entry.unix_mode().unwrap_or(0o755),
                                             ),
                                         )?;
@@ -702,7 +702,9 @@ impl Archive {
                                         let mut writer = super::file::ServerFile::new(
                                             server.clone(),
                                             &destination_path,
-                                            entry.unix_mode().map(PortablePermissions::from_mode),
+                                            entry
+                                                .unix_mode()
+                                                .map(PortablePermissions::from_mode_file),
                                             zip_entry_get_modified_time(&entry),
                                         )?;
 
@@ -1180,7 +1182,7 @@ impl Archive {
                                     .create_chowned_dir_all(&destination_path)?;
                                 server.filesystem.set_permissions(
                                     &destination_path,
-                                    PortablePermissions::from_mode(dir.mode.bits()),
+                                    PortablePermissions::from_mode_dir(dir.mode.bits()),
                                 )?;
 
                                 for entry in dir.entries {
@@ -1203,7 +1205,7 @@ impl Archive {
                                 let mut writer = super::file::ServerFile::new(
                                     server.clone(),
                                     &destination_path,
-                                    Some(PortablePermissions::from_mode(file.mode.bits())),
+                                    Some(PortablePermissions::from_mode_file(file.mode.bits())),
                                     Some(file.mtime),
                                 )?;
 
@@ -1339,13 +1341,12 @@ impl Archive {
                         }
 
                         let stat = entry.metadata().stat;
-                        let permissions =
-                            PortablePermissions::from_mode((stat.mode & 0o7777) as u32);
                         let modified_time = std::time::UNIX_EPOCH
                             + std::time::Duration::from_secs(stat.mtime.secs.max(0) as u64);
 
                         match entry.kind() {
                             pbs_client::pxar::EntryKind::Directory => {
+                                let permissions = PortablePermissions::from_mode_dir(stat.mode);
                                 self.server
                                     .filesystem
                                     .create_chowned_dir_all(&destination_path)?;
@@ -1364,6 +1365,7 @@ impl Archive {
                                     last_parent = Some(parent.to_path_buf());
                                 }
 
+                                let permissions = PortablePermissions::from_mode_file(stat.mode);
                                 let mut writer = super::file::ServerFile::new(
                                     self.server.clone(),
                                     &destination_path,

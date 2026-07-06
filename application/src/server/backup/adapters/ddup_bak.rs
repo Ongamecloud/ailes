@@ -670,7 +670,7 @@ impl BackupExt for DdupBakBackup {
                             let mut writer = crate::server::filesystem::file::ServerFile::new(
                                 server.clone(),
                                 &path,
-                                Some(PortablePermissions::from_mode(file.mode.bits())),
+                                Some(PortablePermissions::from_mode_file(file.mode.bits())),
                                 Some(file.mtime),
                             )?;
                             let reader = repository.entry_reader(Entry::File(file.clone()))?;
@@ -685,7 +685,7 @@ impl BackupExt for DdupBakBackup {
                             server.filesystem.create_chowned_dir_all(&path)?;
                             server.filesystem.set_permissions(
                                 &path,
-                                PortablePermissions::from_mode(directory.mode.bits()),
+                                PortablePermissions::from_mode_dir(directory.mode.bits()),
                             )?;
 
                             stack.push(Work::FinishDir {

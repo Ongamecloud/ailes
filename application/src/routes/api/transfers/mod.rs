@@ -264,7 +264,7 @@ mod post {
                                                 let meta = dir.metadata();
                                                 server.filesystem.set_permissions(
                                                     &destination_path,
-                                                    PortablePermissions::from_mode(meta.mode),
+                                                    PortablePermissions::from_mode_dir(meta.mode),
                                                 )?;
 
                                                 if directory_entries.len() < Archive::MAX_DIRECTORY_MTIME_ENTRIES {
@@ -286,7 +286,7 @@ mod post {
                                                     crate::server::filesystem::file::ServerFile::new(
                                                         server.clone(),
                                                         &destination_path,
-                                                        Some(PortablePermissions::from_mode(meta.mode)),
+                                                        Some(PortablePermissions::from_mode_file(meta.mode)),
                                                         Some(meta.modified),
                                                     )?
                                                     .ignorant();
@@ -404,7 +404,7 @@ mod post {
                                                     .create_chowned_dir_all(destination_path)?;
                                                 if let Ok(permissions) = header
                                                     .mode()
-                                                    .map(PortablePermissions::from_mode)
+                                                    .map(PortablePermissions::from_mode_dir)
                                                 {
                                                     server.filesystem.set_permissions(
                                                         destination_path,
@@ -433,7 +433,7 @@ mod post {
                                                 crate::server::filesystem::file::ServerFile::new(
                                                     server.clone(),
                                                     destination_path,
-                                                    header.mode().map(PortablePermissions::from_mode).ok(),
+                                                    header.mode().map(PortablePermissions::from_mode_file).ok(),
                                                     header
                                                         .mtime()
                                                         .map(|t| std::time::UNIX_EPOCH + std::time::Duration::from_secs(t))

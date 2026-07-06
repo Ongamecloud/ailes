@@ -730,7 +730,7 @@ pub async fn handle_extended(
                     .filesystem
                     .async_set_symlink_permissions(
                         &handle.path,
-                        PortablePermissions::from_mode(permissions),
+                        PortablePermissions::from_mode_file(permissions),
                     )
                     .await
                     .map_err(|_| StatusCode::Failure)?;

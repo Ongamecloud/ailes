@@ -53,7 +53,7 @@ pub async fn create_zip<W: Write + Seek + Send + 'static>(
             let mut zip_options: zip::write::FileOptions<'_, ()> =
                 zip::write::FileOptions::default()
                     .compression_level(Some(options.compression_level.to_deflate_level() as i64))
-                    .unix_permissions(PortablePermissions::from(source_metadata.permissions()).mode)
+                    .unix_permissions(PortablePermissions::from(source_metadata.permissions()).mode() as u32)
                     .large_file(true);
 
             if let Ok(mtime) = source_metadata.modified() {
@@ -105,9 +105,7 @@ pub async fn create_zip<W: Write + Seek + Send + 'static>(
                             .compression_level(Some(
                                 options.compression_level.to_deflate_level() as i64
                             ))
-                            .unix_permissions(
-                                PortablePermissions::from(metadata.permissions()).mode,
-                            )
+                            .unix_permissions(PortablePermissions::from(metadata.permissions()).mode() as u32)
                             .large_file(true);
 
                     if let Ok(mtime) = metadata.modified() {
@@ -208,7 +206,7 @@ pub async fn create_zip_streaming<W: Write + Send + 'static>(
             let mut zip_options: zip::write::FileOptions<'_, ()> =
                 zip::write::FileOptions::default()
                     .compression_level(Some(options.compression_level.to_deflate_level() as i64))
-                    .unix_permissions(PortablePermissions::from(source_metadata.permissions()).mode)
+                    .unix_permissions(PortablePermissions::from(source_metadata.permissions()).mode() as u32)
                     .large_file(true);
 
             if let Ok(mtime) = source_metadata.modified() {
@@ -260,9 +258,7 @@ pub async fn create_zip_streaming<W: Write + Send + 'static>(
                             .compression_level(Some(
                                 options.compression_level.to_deflate_level() as i64
                             ))
-                            .unix_permissions(
-                                PortablePermissions::from(metadata.permissions()).mode,
-                            )
+                            .unix_permissions(PortablePermissions::from(metadata.permissions()).mode() as u32)
                             .large_file(true);
 
                     if let Ok(mtime) = metadata.modified() {

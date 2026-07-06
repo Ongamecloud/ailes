@@ -1543,10 +1543,10 @@ impl Filesystem {
                 .unwrap_or_default()
                 .to_string_lossy()
                 .into(),
-            mode: encode_mode(PortablePermissions::from(metadata.permissions()).mode),
+            mode: encode_mode(PortablePermissions::from(metadata.permissions()).mode() as u32),
             mode_bits: compact_str::format_compact!(
                 "{:o}",
-                PortablePermissions::from(metadata.permissions()).mode & 0o777
+                PortablePermissions::from(metadata.permissions()).mode() & 0o777
             ),
             size,
             size_physical,
@@ -1623,10 +1623,10 @@ impl Filesystem {
                 .unwrap_or_default()
                 .to_string_lossy()
                 .into(),
-            mode: encode_mode(PortablePermissions::from(metadata.permissions()).mode),
+            mode: encode_mode(PortablePermissions::from(metadata.permissions()).mode() as u32),
             mode_bits: compact_str::format_compact!(
                 "{:o}",
-                PortablePermissions::from(metadata.permissions()).mode & 0o777
+                PortablePermissions::from(metadata.permissions()).mode() & 0o777
             ),
             size,
             size_physical,

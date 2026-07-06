@@ -978,7 +978,7 @@ impl VirtualKopiaBackup {
     fn root_metadata(&self) -> FileMetadata {
         FileMetadata {
             file_type: FileType::Dir,
-            permissions: PortablePermissions::from_mode(0o755),
+            permissions: PortablePermissions::from_mode_dir(0o755),
             size: 0,
             modified: None,
             created: None,
@@ -988,7 +988,11 @@ impl VirtualKopiaBackup {
     fn metadata_from_entry(entry: &KopiaEntry) -> FileMetadata {
         FileMetadata {
             file_type: entry.file_type,
-            permissions: PortablePermissions::from_mode(entry.mode),
+            permissions: if entry.file_type.is_dir() {
+                PortablePermissions::from_mode_dir(entry.mode)
+            } else {
+                PortablePermissions::from_mode_file(entry.mode)
+            },
             size: if entry.file_type.is_dir() {
                 0
             } else {

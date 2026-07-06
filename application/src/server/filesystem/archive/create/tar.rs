@@ -59,7 +59,7 @@ pub async fn create_tar<W: Write + Send + 'static>(
 
             let mut header = tar::Header::new_gnu();
             header.set_size(0);
-            header.set_mode(PortablePermissions::from(source_metadata.permissions()).mode);
+            header.set_mode(PortablePermissions::from(source_metadata.permissions()).mode() as u32);
             header.set_mtime(
                 source_metadata
                     .modified()
@@ -105,7 +105,7 @@ pub async fn create_tar<W: Write + Send + 'static>(
 
                     let mut header = tar::Header::new_gnu();
                     header.set_size(0);
-                    header.set_mode(PortablePermissions::from(metadata.permissions()).mode);
+                    header.set_mode(PortablePermissions::from(metadata.permissions()).mode() as u32);
                     header.set_mtime(
                         metadata
                             .modified()
@@ -211,7 +211,7 @@ pub async fn create_tar_distributed<W: Write + Send + 'static>(
 
             let mut header = tar::Header::new_gnu();
             header.set_size(0);
-            header.set_mode(PortablePermissions::from(source_metadata.permissions()).mode);
+            header.set_mode(PortablePermissions::from(source_metadata.permissions()).mode() as u32);
             header.set_mtime(
                 source_metadata
                     .modified()

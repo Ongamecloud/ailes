@@ -225,7 +225,7 @@ mod post {
                                                             .create_dir_all(&destination_path)?;
                                                         filesystem.set_permissions(
                                                             &destination_path,
-                                                            PortablePermissions::from_mode(
+                                                            PortablePermissions::from_mode_dir(
                                                                 dir.metadata().mode,
                                                             ),
                                                         )?;
@@ -315,7 +315,7 @@ mod post {
                                                     tar::EntryType::Directory => {
                                                         filesystem.create_dir_all(&destination_path)?;
                                                         if let Ok(permissions) =
-                                                            header.mode().map(PortablePermissions::from_mode)
+                                                            header.mode().map(PortablePermissions::from_mode_dir)
                                                         {
                                                             filesystem.set_permissions(
                                                                 &destination_path,

@@ -88,14 +88,14 @@ impl SftpSession {
                     .unwrap_or_default()
                     .as_secs() as u32,
             ),
-            permissions: Some(PortablePermissions::from(metadata.permissions()).mode),
+            permissions: Some(PortablePermissions::from(metadata.permissions()).mode() as u32),
             ..Default::default()
         };
 
         #[cfg(unix)]
         {
             match rustix::fs::FileType::from_raw_mode(
-                PortablePermissions::from(metadata.permissions()).mode,
+                PortablePermissions::from(metadata.permissions()).mode() as _,
             ) {
                 rustix::fs::FileType::RegularFile => attrs.set_regular(true),
                 rustix::fs::FileType::Directory => attrs.set_dir(true),
@@ -108,7 +108,7 @@ impl SftpSession {
 
             if let Some(target_metadata) = target_metadata {
                 match rustix::fs::FileType::from_raw_mode(
-                    PortablePermissions::from(target_metadata.permissions()).mode,
+                    PortablePermissions::from(target_metadata.permissions()).mode() as _,
                 ) {
                     rustix::fs::FileType::RegularFile => attrs.set_regular(true),
                     rustix::fs::FileType::Directory => attrs.set_dir(true),
@@ -620,7 +620,7 @@ impl russh_sftp::server::Handler for SftpSession {
             && self
                 .server
                 .filesystem
-                .async_set_permissions(&path, PortablePermissions::from_mode(permissions))
+                .async_set_permissions(&path, PortablePermissions::from_mode_dir(permissions))
                 .await
                 .is_err()
         {
@@ -820,9 +820,14 @@ impl russh_sftp::server::Handler for SftpSession {
         }
 
         if let Some(permissions) = attrs.permissions {
+            let permissions = if metadata.is_dir() {
+                PortablePermissions::from_mode_dir(permissions)
+            } else {
+                PortablePermissions::from_mode_file(permissions)
+            };
             self.server
                 .filesystem
-                .async_set_permissions(&path, PortablePermissions::from_mode(permissions))
+                .async_set_permissions(&path, permissions)
                 .await
                 .map_err(|_| StatusCode::Failure)?;
         }

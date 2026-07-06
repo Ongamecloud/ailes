@@ -802,7 +802,7 @@ impl BackupExt for S3Backup {
                             .filesystem
                             .set_permissions(
                                 path.as_ref(),
-                                PortablePermissions::from_mode(header.mode().unwrap_or(0o755)),
+                                PortablePermissions::from_mode_dir(header.mode().unwrap_or(0o755)),
                             )?;
 
                         if let Ok(modified_time) = header.mtime() && directory_entries.len() < Archive::MAX_DIRECTORY_MTIME_ENTRIES {
@@ -822,7 +822,7 @@ impl BackupExt for S3Backup {
                         let mut writer = crate::server::filesystem::file::ServerFile::new(
                             server.clone(),
                             &path,
-                            Some(PortablePermissions::from_mode(header.mode().unwrap_or(0o644))),
+                            Some(PortablePermissions::from_mode_file(header.mode().unwrap_or(0o644))),
                             header
                                 .mtime()
                                 .map(|t| std::time::UNIX_EPOCH + std::time::Duration::from_secs(t))

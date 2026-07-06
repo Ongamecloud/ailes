@@ -545,7 +545,7 @@ impl VirtualReadableFilesystem for VirtualDdupBakArchive {
         if path.as_ref() == Path::new("") || path.as_ref() == Path::new("/") {
             return Ok(FileMetadata {
                 file_type: FileType::Dir,
-                permissions: PortablePermissions::from_mode(0o755),
+                permissions: PortablePermissions::from_mode_dir(0o755),
                 size: 0,
                 modified: None,
                 created: None,
@@ -564,7 +564,12 @@ impl VirtualReadableFilesystem for VirtualDdupBakArchive {
 
         Ok(FileMetadata {
             file_type: Self::ddup_bak_entry_to_file_type(entry),
-            permissions: PortablePermissions::from_mode(entry.mode().bits()),
+            permissions: match entry {
+                ddup_bak::archive::entries::Entry::Directory(_) => {
+                    PortablePermissions::from_mode_dir(entry.mode().bits())
+                }
+                _ => PortablePermissions::from_mode_file(entry.mode().bits()),
+            },
             size: match &entry {
                 ddup_bak::archive::entries::Entry::File(f) => f.size_real,
                 _ => 0,

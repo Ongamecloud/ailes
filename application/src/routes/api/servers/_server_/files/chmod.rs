@@ -85,7 +85,7 @@ mod post {
             };
 
             if filesystem
-                .async_set_permissions(&source, PortablePermissions::from_mode(mode))
+                .async_set_permissions(&source, PortablePermissions::from_mode_file(mode))
                 .await
                 .is_ok()
             {
@@ -105,7 +105,7 @@ mod post {
                                 DirectoryWalkFn::from({
                                     let filesystem = filesystem.clone();
                                     let updated_count_arc = updated_count_arc.clone();
-                                    let mode = PortablePermissions::from_mode(mode);
+                                    let mode = PortablePermissions::from_mode_file(mode);
 
                                     move |file_type: FileType, path: PathBuf| {
                                         let filesystem = filesystem.clone();

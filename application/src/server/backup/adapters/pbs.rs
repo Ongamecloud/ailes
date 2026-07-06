@@ -664,7 +664,7 @@ impl BackupExt for PbsBackup {
                             .filesystem
                             .async_set_permissions(
                                 path.as_path(),
-                                PortablePermissions::from_mode(mode),
+                                PortablePermissions::from_mode_dir(mode),
                             )
                             .await?;
 
@@ -691,7 +691,7 @@ impl BackupExt for PbsBackup {
                         let mut writer = AsyncServerFile::new(
                             server.clone(),
                             &path,
-                            Some(PortablePermissions::from_mode(mode)),
+                            Some(PortablePermissions::from_mode_file(mode)),
                             Some(mtime),
                         )
                         .await?;
@@ -1085,7 +1085,7 @@ impl VirtualReadableFilesystem for PbsVirtualFilesystem {
         if path == Path::new("") || path == Path::new("/") {
             return Ok(FileMetadata {
                 file_type: FileType::Dir,
-                permissions: PortablePermissions::from_mode(0o755),
+                permissions: PortablePermissions::from_mode_dir(0o755),
                 size: 0,
                 modified: None,
                 created: None,
@@ -1096,7 +1096,7 @@ impl VirtualReadableFilesystem for PbsVirtualFilesystem {
             let mode = if node.mode != 0 { node.mode } else { 0o755 };
             return Ok(FileMetadata {
                 file_type: FileType::Dir,
-                permissions: PortablePermissions::from_mode(mode),
+                permissions: PortablePermissions::from_mode_dir(mode),
                 size: 0,
                 modified: node
                     .has_explicit_entry
@@ -1108,7 +1108,7 @@ impl VirtualReadableFilesystem for PbsVirtualFilesystem {
         if let Some(meta) = self.tree.lookup_file(path) {
             return Ok(FileMetadata {
                 file_type: meta.file_type,
-                permissions: PortablePermissions::from_mode(meta.mode),
+                permissions: PortablePermissions::from_mode_file(meta.mode),
                 size: meta.size,
                 modified: Some(mtime_to_system_time(meta.mtime)),
                 created: None,

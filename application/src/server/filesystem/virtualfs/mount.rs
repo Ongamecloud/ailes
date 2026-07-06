@@ -58,7 +58,7 @@ impl VirtualMountFilesystem {
     fn virtual_dir_metadata() -> FileMetadata {
         FileMetadata {
             file_type: FileType::Dir,
-            permissions: PortablePermissions::from_mode(0o40755),
+            permissions: PortablePermissions::from_mode_dir(0o40755),
             size: 0,
             modified: None,
             created: None,

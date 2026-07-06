@@ -645,7 +645,7 @@ impl CapFilesystem {
                 rustix::fs::chmodat(
                     inner.as_fd(),
                     path,
-                    rustix::fs::Mode::from_raw_mode(permissions.mode),
+                    rustix::fs::Mode::from_raw_mode(permissions.mode() as _),
                     rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
                 )
             })

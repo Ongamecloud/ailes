@@ -1285,7 +1285,7 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
         if path_ref == Path::new("") || path_ref == Path::new("/") {
             return Ok(FileMetadata {
                 file_type: FileType::Dir,
-                permissions: PortablePermissions::from_mode(0o755),
+                permissions: PortablePermissions::from_mode_dir(0o755),
                 size: 0,
                 modified: None,
                 created: None,
@@ -1301,7 +1301,7 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
             };
             return Ok(FileMetadata {
                 file_type: FileType::Dir,
-                permissions: PortablePermissions::from_mode(mode),
+                permissions: PortablePermissions::from_mode_dir(mode),
                 size: 0,
                 modified,
                 created: None,
@@ -1311,7 +1311,7 @@ impl VirtualReadableFilesystem for VirtualResticBackup {
         if let Some(meta) = self.tree.lookup_file(path_ref) {
             return Ok(FileMetadata {
                 file_type: meta.file_type,
-                permissions: PortablePermissions::from_mode(meta.mode),
+                permissions: PortablePermissions::from_mode_file(meta.mode),
                 size: meta.size,
                 modified: Some(meta.mtime.into()),
                 created: None,

@@ -31,7 +31,7 @@ struct PxarMeta {
 
 fn pxar_meta(metadata: &cap_std::fs::Metadata) -> PxarMeta {
     PxarMeta {
-        mode: PortablePermissions::from(metadata.permissions()).mode,
+        mode: PortablePermissions::from(metadata.permissions()).mode() as u32,
         mtime: metadata
             .modified()
             .map(|t| {

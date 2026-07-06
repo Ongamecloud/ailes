@@ -445,7 +445,7 @@ impl BackupExt for WingsBackup {
                             tar::EntryType::Directory => {
                                 server.filesystem.create_chowned_dir_all(destination_path)?;
                                 if let Ok(permissions) =
-                                    header.mode().map(PortablePermissions::from_mode)
+                                    header.mode().map(PortablePermissions::from_mode_dir)
                                 {
                                     server
                                         .filesystem
@@ -470,7 +470,7 @@ impl BackupExt for WingsBackup {
                                 let mut writer = crate::server::filesystem::file::ServerFile::new(
                                     server.clone(),
                                     destination_path,
-                                    header.mode().map(PortablePermissions::from_mode).ok(),
+                                    header.mode().map(PortablePermissions::from_mode_file).ok(),
                                     header
                                         .mtime()
                                         .map(|t| {
@@ -592,7 +592,7 @@ impl BackupExt for WingsBackup {
                                         server.filesystem.create_chowned_dir_all(&path)?;
                                         server.filesystem.set_permissions(
                                             &path,
-                                            PortablePermissions::from_mode(
+                                            PortablePermissions::from_mode_dir(
                                                 entry.unix_mode().unwrap_or(0o755),
                                             ),
                                         )?;
@@ -606,7 +606,7 @@ impl BackupExt for WingsBackup {
                                         let mut writer = crate::server::filesystem::file::ServerFile::new(
                                             server.clone(),
                                             &path,
-                                            entry.unix_mode().map(PortablePermissions::from_mode),
+                                            entry.unix_mode().map(PortablePermissions::from_mode_file),
                                             crate::server::filesystem::archive::zip_entry_get_modified_time(&entry),
                                         )?;
                                         let mut reader = progress.counting_reader(entry);
