@@ -48,8 +48,8 @@ pub async fn run(ctx: DiskCheckerContext) {
     let mut force_scan = false;
 
     loop {
-        let permit = config
-            .disk_check_concurrency_semaphore
+        let semaphore = config.disk_check_concurrency_semaphore.load();
+        let permit = semaphore
             .acquire()
             .await
             .expect("failed to acquire disk check concurrency semaphore");

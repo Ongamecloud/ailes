@@ -1129,7 +1129,7 @@ pub struct Config {
 
     pub path: String,
     pub ignore_certificate_errors: bool,
-    pub disk_check_concurrency_semaphore: tokio::sync::Semaphore,
+    pub disk_check_concurrency_semaphore: ArcSwap<tokio::sync::Semaphore>,
     pub client: crate::remote::client::Client,
     pub jwt: crate::remote::jwt::JwtClient,
 }
@@ -1203,8 +1203,9 @@ impl Config {
             .try_init()
             .context("failed to install tracing subscriber")?;
 
-        let disk_check_concurrency_semaphore =
-            tokio::sync::Semaphore::new(inner.system.disk_check_concurrency);
+        let disk_check_concurrency_semaphore = ArcSwap::from_pointee(tokio::sync::Semaphore::new(
+            inner.system.disk_check_concurrency,
+        ));
         let client = crate::remote::client::Client::new(&inner, ignore_certificate_errors);
         let jwt = crate::remote::jwt::JwtClient::new(&inner);
 
@@ -1233,7 +1234,7 @@ impl Config {
             log_reload_handle: tracing_subscriber::reload::Layer::new(log_filter(false)).1,
             path: String::new(),
             ignore_certificate_errors: false,
-            disk_check_concurrency_semaphore: tokio::sync::Semaphore::new(1),
+            disk_check_concurrency_semaphore: ArcSwap::from_pointee(tokio::sync::Semaphore::new(1)),
             client,
             jwt,
         }
@@ -1250,6 +1251,8 @@ impl Config {
 
         let old_debug = self.load().debug;
         let new_debug = new.debug;
+        let old_concurrency = self.load().system.disk_check_concurrency;
+        let new_concurrency = new.system.disk_check_concurrency;
 
         self.inner.store(Arc::new(new));
 
@@ -1257,6 +1260,11 @@ impl Config {
             self.log_reload_handle
                 .modify(|filter| *filter = log_filter(new_debug))
                 .context("failed to reload tracing level filter")?;
+        }
+
+        if new_concurrency != old_concurrency {
+            self.disk_check_concurrency_semaphore
+                .store(Arc::new(tokio::sync::Semaphore::new(new_concurrency)));
         }
 
         Ok(())
@@ -1317,7 +1325,9 @@ impl Config {
         let trusted = headers
             .get("X-Real-Ip-Token")
             .and_then(|token| token.to_str().ok())
-            == Some(cfg.token.as_str())
+            .is_some_and(|token| {
+                constant_time_eq::constant_time_eq(token.as_bytes(), cfg.token.as_bytes())
+            })
             || cfg
                 .api
                 .trusted_proxies
