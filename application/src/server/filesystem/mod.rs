@@ -283,9 +283,8 @@ impl Filesystem {
     }
 
     #[inline]
-    pub fn is_full(&self) -> bool {
-        let limit = self.disk_limit();
-        limit != 0 && self.get_physical_cached_size() >= limit as u64
+    pub async fn is_full(&self) -> bool {
+        self.disk_limit() != 0 && self.limiter_usage().await >= self.disk_limit() as u64
     }
 
     #[inline]
