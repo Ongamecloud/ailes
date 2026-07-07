@@ -679,6 +679,9 @@ impl Filesystem {
             None => return Err(anyhow::anyhow!("failed to get new path file name")),
         });
 
+        self.async_rename(&old_path, &self.cap_filesystem, &new_path)
+            .await?;
+
         if is_dir {
             let mut disk_usage = self.disk_usage.write().await;
 
@@ -707,9 +710,6 @@ impl Filesystem {
                 self.async_allocate_in_path(&new_parent, size, true).await;
             }
         }
-
-        self.async_rename(old_path, &self.cap_filesystem, new_path)
-            .await?;
 
         Ok(())
     }
@@ -891,18 +891,6 @@ impl Filesystem {
             return true;
         }
 
-        if delta.logical > 0 {
-            self.disk_usage_cached_logical
-                .fetch_add(delta.logical as u64, Ordering::Relaxed);
-        } else if delta.logical < 0 {
-            let abs = delta.logical.unsigned_abs();
-            self.disk_usage_cached_logical
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                    Some(current.saturating_sub(abs))
-                })
-                .ok();
-        }
-
         if delta.physical > 0 {
             let delta_u64 = delta.physical as u64;
 
@@ -936,6 +924,18 @@ impl Filesystem {
         } else if delta.physical < 0 {
             let abs = delta.physical.unsigned_abs();
             self.disk_usage_cached_physical
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                    Some(current.saturating_sub(abs))
+                })
+                .ok();
+        }
+
+        if delta.logical > 0 {
+            self.disk_usage_cached_logical
+                .fetch_add(delta.logical as u64, Ordering::Relaxed);
+        } else if delta.logical < 0 {
+            let abs = delta.logical.unsigned_abs();
+            self.disk_usage_cached_logical
                 .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                     Some(current.saturating_sub(abs))
                 })

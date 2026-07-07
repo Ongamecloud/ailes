@@ -1059,12 +1059,10 @@ impl DockerOverhead {
             return 1.05;
         }
 
-        for (m, v) in self.multipliers.iter().rev() {
-            if memory > *m {
-                continue;
+        for (m, v) in self.multipliers.iter() {
+            if memory <= *m {
+                return *v;
             }
-
-            return *v;
         }
 
         self.default_multiplier

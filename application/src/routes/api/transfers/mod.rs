@@ -5,6 +5,8 @@ use utoipa_axum::{
     routes,
 };
 
+const MAX_CHECKSUM_LEN: usize = 1024;
+
 mod _server_;
 mod capabilities;
 mod files;
@@ -504,7 +506,12 @@ mod post {
                                         ));
                                     }
                                 };
-                                let checksum = runtime.block_on(field.text())?;
+                                let checksum = runtime.block_on(
+                                    crate::utils::read_limited_multipart_field(
+                                        &mut field,
+                                        super::MAX_CHECKSUM_LEN,
+                                    ),
+                                )?;
 
                                 if archive_checksum != checksum {
                                     return Err(anyhow::anyhow!(
@@ -582,8 +589,9 @@ mod post {
                 };
 
                 incoming_transfer
-                    .multiplex_handles
-                    .push((handle.abort_handle(), receiver));
+                    .multiplex_abort_handles
+                    .push(handle.abort_handle());
+                incoming_transfer.multiplex_receivers.push(receiver);
 
                 break;
             }
@@ -594,6 +602,8 @@ mod post {
                         server = %server.uuid,
                         "server transfer completed successfully"
                     );
+
+                    sender.send(Ok(())).ok();
                 }
                 Ok(Err(err)) => {
                     tracing::error!(
@@ -626,7 +636,8 @@ mod post {
             server.incoming_transfer.write().await.replace(
                 crate::server::transfer::IncomingServerTransfer {
                     main_handle: handle.abort_handle(),
-                    multiplex_handles: vec![],
+                    multiplex_abort_handles: vec![],
+                    multiplex_receivers: vec![],
                 },
             );
 
@@ -643,7 +654,7 @@ mod post {
                             {
                                 let guard = server.incoming_transfer.read().await;
                                 if guard.as_ref().is_some_and(|t| {
-                                    t.multiplex_handles.len() >= multiplex_stream_count
+                                    t.multiplex_receivers.len() >= multiplex_stream_count
                                 }) {
                                     break;
                                 }

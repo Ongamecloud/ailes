@@ -1206,11 +1206,15 @@ impl Server {
         let server = self.clone();
         tokio::spawn(async move {
             if server.state.get_state() != state::ServerState::Offline {
-                if server.state.get_state() != state::ServerState::Stopping {
-                    server.stop(aquire_timeout, true).await?;
-                }
-
                 server.restarting.store(true, Ordering::SeqCst);
+
+                if server.state.get_state() != state::ServerState::Stopping
+                    && let Err(err) = server.stop(aquire_timeout, true).await
+                {
+                    server.restarting.store(false, Ordering::SeqCst);
+
+                    return Err(err);
+                }
             } else {
                 server.start(aquire_timeout, true).await?;
             }
@@ -1243,11 +1247,15 @@ impl Server {
         let server = self.clone();
         tokio::spawn(async move {
             if server.state.get_state() != state::ServerState::Offline {
-                if server.state.get_state() != state::ServerState::Stopping {
-                    server.stop(None, true).await?;
-                }
-
                 server.restarting.store(true, Ordering::SeqCst);
+
+                if server.state.get_state() != state::ServerState::Stopping
+                    && let Err(err) = server.stop(None, true).await
+                {
+                    server.restarting.store(false, Ordering::SeqCst);
+
+                    return Err(err);
+                }
 
                 if !server
                     .state

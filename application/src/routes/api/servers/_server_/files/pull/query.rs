@@ -30,6 +30,12 @@ mod post {
         state: GetState,
         crate::Payload(data): crate::Payload<Payload>,
     ) -> ApiResponseResult {
+        if state.config.load().api.disable_remote_download {
+            return ApiResponse::error("remote pulling is disabled")
+                .with_status(StatusCode::EXPECTATION_FAILED)
+                .ok();
+        }
+
         let query_result = match PullQueryResponse::query(&state.config, &data.url).await {
             Ok(query_result) => query_result,
             Err(err) => {

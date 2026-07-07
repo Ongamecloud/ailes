@@ -107,8 +107,6 @@ impl russh::server::Handler for SshSession {
             return Ok(Auth::reject());
         }
 
-        self.limiter.increment_sessions(user)?;
-        self.user_uuid = Some(user);
         self.limiter
             .finish_attempt(&self.user_ip, AuthenticationType::Password)
             .await;
@@ -126,6 +124,9 @@ impl russh::server::Handler for SshSession {
         if server.locked_state().is_some() {
             return Ok(Auth::reject());
         }
+
+        self.limiter.increment_sessions(user)?;
+        self.user_uuid = Some(user);
 
         tracing::debug!(server = %server.uuid, %user, "user authenticated with password");
 
@@ -195,8 +196,6 @@ impl russh::server::Handler for SshSession {
             return Ok(Auth::reject());
         }
 
-        self.limiter.increment_sessions(user)?;
-        self.user_uuid = Some(user);
         self.limiter
             .finish_attempt(&self.user_ip, AuthenticationType::PublicKey)
             .await;
@@ -209,6 +208,9 @@ impl russh::server::Handler for SshSession {
         if server.locked_state().is_some() {
             return Ok(Auth::reject());
         }
+
+        self.limiter.increment_sessions(user)?;
+        self.user_uuid = Some(user);
 
         tracing::debug!(server = %server.uuid, %user, "user authenticated with public key");
 

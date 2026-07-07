@@ -60,17 +60,9 @@ impl Iterator for SocketAddrs {
             .with_iter_mut(|iter| iter.next())
             .map(|ip_addr| SocketAddr::new(ip_addr, 0))?;
 
-        for cidr in self
-            .borrow_config()
-            .load()
-            .api
-            .remote_download_blocked_cidrs
-            .iter()
-        {
-            if cidr.contains(&next.ip()) {
-                tracing::warn!("blocking internal IP address in pull: {}", next.ip());
-                return self.next();
-            }
+        if super::is_blocked_ip(&self.borrow_config().load(), &next.ip()) {
+            tracing::warn!("blocking internal IP address in pull: {}", next.ip());
+            return self.next();
         }
 
         Some(next)

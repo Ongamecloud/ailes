@@ -2,6 +2,10 @@ pub const HEADER_SIZE: u64 = 16;
 pub const GOODBYE_ITEM_SIZE: u64 = 24;
 pub const STAT_SIZE: u64 = 40;
 
+pub const MAX_FILENAME_LEN: u64 = 256;
+pub const MAX_SYMLINK_LEN: u64 = 4096;
+pub const MAX_DATA_LEN: u64 = 64 * 1024;
+
 pub const PXAR_FORMAT_VERSION: u64 = 0x730f6c75df16a40d;
 pub const PXAR_ENTRY: u64 = 0xd5956474e588acef;
 pub const PXAR_FILENAME: u64 = 0x16701121063917b3;

@@ -900,10 +900,8 @@ impl Drop for OutgoingServerTransfer {
 pub struct IncomingServerTransfer {
     pub main_handle: AbortHandle,
 
-    pub multiplex_handles: Vec<(
-        AbortHandle,
-        tokio::sync::oneshot::Receiver<Result<(), anyhow::Error>>,
-    )>,
+    pub multiplex_abort_handles: Vec<AbortHandle>,
+    pub multiplex_receivers: Vec<tokio::sync::oneshot::Receiver<Result<(), anyhow::Error>>>,
 }
 
 impl IncomingServerTransfer {
@@ -911,11 +909,19 @@ impl IncomingServerTransfer {
         &mut self,
         main: JoinHandle<Result<super::backup::transfer::ReceivedBackups, anyhow::Error>>,
     ) -> Result<super::backup::transfer::ReceivedBackups, anyhow::Error> {
-        let (backups, _) = tokio::try_join!(async { main.await? }, async {
-            Ok(futures::future::try_join_all(
-                self.multiplex_handles.drain(..).map(|h| h.1),
+        let (backups, _) = tokio::try_join!(
+            async { main.await? },
+            futures::future::try_join_all(self.multiplex_receivers.drain(..).map(
+                |receiver| async {
+                    match receiver.await {
+                        Ok(result) => result,
+                        Err(_) => Err(anyhow::anyhow!(
+                            "multiplex stream closed without completing"
+                        )),
+                    }
+                },
             ))
-        })?;
+        )?;
 
         Ok(backups)
     }
@@ -925,8 +931,8 @@ impl Drop for IncomingServerTransfer {
     fn drop(&mut self) {
         self.main_handle.abort();
 
-        for handle in self.multiplex_handles.iter() {
-            handle.0.abort();
+        for handle in self.multiplex_abort_handles.iter() {
+            handle.abort();
         }
     }
 }

@@ -106,7 +106,7 @@ impl ServerManager {
                                 ServerState::Running | ServerState::Starting
                             )
                         {
-                            let _ = match semaphore.acquire().await {
+                            let _permit = match semaphore.acquire().await {
                                 Ok(p) => p,
                                 Err(_) => return,
                             };

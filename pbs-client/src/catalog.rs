@@ -231,6 +231,7 @@ impl<W: Write> CatalogWriter<W> {
 }
 
 const MAX_CATALOG_DEPTH: usize = 1024;
+const MAX_CATALOG_ENTRIES: usize = 100_000_000;
 
 fn decode_error(msg: &'static str) -> PbsError {
     PbsError::Decode(msg.into())
@@ -370,12 +371,19 @@ fn push_walk(
     base: &Path,
     out: &mut Vec<ArchiveEntry>,
     depth: usize,
+    visited: &mut std::collections::HashSet<usize>,
 ) -> Result<(), PbsError> {
     if depth > MAX_CATALOG_DEPTH {
         return Err(decode_error("catalog: directory nesting too deep"));
     }
+    if !visited.insert(block_pos) {
+        return Err(decode_error("catalog: block revisited (shared child)"));
+    }
 
     for entry in read_table(data, block_pos)? {
+        if out.len() >= MAX_CATALOG_ENTRIES {
+            return Err(decode_error("catalog: emitted entry count exceeds limit"));
+        }
         let path = base.join(os_str_from_bytes(&entry.name));
         match entry.kind {
             RawKind::Directory { child } => {
@@ -387,7 +395,7 @@ fn push_walk(
                     mtime: 0,
                     symlink: None,
                 });
-                push_walk(data, child, &path, out, depth + 1)?;
+                push_walk(data, child, &path, out, depth + 1, visited)?;
             }
             RawKind::File { size, mtime } => out.push(ArchiveEntry {
                 path,
@@ -440,18 +448,27 @@ pub fn parse_catalog(data: &[u8]) -> Result<Vec<ArchiveEntry>, PbsError> {
     .map_err(|_| decode_error("catalog: root offset overflow"))?;
 
     let mut out = Vec::new();
+    let mut visited = std::collections::HashSet::new();
+    visited.insert(root_offset);
     for entry in read_table(data, root_offset)? {
         let path = PathBuf::from(os_str_from_bytes(&entry.name));
         match entry.kind {
-            RawKind::Directory { child } => push_walk(data, child, Path::new(""), &mut out, 0)?,
-            RawKind::File { size, mtime } => out.push(ArchiveEntry {
-                path,
-                kind: ArchiveEntryKind::File,
-                size,
-                mode: 0o644,
-                mtime,
-                symlink: None,
-            }),
+            RawKind::Directory { child } => {
+                push_walk(data, child, Path::new(""), &mut out, 0, &mut visited)?
+            }
+            RawKind::File { size, mtime } => {
+                if out.len() >= MAX_CATALOG_ENTRIES {
+                    return Err(decode_error("catalog: emitted entry count exceeds limit"));
+                }
+                out.push(ArchiveEntry {
+                    path,
+                    kind: ArchiveEntryKind::File,
+                    size,
+                    mode: 0o644,
+                    mtime,
+                    symlink: None,
+                })
+            }
             _ => {}
         }
     }

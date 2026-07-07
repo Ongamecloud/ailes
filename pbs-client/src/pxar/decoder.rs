@@ -112,7 +112,14 @@ impl<R: Read> Decoder<R> {
     }
 
     fn read_named_entry(&mut self, filename_header: Header) -> std::io::Result<Entry> {
-        let mut name = self.read_data(filename_header.content_size()?)?;
+        let filename_size = filename_header.content_size()?;
+        if filename_size > super::format::MAX_FILENAME_LEN {
+            return Err(std::io::Error::other(
+                "pxar: filename exceeds maximum length",
+            ));
+        }
+
+        let mut name = self.read_data(filename_size)?;
         if name.pop() != Some(0) {
             return Err(std::io::Error::other(
                 "pxar: file name missing terminating zero",
@@ -138,7 +145,14 @@ impl<R: Read> Decoder<R> {
                 EntryKind::File { size, offset: None }
             }
             super::format::PXAR_SYMLINK => {
-                let data = self.read_data(next.content_size()?)?;
+                let symlink_size = next.content_size()?;
+                if symlink_size > super::format::MAX_SYMLINK_LEN {
+                    return Err(std::io::Error::other(
+                        "pxar: symlink exceeds maximum length",
+                    ));
+                }
+
+                let data = self.read_data(symlink_size)?;
                 self.state = State::InDirectory;
                 EntryKind::Symlink(Symlink { data })
             }
@@ -214,6 +228,12 @@ impl<R: Read> Decoder<R> {
     }
 
     fn read_data(&mut self, size: u64) -> std::io::Result<Vec<u8>> {
+        if size > super::format::MAX_DATA_LEN {
+            return Err(std::io::Error::other(
+                "pxar: data section exceeds maximum length",
+            ));
+        }
+
         let size = usize::try_from(size).map_err(std::io::Error::other)?;
         let mut buf = vec![0; size];
         self.input.read_exact(&mut buf)?;
@@ -353,7 +373,14 @@ impl<R: AsyncRead + Unpin> AsyncDecoder<R> {
     }
 
     async fn read_named_entry(&mut self, filename_header: Header) -> std::io::Result<Entry> {
-        let mut name = self.read_data(filename_header.content_size()?).await?;
+        let filename_size = filename_header.content_size()?;
+        if filename_size > super::format::MAX_FILENAME_LEN {
+            return Err(std::io::Error::other(
+                "pxar: filename exceeds maximum length",
+            ));
+        }
+
+        let mut name = self.read_data(filename_size).await?;
         if name.pop() != Some(0) {
             return Err(std::io::Error::other(
                 "pxar: file name missing terminating zero",
@@ -379,7 +406,14 @@ impl<R: AsyncRead + Unpin> AsyncDecoder<R> {
                 EntryKind::File { size, offset: None }
             }
             super::format::PXAR_SYMLINK => {
-                let data = self.read_data(next.content_size()?).await?;
+                let symlink_size = next.content_size()?;
+                if symlink_size > super::format::MAX_SYMLINK_LEN {
+                    return Err(std::io::Error::other(
+                        "pxar: symlink exceeds maximum length",
+                    ));
+                }
+
+                let data = self.read_data(symlink_size).await?;
                 self.state = State::InDirectory;
                 EntryKind::Symlink(Symlink { data })
             }
@@ -455,6 +489,12 @@ impl<R: AsyncRead + Unpin> AsyncDecoder<R> {
     }
 
     async fn read_data(&mut self, size: u64) -> std::io::Result<Vec<u8>> {
+        if size > super::format::MAX_DATA_LEN {
+            return Err(std::io::Error::other(
+                "pxar: data section exceeds maximum length",
+            ));
+        }
+
         let size = usize::try_from(size).map_err(std::io::Error::other)?;
         let mut buf = vec![0; size];
         self.input.read_exact(&mut buf).await?;

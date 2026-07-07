@@ -149,13 +149,21 @@ mod post {
             },
         ));
 
+        let mut pulls = server.filesystem.pulls.write().await;
+        {
+            let operations = server.filesystem.operations.operations().await;
+            pulls.retain(|key, _| operations.contains_key(key));
+        }
+
+        if pulls.len() >= state.config.load().api.server_remote_download_limit {
+            return ApiResponse::error("too many concurrent pulls")
+                .with_status(StatusCode::EXPECTATION_FAILED)
+                .ok();
+        }
+
         let (identifier, task) = download.write().await.start().await?;
-        server
-            .filesystem
-            .pulls
-            .write()
-            .await
-            .insert(identifier, Arc::clone(&download));
+        pulls.insert(identifier, Arc::clone(&download));
+        drop(pulls);
 
         if data.foreground {
             match task.await {

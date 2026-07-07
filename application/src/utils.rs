@@ -156,6 +156,20 @@ pub fn is_valid_utf8_slice(s: &[u8]) -> bool {
     }
 }
 
+pub async fn read_limited_multipart_field(
+    field: &mut axum::extract::multipart::Field<'_>,
+    max_len: usize,
+) -> Result<String, anyhow::Error> {
+    let mut buf = String::new();
+    while let Some(chunk) = field.chunk().await? {
+        if buf.len().saturating_add(chunk.len()) > max_len {
+            anyhow::bail!("multipart field exceeds maximum length of {max_len} bytes");
+        }
+        buf.push_str(&String::from_utf8_lossy(&chunk));
+    }
+    Ok(buf)
+}
+
 pub fn strip_paths(value: &mut serde_json::Value, paths: &[&str]) {
     for path in paths {
         let mut cursor = &mut *value;

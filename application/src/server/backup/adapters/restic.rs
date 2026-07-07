@@ -47,6 +47,8 @@ type ResticBackupCache =
 static RESTIC_BACKUP_CACHE: LazyLock<ResticBackupCache> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 
+const RESTIC_STDERR_CAPTURE_LIMIT: usize = 8 * 1024;
+
 #[derive(Debug, Deserialize)]
 struct ResticSnapshot {
     short_id: String,
@@ -1030,7 +1032,7 @@ impl BackupExt for ResticBackup {
     ) -> Result<(), anyhow::Error> {
         total.store(self.total_bytes_processed, Ordering::Relaxed);
 
-        let child = Command::new("restic")
+        let mut child = Command::new("restic")
             .envs(&self.configuration.environment)
             .arg("--json")
             .arg("--no-lock")
@@ -1057,9 +1059,36 @@ impl BackupExt for ResticBackup {
             )
             .arg("-vv")
             .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
             .spawn()?;
 
-        let mut line_reader = tokio::io::BufReader::new(child.into_stdout()?).lines();
+        let stdout = child.take_stdout()?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| std::io::Error::other("No stderr available"))?;
+        let mut line_reader = tokio::io::BufReader::new(stdout).lines();
+
+        let stderr_task = tokio::spawn({
+            async move {
+                let mut reader = tokio::io::BufReader::new(stderr);
+                let mut output = String::new();
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    match reader.read_line(&mut line).await {
+                        Ok(0) => break,
+                        Ok(_) => {
+                            if output.len() < RESTIC_STDERR_CAPTURE_LIMIT {
+                                output.push_str(&line);
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                output
+            }
+        });
 
         while let Ok(Some(line)) = line_reader.next_line().await {
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line)
@@ -1079,6 +1108,18 @@ impl BackupExt for ResticBackup {
 
                 server.log_daemon(compact_str::format_compact!("(restoring): {}", item));
             }
+        }
+
+        let status = child.wait().await?;
+        let stderr_output = stderr_task.await.unwrap_or_default();
+
+        if !status.success() {
+            let mut message = compact_str::CompactString::from("failed to restore restic backup");
+            if !stderr_output.is_empty() {
+                message.push_str(":\n");
+                message.push_str(stderr_output.trim_end());
+            }
+            return Err(anyhow::anyhow!("{}", message));
         }
 
         server.filesystem.rerun_disk_checker();

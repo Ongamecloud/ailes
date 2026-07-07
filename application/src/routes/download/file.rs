@@ -159,7 +159,7 @@ mod get {
         }
 
         let reader =
-            AsyncFixedReader::new_with_fixed_bytes(file_read.reader, metadata.size as usize);
+            AsyncFixedReader::new_with_fixed_bytes(file_read.reader, file_read.size as usize);
 
         if file_read.reader_range.is_some() {
             ApiResponse::new_stream(reader)

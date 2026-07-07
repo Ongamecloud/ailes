@@ -175,14 +175,17 @@ impl DdupBakBackup {
             {
                 let mtime: chrono::DateTime<chrono::Utc> = chrono::DateTime::from(entry.mtime());
 
-                options = options.last_modified_time(zip::DateTime::from_date_and_time(
-                    mtime.year() as u16,
-                    mtime.month() as u8,
-                    mtime.day() as u8,
-                    mtime.hour() as u8,
-                    mtime.minute() as u8,
-                    mtime.second() as u8,
-                )?);
+                options = options.last_modified_time(
+                    zip::DateTime::from_date_and_time(
+                        mtime.year() as u16,
+                        mtime.month() as u8,
+                        mtime.day() as u8,
+                        mtime.hour() as u8,
+                        mtime.minute() as u8,
+                        mtime.second() as u8,
+                    )
+                    .unwrap_or_default(),
+                );
             }
 
             let path = parent_path.join(entry.name());

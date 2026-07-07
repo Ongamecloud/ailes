@@ -399,7 +399,17 @@ impl DockerExecutor {
             return Ok(());
         }
 
-        let (image_name, tag) = image.split_once(':').unwrap_or((image, "latest"));
+        let (image_name, tag) = match image.rsplit_once(':') {
+            Some((name, tag)) if !tag.is_empty() => {
+                let colon_is_tag_sep = image.rfind('/').is_none_or(|slash| slash < name.len());
+                if colon_is_tag_sep {
+                    (name, tag)
+                } else {
+                    (image, "latest")
+                }
+            }
+            _ => (image, "latest"),
+        };
 
         let pull_cache = {
             type InnerMap = HashMap<
@@ -1145,29 +1155,26 @@ type StatusReceiver = tokio::sync::mpsc::Receiver<super::ProcessStatus>;
 async fn find_running_container(
     docker: &bollard::Docker,
     name_filter: &str,
-    exclude_name: Option<&str>,
+    container_type: Option<&str>,
 ) -> Option<String> {
+    let mut filters = HashMap::from([("name".to_string(), vec![name_filter.to_string()])]);
+    if let Some(container_type) = container_type {
+        filters.insert(
+            "label".to_string(),
+            vec![format!("ContainerType={container_type}")],
+        );
+    }
+
     let containers = docker
         .list_containers(Some(bollard::query_parameters::ListContainersOptions {
             all: true,
-            filters: Some(HashMap::from([(
-                "name".to_string(),
-                vec![name_filter.to_string()],
-            )])),
+            filters: Some(filters),
             ..Default::default()
         }))
         .await
         .unwrap_or_default();
 
     for c in containers {
-        if let Some(ref excl) = exclude_name
-            && c.names
-                .as_ref()
-                .is_some_and(|names| names.iter().any(|n| n.contains(excl)))
-        {
-            continue;
-        }
-
         if c.state != Some(bollard::plugin::ContainerSummaryStateEnum::RUNNING) {
             continue;
         }
@@ -1254,10 +1261,13 @@ impl super::ServerExecutor for DockerExecutor {
         &self,
         server: &super::super::Server,
     ) -> Result<(Arc<dyn super::ProcessHandle>, StatusReceiver), anyhow::Error> {
-        let container_id =
-            find_running_container(&self.docker, &server.uuid.to_string(), Some("installer"))
-                .await
-                .ok_or_else(|| anyhow::anyhow!("no running server container found"))?;
+        let container_id = find_running_container(
+            &self.docker,
+            &server.uuid.to_string(),
+            Some("server_process"),
+        )
+        .await
+        .ok_or_else(|| anyhow::anyhow!("no running server container found"))?;
 
         let (status_tx, status_rx) = tokio::sync::mpsc::channel(1);
         let handle = Arc::new(
@@ -1458,10 +1468,13 @@ impl super::ServerExecutor for DockerExecutor {
         &self,
         server: &super::super::Server,
     ) -> Result<(Arc<dyn super::ProcessHandle>, StatusReceiver), anyhow::Error> {
-        let container_id =
-            find_running_container(&self.docker, &format!("{}_installer", server.uuid), None)
-                .await
-                .ok_or_else(|| anyhow::anyhow!("no running installer container found"))?;
+        let container_id = find_running_container(
+            &self.docker,
+            &format!("{}_installer", server.uuid),
+            Some("server_installer"),
+        )
+        .await
+        .ok_or_else(|| anyhow::anyhow!("no running installer container found"))?;
 
         let (status_tx, status_rx) = tokio::sync::mpsc::channel(1);
         let handle = Arc::new(
@@ -1667,13 +1680,16 @@ impl super::ServerExecutor for DockerExecutor {
         &self,
         server: &super::super::Server,
     ) -> Result<Option<std::net::IpAddr>, anyhow::Error> {
-        let container_id =
-            match find_running_container(&self.docker, &server.uuid.to_string(), Some("installer"))
-                .await
-            {
-                Some(id) => id,
-                None => return Ok(None),
-            };
+        let container_id = match find_running_container(
+            &self.docker,
+            &server.uuid.to_string(),
+            Some("server_process"),
+        )
+        .await
+        {
+            Some(id) => id,
+            None => return Ok(None),
+        };
 
         let inspect = self.docker.inspect_container(&container_id, None).await?;
 

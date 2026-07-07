@@ -6,6 +6,7 @@ use std::{
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
 
 const MAX_LINE_LENGTH: usize = 10 * 1024; // 10 KiB
+pub const LINES_CAP: usize = 10_000;
 
 /// Seeks backward through an asynchronous reader to find the starting
 /// point of the last `lines` lines. Leaves the cursor at that position.
@@ -56,10 +57,9 @@ pub async fn async_tail<R: AsyncRead + AsyncSeek + Unpin>(
     Ok(reader)
 }
 
-async fn read_line_capped<R>(reader: &mut R) -> std::io::Result<Option<Vec<u8>>>
-where
-    R: AsyncBufRead + Unpin,
-{
+async fn read_line_capped<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+) -> std::io::Result<Option<Vec<u8>>> {
     let mut line = Vec::new();
     let mut truncated = false;
     let mut hit_newline = false;
@@ -104,16 +104,16 @@ where
 
 /// Consumes an entire AsyncRead stream, keeping only the last `lines` lines in memory.
 /// Returns a Cursor over the collected bytes, which implements AsyncRead + Send + Unpin.
-pub async fn async_tail_stream<R>(reader: R, lines: usize) -> std::io::Result<Cursor<Vec<u8>>>
-where
-    R: AsyncRead + Unpin,
-{
+pub async fn async_tail_stream<R: AsyncRead + Unpin>(
+    reader: R,
+    lines: usize,
+) -> std::io::Result<Cursor<Vec<u8>>> {
     if lines == 0 {
         return Ok(Cursor::new(Vec::new()));
     }
 
     let mut buf_reader = tokio::io::BufReader::new(reader);
-    let mut buffer = VecDeque::with_capacity(lines);
+    let mut buffer = VecDeque::with_capacity(lines.min(LINES_CAP));
 
     while let Some(line) = read_line_capped(&mut buf_reader).await? {
         if buffer.len() == lines {

@@ -62,7 +62,7 @@ mod post {
                 .filesystem
                 .resolve_writable_fs(&server, Path::new(&data.root).join(&file.file))
                 .await;
-            if source == Path::new(&data.root) {
+            if source.as_os_str().is_empty() || source == Path::new(&data.root) {
                 continue;
             }
 

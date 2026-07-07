@@ -534,6 +534,9 @@ impl Archive {
 
                                 if let Ok(modified_time) = header.mtime()
                                     && directory_entries.len() < Self::MAX_DIRECTORY_MTIME_ENTRIES
+                                    && std::time::UNIX_EPOCH
+                                        .checked_add(std::time::Duration::from_secs(modified_time))
+                                        .is_some()
                                 {
                                     directory_entries.push((destination_path, modified_time));
                                 }
@@ -550,13 +553,10 @@ impl Archive {
                                     self.server.clone(),
                                     &destination_path,
                                     header.mode().map(PortablePermissions::from_mode_file).ok(),
-                                    header
-                                        .mtime()
-                                        .map(|t| {
-                                            std::time::UNIX_EPOCH
-                                                + std::time::Duration::from_secs(t)
-                                        })
-                                        .ok(),
+                                    header.mtime().ok().and_then(|t| {
+                                        std::time::UNIX_EPOCH
+                                            .checked_add(std::time::Duration::from_secs(t))
+                                    }),
                                 )?;
 
                                 crate::io::copy_shared(&mut read_buffer, &mut entry, &mut writer)?;
@@ -578,7 +578,10 @@ impl Archive {
                                     self.server.filesystem.set_times(
                                         &destination_path,
                                         std::time::UNIX_EPOCH
-                                            + std::time::Duration::from_secs(modified_time),
+                                            .checked_add(std::time::Duration::from_secs(
+                                                modified_time,
+                                            ))
+                                            .unwrap_or_else(std::time::SystemTime::now),
                                         None,
                                     )?;
                                 }
@@ -590,7 +593,9 @@ impl Archive {
                     for (destination_path, modified_time) in directory_entries {
                         self.server.filesystem.set_times(
                             &destination_path,
-                            std::time::UNIX_EPOCH + std::time::Duration::from_secs(modified_time),
+                            std::time::UNIX_EPOCH
+                                .checked_add(std::time::Duration::from_secs(modified_time))
+                                .unwrap_or_else(std::time::SystemTime::now),
                             None,
                         )?;
                     }
@@ -937,7 +942,9 @@ impl Archive {
                     for (destination_path, modified_time) in directory_entries {
                         self.server.filesystem.set_times(
                             &destination_path,
-                            std::time::UNIX_EPOCH + std::time::Duration::from_secs(modified_time),
+                            std::time::UNIX_EPOCH
+                                .checked_add(std::time::Duration::from_secs(modified_time))
+                                .unwrap_or_else(std::time::SystemTime::now),
                             None,
                         )?;
                     }

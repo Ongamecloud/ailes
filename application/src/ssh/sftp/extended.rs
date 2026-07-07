@@ -331,6 +331,10 @@ pub async fn handle_extended(
             }
         }
         "copy-file" => {
+            if sftp_session.state.config.load().system.sftp.read_only {
+                return Err(StatusCode::PermissionDenied);
+            }
+
             if !sftp_session.has_permission(Permission::FileReadContent)
                 || !sftp_session.has_permission(Permission::FileCreate)
             {
@@ -378,6 +382,10 @@ pub async fn handle_extended(
             }
 
             let destination_path = Path::new(&request.destination);
+
+            if sftp_session.is_ignored(destination_path, false) {
+                return Err(StatusCode::NoSuchFile);
+            }
 
             if let Ok(metadata) = sftp_session
                 .server

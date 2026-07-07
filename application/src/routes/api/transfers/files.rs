@@ -167,7 +167,7 @@ mod post {
                         tokio::task::spawn_blocking(move || {
                             let mut archive_checksum = None;
 
-                            while let Some(field) = runtime.block_on(multipart.next_field())? {
+                            while let Some(mut field) = runtime.block_on(multipart.next_field())? {
                                 match field.name() {
                                     Some("archive") => {
                                         let file_name = field.file_name().unwrap_or("archive.tar.gz").to_string();
@@ -383,7 +383,12 @@ mod post {
                                             }
                                         };
 
-                                        let checksum = runtime.block_on(field.text())?;
+                                        let checksum = runtime.block_on(
+                                            crate::utils::read_limited_multipart_field(
+                                                &mut field,
+                                                super::super::MAX_CHECKSUM_LEN,
+                                            ),
+                                        )?;
 
                                         if archive_checksum != checksum {
                                             return Err(anyhow::anyhow!(
