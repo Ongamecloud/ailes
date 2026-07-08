@@ -16,7 +16,10 @@ use serde_json::json;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 mod extended;
@@ -37,11 +40,11 @@ pub struct FileHandle {
 
 pub struct DirHandle {
     _guard: super::limiter::SshLimiterHandleGuard,
-    path: PathBuf,
+    path: Arc<Path>,
 
-    dir: crate::server::filesystem::cap::AsyncReadDir,
+    dir: Arc<Mutex<crate::server::filesystem::cap::ReadDir>>,
 
-    consumed: u64,
+    consumed: Arc<AtomicU64>,
 }
 
 pub enum ServerHandle {
@@ -53,8 +56,8 @@ impl ServerHandle {
     #[inline]
     fn path(&self) -> &Path {
         match self {
-            ServerHandle::File(handle) => handle.path.as_path(),
-            ServerHandle::Dir(handle) => handle.path.as_path(),
+            ServerHandle::File(handle) => &handle.path,
+            ServerHandle::Dir(handle) => &handle.path,
         }
     }
 }
@@ -94,9 +97,9 @@ impl SftpSession {
 
         #[cfg(unix)]
         {
-            match rustix::fs::FileType::from_raw_mode(
-                PortablePermissions::from(metadata.permissions()).mode() as _,
-            ) {
+            use cap_std::fs::MetadataExt;
+
+            match rustix::fs::FileType::from_raw_mode(metadata.mode() as _) {
                 rustix::fs::FileType::RegularFile => attrs.set_regular(true),
                 rustix::fs::FileType::Directory => attrs.set_dir(true),
                 rustix::fs::FileType::Symlink => attrs.set_symlink(true),
@@ -107,9 +110,7 @@ impl SftpSession {
             }
 
             if let Some(target_metadata) = target_metadata {
-                match rustix::fs::FileType::from_raw_mode(
-                    PortablePermissions::from(target_metadata.permissions()).mode() as _,
-                ) {
+                match rustix::fs::FileType::from_raw_mode(target_metadata.mode() as _) {
                     rustix::fs::FileType::RegularFile => attrs.set_regular(true),
                     rustix::fs::FileType::Directory => attrs.set_dir(true),
                     rustix::fs::FileType::BlockDevice => attrs.set_block(true),
@@ -335,9 +336,16 @@ impl russh_sftp::server::Handler for SftpSession {
             return Err(StatusCode::NoSuchFile);
         }
 
-        let dir = match self.server.filesystem.async_read_dir(&path).await {
-            Ok(dir) => dir,
-            Err(_) => return Err(StatusCode::NoSuchFile),
+        let dir = match tokio::task::spawn_blocking({
+            let server = self.server.clone();
+            let path = path.clone();
+
+            move || server.filesystem.read_dir(path)
+        })
+        .await
+        {
+            Ok(Ok(dir)) => dir,
+            _ => return Err(StatusCode::NoSuchFile),
         };
 
         let handle = self.next_handle_id();
@@ -349,9 +357,9 @@ impl russh_sftp::server::Handler for SftpSession {
                     .limiter
                     .open_handle()
                     .map_err(|_| StatusCode::Failure)?,
-                path,
-                dir,
-                consumed: 0,
+                path: Arc::from(path),
+                dir: Arc::new(Mutex::new(dir)),
+                consumed: Arc::new(AtomicU64::new(0)),
             }),
         );
 
@@ -371,62 +379,74 @@ impl russh_sftp::server::Handler for SftpSession {
             _ => return Err(StatusCode::NoSuchFile),
         };
 
-        if handle.consumed >= self.state.config.load().system.sftp.directory_entry_limit {
+        if handle.consumed.load(Ordering::Relaxed)
+            >= self.state.config.load().system.sftp.directory_entry_limit
+        {
             return Err(StatusCode::Eof);
         }
 
-        let mut files = Vec::new();
+        let files = tokio::task::spawn_blocking({
+            let server = self.server.clone();
+            let user_uuid = self.user_uuid;
+            let state = self.state.clone();
+            let path = Arc::clone(&handle.path);
+            let dir = Arc::clone(&handle.dir);
+            let consumed = Arc::clone(&handle.consumed);
 
-        loop {
-            let file = match handle.dir.next_entry().await {
-                Some(Ok((_, file))) => file,
-                _ => {
-                    if files.is_empty() {
-                        return Err(StatusCode::Eof);
+            move || {
+                let mut files = Vec::new();
+                let mut dir = dir.lock();
+
+                loop {
+                    let file = match dir.next_entry() {
+                        Some(Ok((_, file))) => file,
+                        _ => {
+                            if files.is_empty() {
+                                return Err(StatusCode::Eof);
+                            }
+
+                            break;
+                        }
+                    };
+
+                    let path = path.join(file);
+                    let metadata = match server.filesystem.symlink_metadata(&path) {
+                        Ok(metadata) => metadata,
+                        Err(_) => continue,
+                    };
+
+                    if Self::is_ignored_server(&server, user_uuid, &path, metadata.is_dir()) {
+                        continue;
                     }
 
-                    break;
+                    let target_metadata = if metadata.is_symlink() {
+                        server.filesystem.metadata(&path).ok()
+                    } else {
+                        None
+                    };
+
+                    files.push(Self::convert_entry(&path, metadata, target_metadata));
+                    let prev_consumed = consumed.fetch_add(1, Ordering::Relaxed);
+
+                    if prev_consumed + 1 >= state.config.load().system.sftp.directory_entry_limit
+                        || files.len()
+                            >= state.config.load().system.sftp.directory_entry_send_amount
+                    {
+                        tracing::debug!(
+                            "{} entries sent early in sftp readdir ({} total)",
+                            files.len(),
+                            prev_consumed + 1,
+                        );
+
+                        break;
+                    }
                 }
-            };
 
-            let path = handle.path.join(file);
-            let metadata = match self.server.filesystem.async_symlink_metadata(&path).await {
-                Ok(metadata) => metadata,
-                Err(_) => continue,
-            };
-
-            if Self::is_ignored_server(&self.server, self.user_uuid, &path, metadata.is_dir()) {
-                continue;
+                Ok::<_, StatusCode>(files)
             }
-
-            let target_metadata = if metadata.is_symlink() {
-                self.server.filesystem.async_metadata(&path).await.ok()
-            } else {
-                None
-            };
-
-            files.push(Self::convert_entry(&path, metadata, target_metadata));
-            handle.consumed += 1;
-
-            if handle.consumed >= self.state.config.load().system.sftp.directory_entry_limit
-                || files.len()
-                    >= self
-                        .state
-                        .config
-                        .load()
-                        .system
-                        .sftp
-                        .directory_entry_send_amount
-            {
-                tracing::debug!(
-                    "{} entries sent early in sftp readdir ({} total)",
-                    files.len(),
-                    handle.consumed,
-                );
-
-                break;
-            }
-        }
+        })
+        .await
+        .map_err(|_| StatusCode::Failure)??;
 
         Ok(Name { id, files })
     }
