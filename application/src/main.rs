@@ -630,7 +630,7 @@ async fn main_rt() {
                     Ok(_) => {}
                     Err(err) => {
                         if err.kind() == std::io::ErrorKind::AddrInUse {
-                            exit_error!("failed to start ssh server (address already in use)");
+                            exit_error!("failed to start ssh server ({} already in use)", address);
                         } else {
                             exit_error!("failed to start ssh server: {:?}", err);
                         }
@@ -702,7 +702,7 @@ async fn main_rt() {
                 Ok(_) => {}
                 Err(err) => {
                     if err.kind() == std::io::ErrorKind::AddrInUse {
-                        exit_error!("failed to start https server (address already in use)");
+                        exit_error!("failed to start https server ({} already in use)", address);
                     } else {
                         exit_error!("failed to start https server: {:?}", err);
                     }
@@ -716,7 +716,7 @@ async fn main_rt() {
                     Ok(listener) => listener,
                     Err(err) => {
                         if err.kind() == std::io::ErrorKind::AddrInUse {
-                            exit_error!("failed to start http server (address already in use)");
+                            exit_error!("failed to start http server ({} already in use)", address);
                         } else {
                             exit_error!("failed to start http server: {:?}", err);
                         }
@@ -729,7 +729,7 @@ async fn main_rt() {
                 Ok(_) => {}
                 Err(err) => {
                     if err.kind() == std::io::ErrorKind::AddrInUse {
-                        exit_error!("failed to start http server (address already in use)");
+                        exit_error!("failed to start http server ({} already in use)", address);
                     } else {
                         exit_error!("failed to start http server: {:?}", err);
                     }
@@ -754,13 +754,15 @@ async fn main_rt() {
             ));
 
             let _ = tokio::fs::remove_file(&socket_path).await;
-            let listener = match tokio::net::UnixListener::bind(socket_path) {
+            let listener = match tokio::net::UnixListener::bind(&socket_path) {
                 Ok(listener) => listener,
-                Err(err) => exit_error!("failed to bind to unix socket: {:?}", err),
+                Err(err) => {
+                    exit_error!("failed to bind to unix socket ({}): {:?}", socket_path, err)
+                }
             };
 
             if let Err(err) = axum::serve(listener, router.into_make_service()).await {
-                exit_error!("failed to start http server: {:?}", err);
+                exit_error!("failed to start http server ({}): {:?}", socket_path, err);
             }
         }
         #[cfg(not(unix))]
