@@ -11,8 +11,8 @@ use crate::{
         encode_mode,
         usage::SpaceDelta,
         virtualfs::{
-            AsyncFileRead, AsyncReadableFileStream, ByteRange, DirectoryListing,
-            DirectoryStreamWalk, DirectoryWalk, FileMetadata, FileRead, IsIgnoredFn,
+            AsyncDirectoryStreamWalk, AsyncDirectoryWalk, AsyncFileRead, AsyncReadableFileStream,
+            ByteRange, DirectoryListing, DirectoryWalk, FileMetadata, FileRead, IsIgnoredFn,
             VirtualReadableFilesystem,
         },
     },
@@ -717,23 +717,22 @@ impl VirtualReadableFilesystem for VirtualSevenZipArchive {
         Ok(entries)
     }
 
-    async fn async_walk_dir<'a>(
+    fn walk_dir<'a>(
         &'a self,
         path: &(dyn AsRef<Path> + Send + Sync),
         is_ignored: IsIgnoredFn,
     ) -> Result<Box<dyn DirectoryWalk + Send + Sync + 'a>, anyhow::Error> {
-        struct InMemoryWalkDir {
+        struct IgnoreWalkDir {
             path: PathBuf,
             archive: Arc<sevenz_rust2::Archive>,
             current_index: usize,
             is_ignored: IsIgnoredFn,
         }
 
-        #[async_trait::async_trait]
-        impl DirectoryWalk for InMemoryWalkDir {
-            async fn next_entry(&mut self) -> Option<Result<(FileType, PathBuf), anyhow::Error>> {
+        impl DirectoryWalk for IgnoreWalkDir {
+            fn next_entry(&mut self) -> Option<Result<(FileType, PathBuf), anyhow::Error>> {
                 while self.current_index < self.archive.files.len() {
-                    let entry = &self.archive.files[self.current_index];
+                    let entry = self.archive.files.get(self.current_index)?;
                     self.current_index += 1;
 
                     let name = Path::new(entry.name());
@@ -752,7 +751,49 @@ impl VirtualReadableFilesystem for VirtualSevenZipArchive {
             }
         }
 
-        Ok(Box::new(InMemoryWalkDir {
+        Ok(Box::new(IgnoreWalkDir {
+            path: path.as_ref().to_path_buf(),
+            archive: self.archive.clone(),
+            current_index: 0,
+            is_ignored,
+        }))
+    }
+    async fn async_walk_dir<'a>(
+        &'a self,
+        path: &(dyn AsRef<Path> + Send + Sync),
+        is_ignored: IsIgnoredFn,
+    ) -> Result<Box<dyn AsyncDirectoryWalk + Send + Sync + 'a>, anyhow::Error> {
+        struct AsyncIgnoreWalkDir {
+            path: PathBuf,
+            archive: Arc<sevenz_rust2::Archive>,
+            current_index: usize,
+            is_ignored: IsIgnoredFn,
+        }
+
+        #[async_trait::async_trait]
+        impl AsyncDirectoryWalk for AsyncIgnoreWalkDir {
+            async fn next_entry(&mut self) -> Option<Result<(FileType, PathBuf), anyhow::Error>> {
+                while self.current_index < self.archive.files.len() {
+                    let entry = self.archive.files.get(self.current_index)?;
+                    self.current_index += 1;
+
+                    let name = Path::new(entry.name());
+
+                    if !name.starts_with(&self.path) || name == self.path {
+                        continue;
+                    }
+
+                    let file_type = VirtualSevenZipArchive::seven_zip_entry_to_file_type(entry);
+
+                    if let Some(name) = (self.is_ignored)(file_type, name.to_path_buf()) {
+                        return Some(Ok((file_type, name)));
+                    }
+                }
+                None
+            }
+        }
+
+        Ok(Box::new(AsyncIgnoreWalkDir {
             path: path.as_ref().to_path_buf(),
             archive: self.archive.clone(),
             current_index: 0,
@@ -764,7 +805,7 @@ impl VirtualReadableFilesystem for VirtualSevenZipArchive {
         &'a self,
         path: &(dyn AsRef<Path> + Send + Sync),
         is_ignored: IsIgnoredFn,
-    ) -> Result<Box<dyn DirectoryStreamWalk + Send + Sync + 'a>, anyhow::Error> {
+    ) -> Result<Box<dyn AsyncDirectoryStreamWalk + Send + Sync + 'a>, anyhow::Error> {
         let (tx, rx) = tokio::sync::mpsc::channel(4);
 
         let archive = self.archive.clone();
@@ -882,7 +923,7 @@ impl VirtualReadableFilesystem for VirtualSevenZipArchive {
         }
 
         #[async_trait::async_trait]
-        impl DirectoryStreamWalk for ChannelStreamWalker {
+        impl AsyncDirectoryStreamWalk for ChannelStreamWalker {
             async fn next_entry(
                 &mut self,
             ) -> Option<Result<(FileType, PathBuf, AsyncReadableFileStream), anyhow::Error>>

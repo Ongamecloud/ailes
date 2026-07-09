@@ -2,7 +2,7 @@ use crate::{
     routes::MimeCacheValue,
     server::{
         filesystem::virtualfs::{
-            DirectoryStreamWalkFn, VirtualReadableFilesystem, VirtualWritableFilesystem,
+            AsyncDirectoryStreamWalkFn, VirtualReadableFilesystem, VirtualWritableFilesystem,
         },
         resources::ResourceUsageWatchExt,
     },
@@ -779,7 +779,7 @@ impl Filesystem {
             walker
                 .run_multithreaded(
                     server.app_state.config.load().api.file_copy_threads,
-                    DirectoryStreamWalkFn::from({
+                    AsyncDirectoryStreamWalkFn::from({
                         let server = server.clone();
                         let filesystem = filesystem.clone();
                         let source_path = Arc::new(path);
@@ -1152,11 +1152,7 @@ impl Filesystem {
 
         #[cfg(unix)]
         {
-            use rayon::prelude::*;
             use std::os::fd::AsFd;
-
-            const CHANNEL_CAPACITY: usize = 1 << 16;
-            const CHUNK: usize = 8192;
 
             let metadata = self.async_metadata(path.as_ref()).await?;
             let owner_uid = rustix::fs::Uid::from_raw_unchecked(self.config.load().system.user.uid);
@@ -1198,83 +1194,51 @@ impl Filesystem {
             }
 
             let threads = self.config.load().system.check_permissions_on_boot_threads;
-            let (tx, rx) = tokio::sync::mpsc::channel(CHANNEL_CAPACITY);
 
-            let worker = tokio::task::spawn_blocking({
+            tokio::task::spawn_blocking({
                 let cap_filesystem = self.cap_filesystem.clone();
 
                 move || -> Result<(), anyhow::Error> {
-                    let mut rx = rx;
-
                     let inner = cap_filesystem.get_inner()?;
-                    let fd = inner.as_fd();
 
-                    let pool = rayon::ThreadPoolBuilder::new()
-                        .num_threads(threads)
-                        .build()?;
-                    let mut chunk = Vec::with_capacity(CHUNK);
+                    let func = std::sync::Arc::new(
+                        move |_: crate::server::filesystem::cap::FileType, path: PathBuf| {
+                            let fd = inner.as_fd();
 
-                    loop {
-                        while chunk.len() < CHUNK {
-                            match rx.blocking_recv() {
-                                Some(path) => chunk.push(path),
-                                None => break,
+                            let Ok(stat) = rustix::fs::statx(
+                                fd,
+                                &path,
+                                rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+                                rustix::fs::StatxFlags::UID | rustix::fs::StatxFlags::GID,
+                            ) else {
+                                return Ok(());
+                            };
+
+                            if stat.stx_uid == owner_uid.as_raw()
+                                && stat.stx_gid == owner_gid.as_raw()
+                            {
+                                return Ok(());
                             }
-                        }
-                        if chunk.is_empty() {
-                            break;
-                        }
 
-                        pool.install(|| {
-                            chunk.par_iter().for_each(|path| {
-                                let Ok(stat) = rustix::fs::statx(
-                                    fd,
-                                    path,
-                                    rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
-                                    rustix::fs::StatxFlags::UID | rustix::fs::StatxFlags::GID,
-                                ) else {
-                                    return;
-                                };
+                            rustix::fs::chownat(
+                                fd,
+                                &path,
+                                Some(owner_uid),
+                                Some(owner_gid),
+                                rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+                            )
+                            .ok();
 
-                                if stat.stx_uid == owner_uid.as_raw()
-                                    && stat.stx_gid == owner_gid.as_raw()
-                                {
-                                    return;
-                                }
+                            Ok(())
+                        },
+                    );
 
-                                rustix::fs::chownat(
-                                    fd,
-                                    path,
-                                    Some(owner_uid),
-                                    Some(owner_gid),
-                                    rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
-                                )
-                                .ok();
-                            });
-                        });
-
-                        chunk.clear();
-                    }
-
-                    Ok(())
+                    cap_filesystem
+                        .walk_dir(&root_rel)?
+                        .run_multithreaded(threads, func)
                 }
-            });
-
-            let lister = async move {
-                let mut entries = self.async_walk_dir("").await?;
-
-                while let Some(Ok((_, entry_path))) = entries.next_entry().await {
-                    if tx.send(entry_path).await.is_err() {
-                        return Ok(());
-                    }
-                }
-
-                Ok::<_, anyhow::Error>(())
-            };
-
-            let (list_res, work_res) = tokio::join!(lister, worker);
-            list_res?;
-            work_res??;
+            })
+            .await??;
 
             Ok(())
         }
@@ -1546,7 +1510,7 @@ impl Filesystem {
             mode: encode_mode(PortablePermissions::from(metadata.permissions()).mode() as u32),
             mode_bits: compact_str::format_compact!(
                 "{:o}",
-                PortablePermissions::from(metadata.permissions()).mode() & 0o777
+                PortablePermissions::from(metadata.permissions()).mode()
             ),
             size,
             size_physical,
@@ -1626,7 +1590,7 @@ impl Filesystem {
             mode: encode_mode(PortablePermissions::from(metadata.permissions()).mode() as u32),
             mode_bits: compact_str::format_compact!(
                 "{:o}",
-                PortablePermissions::from(metadata.permissions()).mode() & 0o777
+                PortablePermissions::from(metadata.permissions()).mode()
             ),
             size,
             size_physical,

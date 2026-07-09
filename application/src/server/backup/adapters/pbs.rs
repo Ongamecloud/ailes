@@ -17,9 +17,9 @@ use crate::{
             cap::FileType,
             file::AsyncServerFile,
             virtualfs::{
-                AsyncFileRead, AsyncReadableFileStream, ByteRange, DirectoryListing,
-                DirectoryStreamWalk, DirectoryWalk, FileMetadata, FileRead, IsIgnoredFn,
-                VirtualReadableFilesystem,
+                AsyncDirectoryStreamWalk, AsyncDirectoryWalk, AsyncFileRead,
+                AsyncReadableFileStream, ByteRange, DirectoryListing, DirectoryWalk, FileMetadata,
+                FileRead, IsIgnoredFn, VirtualReadableFilesystem,
             },
         },
     },
@@ -130,25 +130,27 @@ impl BackupCreateExt for PbsBackup {
         let (archive_reader, archive_writer) = tokio::io::simplex(crate::BUFFER_SIZE);
 
         let total_task = {
+            let filesystem = server.filesystem.clone();
             let total = Arc::clone(&total);
-            let server = server.clone();
             let ignore = ignore.clone();
 
             async move {
-                let mut walker = server
-                    .filesystem
-                    .async_walk_dir(Path::new(""))
-                    .await?
-                    .with_is_ignored(ignore.into());
-                while let Some(Ok((_, path))) = walker.next_entry().await {
-                    let metadata = match server.filesystem.async_symlink_metadata(&path).await {
-                        Ok(metadata) => metadata,
-                        Err(_) => continue,
-                    };
-                    total.fetch_add(metadata.len(), Ordering::Relaxed);
-                }
+                tokio::task::spawn_blocking(move || {
+                    let mut walker = filesystem
+                        .walk_dir(Path::new(""))?
+                        .with_is_ignored(ignore.into());
+                    while let Some(Ok((_, path))) = walker.next_entry() {
+                        let metadata = match filesystem.symlink_metadata(&path) {
+                            Ok(metadata) => metadata,
+                            Err(_) => continue,
+                        };
 
-                Ok::<_, anyhow::Error>(())
+                        total.fetch_add(metadata.len(), Ordering::Relaxed);
+                    }
+
+                    Ok::<_, anyhow::Error>(())
+                })
+                .await?
             }
         };
 
@@ -1286,7 +1288,7 @@ impl VirtualReadableFilesystem for PbsVirtualFilesystem {
         })
     }
 
-    async fn async_walk_dir<'a>(
+    fn walk_dir<'a>(
         &'a self,
         path: &(dyn AsRef<Path> + Send + Sync),
         is_ignored: IsIgnoredFn,
@@ -1322,8 +1324,54 @@ impl VirtualReadableFilesystem for PbsVirtualFilesystem {
             items: std::vec::IntoIter<(FileType, PathBuf)>,
         }
 
-        #[async_trait::async_trait]
         impl DirectoryWalk for TreeWalk {
+            fn next_entry(&mut self) -> Option<Result<(FileType, PathBuf), anyhow::Error>> {
+                self.items.next().map(Ok)
+            }
+        }
+
+        Ok(Box::new(TreeWalk {
+            items: flat.into_iter(),
+        }))
+    }
+    async fn async_walk_dir<'a>(
+        &'a self,
+        path: &(dyn AsRef<Path> + Send + Sync),
+        is_ignored: IsIgnoredFn,
+    ) -> Result<Box<dyn AsyncDirectoryWalk + Send + Sync + 'a>, anyhow::Error> {
+        let mut flat: Vec<(FileType, PathBuf)> = Vec::new();
+
+        if let Some(start) = self.tree.lookup_dir(path.as_ref()) {
+            fn walk(
+                node: &PbsTreeNode,
+                current_path: &Path,
+                is_ignored: &IsIgnoredFn,
+                out: &mut Vec<(FileType, PathBuf)>,
+            ) {
+                for (name, meta) in node.files.iter() {
+                    let child_path = current_path.join(name.as_str());
+                    if let Some(filtered) = (is_ignored)(meta.file_type, child_path) {
+                        out.push((meta.file_type, filtered));
+                    }
+                }
+                for (name, child) in node.dirs.iter() {
+                    let child_path = current_path.join(name.as_str());
+                    if let Some(filtered) = (is_ignored)(FileType::Dir, child_path.clone()) {
+                        out.push((FileType::Dir, filtered));
+                    }
+                    walk(child, &child_path, is_ignored, out);
+                }
+            }
+
+            walk(start, path.as_ref(), &is_ignored, &mut flat);
+        }
+
+        struct TreeWalk {
+            items: std::vec::IntoIter<(FileType, PathBuf)>,
+        }
+
+        #[async_trait::async_trait]
+        impl AsyncDirectoryWalk for TreeWalk {
             async fn next_entry(&mut self) -> Option<Result<(FileType, PathBuf), anyhow::Error>> {
                 self.items.next().map(Ok)
             }
@@ -1338,7 +1386,7 @@ impl VirtualReadableFilesystem for PbsVirtualFilesystem {
         &'a self,
         path: &(dyn AsRef<Path> + Send + Sync),
         is_ignored: IsIgnoredFn,
-    ) -> Result<Box<dyn DirectoryStreamWalk + Send + Sync + 'a>, anyhow::Error> {
+    ) -> Result<Box<dyn AsyncDirectoryStreamWalk + Send + Sync + 'a>, anyhow::Error> {
         struct PbsDirStreamWalk {
             entry_wanted_notifier: Arc<tokio::sync::Notify>,
             entry_channel_rx: tokio::sync::mpsc::Receiver<
@@ -1347,7 +1395,7 @@ impl VirtualReadableFilesystem for PbsVirtualFilesystem {
         }
 
         #[async_trait::async_trait]
-        impl DirectoryStreamWalk for PbsDirStreamWalk {
+        impl AsyncDirectoryStreamWalk for PbsDirStreamWalk {
             fn supports_multithreading(&self) -> bool {
                 false
             }

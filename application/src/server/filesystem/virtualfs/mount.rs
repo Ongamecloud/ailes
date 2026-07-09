@@ -1,12 +1,14 @@
 use super::{
-    AsyncFileRead, ByteRange, DirectoryListing, DirectoryStreamWalk, DirectoryWalk, FileMetadata,
-    FileRead, IsIgnoredFn, VirtualReadableFilesystem, cap::VirtualCapFilesystem,
+    AsyncDirectoryStreamWalk, AsyncDirectoryWalk, AsyncFileRead, ByteRange, DirectoryListing,
+    FileMetadata, FileRead, IsIgnoredFn, VirtualReadableFilesystem, cap::VirtualCapFilesystem,
 };
 use crate::{
     io::compression::CompressionLevel,
     models::{DirectoryEntry, DirectorySortingMode},
     routes::MimeCacheValue,
-    server::filesystem::{archive::StreamableArchiveFormat, cap::FileType, encode_mode},
+    server::filesystem::{
+        archive::StreamableArchiveFormat, cap::FileType, encode_mode, virtualfs::DirectoryWalk,
+    },
     utils::{CmpExt, PortablePermissions},
 };
 use std::{
@@ -260,11 +262,18 @@ impl VirtualReadableFilesystem for VirtualMountFilesystem {
         }
     }
 
-    async fn async_walk_dir<'a>(
+    fn walk_dir<'a>(
         &'a self,
         path: &(dyn AsRef<Path> + Send + Sync),
         is_ignored: IsIgnoredFn,
     ) -> Result<Box<dyn DirectoryWalk + Send + Sync + 'a>, anyhow::Error> {
+        self.inner.walk_dir(path, is_ignored)
+    }
+    async fn async_walk_dir<'a>(
+        &'a self,
+        path: &(dyn AsRef<Path> + Send + Sync),
+        is_ignored: IsIgnoredFn,
+    ) -> Result<Box<dyn AsyncDirectoryWalk + Send + Sync + 'a>, anyhow::Error> {
         self.inner.async_walk_dir(path, is_ignored).await
     }
 
@@ -272,7 +281,7 @@ impl VirtualReadableFilesystem for VirtualMountFilesystem {
         &'a self,
         path: &(dyn AsRef<Path> + Send + Sync),
         is_ignored: IsIgnoredFn,
-    ) -> Result<Box<dyn DirectoryStreamWalk + Send + Sync + 'a>, anyhow::Error> {
+    ) -> Result<Box<dyn AsyncDirectoryStreamWalk + Send + Sync + 'a>, anyhow::Error> {
         self.inner.async_walk_dir_stream(path, is_ignored).await
     }
 

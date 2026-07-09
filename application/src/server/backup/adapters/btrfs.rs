@@ -333,30 +333,31 @@ impl BackupCreateExt for BtrfsBackup {
         tokio::fs::create_dir_all(Self::get_backup_path(&server.app_state.config, uuid)).await?;
 
         let total_task = {
-            let server = server.clone();
+            let filesystem = server.filesystem.clone();
             let ignore = ignore.clone();
 
             async move {
-                let mut walker = server
-                    .filesystem
-                    .async_walk_dir(&PathBuf::from(""))
-                    .await?
-                    .with_is_ignored(ignore.into());
-                let mut total_size = 0;
-                let mut total_files = 0;
-                while let Some(Ok((_, path))) = walker.next_entry().await {
-                    let metadata = match server.filesystem.async_symlink_metadata(&path).await {
-                        Ok(metadata) => metadata,
-                        Err(_) => continue,
-                    };
+                tokio::task::spawn_blocking(move || {
+                    let mut walker = filesystem
+                        .walk_dir(Path::new(""))?
+                        .with_is_ignored(ignore.into());
+                    let mut total_size = 0;
+                    let mut total_files = 0;
+                    while let Some(Ok((_, path))) = walker.next_entry() {
+                        let metadata = match filesystem.symlink_metadata(&path) {
+                            Ok(metadata) => metadata,
+                            Err(_) => continue,
+                        };
 
-                    total_size += metadata.len();
-                    if !metadata.is_dir() {
-                        total_files += 1;
+                        total_size += metadata.len();
+                        if !metadata.is_dir() {
+                            total_files += 1;
+                        }
                     }
-                }
 
-                Ok::<_, anyhow::Error>((total_size, total_files))
+                    Ok::<_, anyhow::Error>((total_size, total_files))
+                })
+                .await?
             }
         };
 

@@ -225,15 +225,14 @@ impl AsyncWalkDir {
         None
     }
 
-    pub async fn run_multithreaded<F, Fut>(
+    pub async fn run_multithreaded<
+        F: Fn(FileType, PathBuf) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<(), anyhow::Error>> + Send + 'static,
+    >(
         &mut self,
         threads: usize,
         func: Arc<F>,
-    ) -> Result<(), anyhow::Error>
-    where
-        F: Fn(FileType, PathBuf) -> Fut + Send + Sync + 'static,
-        Fut: futures::Future<Output = Result<(), anyhow::Error>> + Send + 'static,
-    {
+    ) -> Result<(), anyhow::Error> {
         let semaphore = Arc::new(Semaphore::new(threads));
         let error = Arc::new(RwLock::new(None));
 
@@ -330,5 +329,53 @@ impl WalkDir {
         }
 
         None
+    }
+
+    pub fn run_multithreaded<
+        F: Fn(FileType, PathBuf) -> Result<(), anyhow::Error> + Send + Sync + 'static,
+    >(
+        &mut self,
+        threads: usize,
+        func: Arc<F>,
+    ) -> Result<(), anyhow::Error> {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()?;
+        let error = Arc::new(RwLock::new(None));
+
+        pool.in_place_scope(|scope| {
+            while let Some(entry) = self.next_entry() {
+                match entry {
+                    Ok((file_type, path)) => {
+                        if crate::unlikely(error.read().is_some()) {
+                            break;
+                        }
+
+                        let error = Arc::clone(&error);
+                        let func = Arc::clone(&func);
+
+                        scope.spawn(move |_| {
+                            if crate::unlikely(error.read().is_some()) {
+                                return;
+                            }
+
+                            if let Err(err) = func(file_type, path) {
+                                *error.write() = Some(err);
+                            }
+                        });
+                    }
+                    Err(err) => {
+                        *error.write() = Some(err.into());
+                        break;
+                    }
+                }
+            }
+        });
+
+        if let Some(err) = error.write().take() {
+            return Err(err);
+        }
+
+        Ok(())
     }
 }

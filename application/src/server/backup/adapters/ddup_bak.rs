@@ -338,25 +338,27 @@ impl BackupCreateExt for DdupBakBackup {
         let path = repository.archive_path(&uuid.to_string());
 
         let total_task = {
-            let server = server.clone();
+            let filesystem = server.filesystem.clone();
+            let total = Arc::clone(&total);
             let ignore = ignore.clone();
 
             async move {
-                let mut walker = server
-                    .filesystem
-                    .async_walk_dir(Path::new(""))
-                    .await?
-                    .with_is_ignored(ignore.into());
-                while let Some(Ok((_, path))) = walker.next_entry().await {
-                    let metadata = match server.filesystem.async_symlink_metadata(&path).await {
-                        Ok(metadata) => metadata,
-                        Err(_) => continue,
-                    };
+                tokio::task::spawn_blocking(move || {
+                    let mut walker = filesystem
+                        .walk_dir(Path::new(""))?
+                        .with_is_ignored(ignore.into());
+                    while let Some(Ok((_, path))) = walker.next_entry() {
+                        let metadata = match filesystem.symlink_metadata(&path) {
+                            Ok(metadata) => metadata,
+                            Err(_) => continue,
+                        };
 
-                    total.fetch_add(metadata.len(), Ordering::Relaxed);
-                }
+                        total.fetch_add(metadata.len(), Ordering::Relaxed);
+                    }
 
-                Ok::<(), anyhow::Error>(())
+                    Ok::<_, anyhow::Error>(())
+                })
+                .await?
             }
         };
 

@@ -14,9 +14,9 @@ use crate::{
             cap::FileType,
             encode_mode,
             virtualfs::{
-                AsyncFileRead, AsyncReadableFileStream, ByteRange, DirectoryListing,
-                DirectoryStreamWalk, DirectoryWalk, FileMetadata, FileRead, IsIgnoredFn,
-                VirtualReadableFilesystem,
+                AsyncDirectoryStreamWalk, AsyncDirectoryWalk, AsyncFileRead,
+                AsyncReadableFileStream, ByteRange, DirectoryListing, DirectoryWalk, FileMetadata,
+                FileRead, IsIgnoredFn, VirtualReadableFilesystem,
             },
         },
     },
@@ -1105,6 +1105,50 @@ impl VirtualKopiaBackup {
             Ok(())
         })
     }
+
+    fn flatten_walk_blocking(
+        &self,
+        rel: PathBuf,
+        oid: Arc<str>,
+        is_ignored: &IsIgnoredFn,
+        out: &mut Vec<(FileType, PathBuf, String)>,
+    ) -> Result<(), anyhow::Error> {
+        let dir = match self.load_dir_blocking(&oid) {
+            Ok(dir) => dir,
+            Err(err) => {
+                tracing::warn!(
+                    rel = %rel.display(),
+                    oid = %oid,
+                    "kopia flatten_walk failed to load directory, skipping subtree: {:?}",
+                    err,
+                );
+                return Ok(());
+            }
+        };
+
+        for (name, entry) in dir.entries.iter() {
+            if entry.file_type.is_dir() {
+                continue;
+            }
+            let child_path = rel.join(name.as_str());
+            if let Some(filtered) = (is_ignored)(entry.file_type, child_path) {
+                out.push((entry.file_type, filtered, entry.oid.clone()));
+            }
+        }
+
+        for (name, entry) in dir.entries.iter() {
+            if !entry.file_type.is_dir() {
+                continue;
+            }
+            let child_path = rel.join(name.as_str());
+            if let Some(filtered) = (is_ignored)(FileType::Dir, child_path.clone()) {
+                out.push((FileType::Dir, filtered, String::new()));
+            }
+            self.flatten_walk_blocking(child_path, Arc::from(entry.oid.as_str()), is_ignored, out)?;
+        }
+
+        Ok(())
+    }
 }
 
 #[async_trait::async_trait]
@@ -1244,11 +1288,39 @@ impl VirtualReadableFilesystem for VirtualKopiaBackup {
         })
     }
 
-    async fn async_walk_dir<'a>(
+    fn walk_dir<'a>(
         &'a self,
         path: &(dyn AsRef<Path> + Send + Sync),
         is_ignored: IsIgnoredFn,
     ) -> Result<Box<dyn DirectoryWalk + Send + Sync + 'a>, anyhow::Error> {
+        let base = path.as_ref().to_path_buf();
+        let mut flat: Vec<(FileType, PathBuf, String)> = Vec::new();
+
+        if let Ok(oid) = self.resolve_dir_oid_blocking(&base) {
+            self.flatten_walk_blocking(base, oid, &is_ignored, &mut flat)?;
+        }
+
+        struct TreeWalk {
+            items: std::vec::IntoIter<(FileType, PathBuf)>,
+        }
+
+        impl DirectoryWalk for TreeWalk {
+            fn next_entry(&mut self) -> Option<Result<(FileType, PathBuf), anyhow::Error>> {
+                self.items.next().map(Ok)
+            }
+        }
+
+        let items: Vec<(FileType, PathBuf)> = flat.into_iter().map(|(ft, p, _)| (ft, p)).collect();
+
+        Ok(Box::new(TreeWalk {
+            items: items.into_iter(),
+        }))
+    }
+    async fn async_walk_dir<'a>(
+        &'a self,
+        path: &(dyn AsRef<Path> + Send + Sync),
+        is_ignored: IsIgnoredFn,
+    ) -> Result<Box<dyn AsyncDirectoryWalk + Send + Sync + 'a>, anyhow::Error> {
         let base = path.as_ref().to_path_buf();
         let mut flat: Vec<(FileType, PathBuf, String)> = Vec::new();
 
@@ -1261,7 +1333,7 @@ impl VirtualReadableFilesystem for VirtualKopiaBackup {
         }
 
         #[async_trait::async_trait]
-        impl DirectoryWalk for TreeWalk {
+        impl AsyncDirectoryWalk for TreeWalk {
             async fn next_entry(&mut self) -> Option<Result<(FileType, PathBuf), anyhow::Error>> {
                 self.items.next().map(Ok)
             }
@@ -1278,7 +1350,7 @@ impl VirtualReadableFilesystem for VirtualKopiaBackup {
         &'a self,
         path: &(dyn AsRef<Path> + Send + Sync),
         is_ignored: IsIgnoredFn,
-    ) -> Result<Box<dyn DirectoryStreamWalk + Send + Sync + 'a>, anyhow::Error> {
+    ) -> Result<Box<dyn AsyncDirectoryStreamWalk + Send + Sync + 'a>, anyhow::Error> {
         struct KopiaDirStreamWalk {
             entry_wanted_notifier: Arc<tokio::sync::Notify>,
             entry_channel_rx: tokio::sync::mpsc::Receiver<
@@ -1287,7 +1359,7 @@ impl VirtualReadableFilesystem for VirtualKopiaBackup {
         }
 
         #[async_trait::async_trait]
-        impl DirectoryStreamWalk for KopiaDirStreamWalk {
+        impl AsyncDirectoryStreamWalk for KopiaDirStreamWalk {
             fn supports_multithreading(&self) -> bool {
                 false
             }

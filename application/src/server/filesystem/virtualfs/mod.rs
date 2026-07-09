@@ -10,7 +10,9 @@ use crate::{
     utils::PortablePermissions,
 };
 use axum::http::{HeaderMap, HeaderValue};
-pub use functions::{DirectoryStreamWalkFn, DirectoryWalkFn, IsIgnoredFn};
+pub use functions::{
+    AsyncDirectoryStreamWalkFn, AsyncDirectoryWalkFn, DirectoryWalkFn, IsIgnoredFn,
+};
 use parking_lot::RwLock;
 use std::{
     ops::Bound,
@@ -263,14 +265,64 @@ impl From<std::fs::Metadata> for FileMetadata {
     }
 }
 
-#[async_trait::async_trait]
 pub trait DirectoryWalk {
+    fn next_entry(&mut self) -> Option<Result<(FileType, PathBuf), anyhow::Error>>;
+
+    fn run_multithreaded(
+        &mut self,
+        threads: usize,
+        func: DirectoryWalkFn,
+    ) -> Result<(), anyhow::Error> {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()?;
+        let error = Arc::new(RwLock::new(None));
+
+        pool.in_place_scope(|scope| {
+            while let Some(entry) = self.next_entry() {
+                match entry {
+                    Ok((file_type, path)) => {
+                        if crate::unlikely(error.read().is_some()) {
+                            break;
+                        }
+
+                        let error = Arc::clone(&error);
+                        let func = func.clone();
+
+                        scope.spawn(move |_| {
+                            if crate::unlikely(error.read().is_some()) {
+                                return;
+                            }
+
+                            if let Err(err) = func(file_type, path) {
+                                *error.write() = Some(err);
+                            }
+                        });
+                    }
+                    Err(err) => {
+                        *error.write() = Some(err);
+                        break;
+                    }
+                }
+            }
+        });
+
+        if let Some(err) = error.write().take() {
+            return Err(err);
+        }
+
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+pub trait AsyncDirectoryWalk {
     async fn next_entry(&mut self) -> Option<Result<(FileType, PathBuf), anyhow::Error>>;
 
     async fn run_multithreaded(
         &mut self,
         threads: usize,
-        func: DirectoryWalkFn,
+        func: AsyncDirectoryWalkFn,
     ) -> Result<(), anyhow::Error> {
         let semaphore = Arc::new(Semaphore::new(threads));
         let error = Arc::new(RwLock::new(None));
@@ -278,13 +330,13 @@ pub trait DirectoryWalk {
         while let Some(entry) = self.next_entry().await {
             match entry {
                 Ok((file_type, path)) => {
-                    let semaphore = Arc::clone(&semaphore);
-                    let error = Arc::clone(&error);
-                    let func = func.clone();
-
                     if crate::unlikely(error.read().is_some()) {
                         break;
                     }
+
+                    let semaphore = Arc::clone(&semaphore);
+                    let error = Arc::clone(&error);
+                    let func = func.clone();
 
                     let permit = match semaphore.acquire_owned().await {
                         Ok(permit) => permit,
@@ -315,7 +367,7 @@ pub trait DirectoryWalk {
 }
 
 #[async_trait::async_trait]
-pub trait DirectoryStreamWalk {
+pub trait AsyncDirectoryStreamWalk {
     #[inline]
     fn supports_multithreading(&self) -> bool {
         true
@@ -328,7 +380,7 @@ pub trait DirectoryStreamWalk {
     async fn run_multithreaded(
         &mut self,
         threads: usize,
-        func: DirectoryStreamWalkFn,
+        func: AsyncDirectoryStreamWalkFn,
     ) -> Result<(), anyhow::Error> {
         let semaphore = Arc::new(Semaphore::new(threads));
         let error = Arc::new(RwLock::new(None));
@@ -428,17 +480,22 @@ pub trait VirtualReadableFilesystem: Send + Sync {
         is_ignored: IsIgnoredFn,
         sort: crate::models::DirectorySortingMode,
     ) -> Result<DirectoryListing, anyhow::Error>;
-    async fn async_walk_dir<'a>(
+    fn walk_dir<'a>(
         &'a self,
         path: &(dyn AsRef<Path> + Send + Sync),
         is_ignored: IsIgnoredFn,
     ) -> Result<Box<dyn DirectoryWalk + Send + Sync + 'a>, anyhow::Error>;
+    async fn async_walk_dir<'a>(
+        &'a self,
+        path: &(dyn AsRef<Path> + Send + Sync),
+        is_ignored: IsIgnoredFn,
+    ) -> Result<Box<dyn AsyncDirectoryWalk + Send + Sync + 'a>, anyhow::Error>;
     async fn async_walk_dir_files<'a>(
         &'a self,
         path: &(dyn AsRef<Path> + Send + Sync),
         file_paths: Vec<PathBuf>,
         is_ignored: IsIgnoredFn,
-    ) -> Result<Box<dyn DirectoryWalk + Send + Sync + 'a>, anyhow::Error> {
+    ) -> Result<Box<dyn AsyncDirectoryWalk + Send + Sync + 'a>, anyhow::Error> {
         let root_path = path.as_ref().to_path_buf();
         let is_ignored = move |file_type, path: PathBuf| {
             let stripped_path = path.strip_prefix(&root_path).unwrap_or(&path);
@@ -455,13 +512,13 @@ pub trait VirtualReadableFilesystem: Send + Sync {
         &'a self,
         path: &(dyn AsRef<Path> + Send + Sync),
         is_ignored: IsIgnoredFn,
-    ) -> Result<Box<dyn DirectoryStreamWalk + Send + Sync + 'a>, anyhow::Error>;
+    ) -> Result<Box<dyn AsyncDirectoryStreamWalk + Send + Sync + 'a>, anyhow::Error>;
     async fn async_walk_dir_files_stream<'a>(
         &'a self,
         path: &(dyn AsRef<Path> + Send + Sync),
         file_paths: Vec<PathBuf>,
         is_ignored: IsIgnoredFn,
-    ) -> Result<Box<dyn DirectoryStreamWalk + Send + Sync + 'a>, anyhow::Error> {
+    ) -> Result<Box<dyn AsyncDirectoryStreamWalk + Send + Sync + 'a>, anyhow::Error> {
         let root_path = path.as_ref().to_path_buf();
         let is_ignored = move |file_type, path: PathBuf| {
             let stripped_path = path.strip_prefix(&root_path).unwrap_or(&path);

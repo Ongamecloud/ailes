@@ -1,6 +1,6 @@
 use super::{
-    AsyncFileRead, AsyncReadableFileStream, AsyncWritableSeekableFileStream, ByteRange,
-    DirectoryListing, DirectoryStreamWalk, DirectoryWalk, FileMetadata, FileRead, FileType,
+    AsyncDirectoryStreamWalk, AsyncDirectoryWalk, AsyncFileRead, AsyncReadableFileStream,
+    AsyncWritableSeekableFileStream, ByteRange, DirectoryListing, FileMetadata, FileRead, FileType,
     IsIgnoredFn, WritableSeekableFileStream,
 };
 use crate::{
@@ -8,7 +8,10 @@ use crate::{
     models::DirectoryEntry,
     server::filesystem::{
         archive::StreamableArchiveFormat,
-        virtualfs::{AsyncReadableWritableSeekableFileStream, ReadableWritableSeekableFileStream},
+        virtualfs::{
+            AsyncReadableWritableSeekableFileStream, DirectoryWalk,
+            ReadableWritableSeekableFileStream,
+        },
     },
     utils::{CmpExt, PortablePermissions},
 };
@@ -335,11 +338,38 @@ impl super::VirtualReadableFilesystem for VirtualCapFilesystem {
         .await?
     }
 
-    async fn async_walk_dir<'a>(
+    fn walk_dir<'a>(
         &'a self,
         path: &(dyn AsRef<Path> + Send + Sync),
         is_ignored: IsIgnoredFn,
     ) -> Result<Box<dyn DirectoryWalk + Send + Sync + 'a>, anyhow::Error> {
+        let walk_dir = self.inner.walk_dir(path)?.with_is_ignored(
+            if let Some(existing_is_ignored) = &self.is_ignored {
+                existing_is_ignored.clone().merge(is_ignored)
+            } else {
+                is_ignored
+            },
+        );
+
+        struct IgnoreWalkDir {
+            inner: crate::server::filesystem::cap::WalkDir,
+        }
+
+        impl DirectoryWalk for IgnoreWalkDir {
+            fn next_entry(&mut self) -> Option<Result<(FileType, PathBuf), anyhow::Error>> {
+                self.inner
+                    .next_entry()
+                    .map(|res| res.map_err(|err| err.into()))
+            }
+        }
+
+        Ok(Box::new(IgnoreWalkDir { inner: walk_dir }))
+    }
+    async fn async_walk_dir<'a>(
+        &'a self,
+        path: &(dyn AsRef<Path> + Send + Sync),
+        is_ignored: IsIgnoredFn,
+    ) -> Result<Box<dyn AsyncDirectoryWalk + Send + Sync + 'a>, anyhow::Error> {
         let walk_dir = self.inner.async_walk_dir(path).await?.with_is_ignored(
             if let Some(existing_is_ignored) = &self.is_ignored {
                 existing_is_ignored.clone().merge(is_ignored)
@@ -353,7 +383,7 @@ impl super::VirtualReadableFilesystem for VirtualCapFilesystem {
         }
 
         #[async_trait::async_trait]
-        impl DirectoryWalk for IgnoreAsyncWalkDir {
+        impl AsyncDirectoryWalk for IgnoreAsyncWalkDir {
             async fn next_entry(&mut self) -> Option<Result<(FileType, PathBuf), anyhow::Error>> {
                 self.inner
                     .next_entry()
@@ -369,7 +399,7 @@ impl super::VirtualReadableFilesystem for VirtualCapFilesystem {
         &'a self,
         path: &(dyn AsRef<Path> + Send + Sync),
         is_ignored: IsIgnoredFn,
-    ) -> Result<Box<dyn DirectoryStreamWalk + Send + Sync + 'a>, anyhow::Error> {
+    ) -> Result<Box<dyn AsyncDirectoryStreamWalk + Send + Sync + 'a>, anyhow::Error> {
         let walk_dir = self.inner.async_walk_dir(path).await?.with_is_ignored(
             if let Some(existing_is_ignored) = &self.is_ignored {
                 existing_is_ignored.clone().merge(is_ignored)
@@ -384,7 +414,7 @@ impl super::VirtualReadableFilesystem for VirtualCapFilesystem {
         }
 
         #[async_trait::async_trait]
-        impl<'a> DirectoryStreamWalk for IgnoreAsyncWalkDir<'a> {
+        impl<'a> AsyncDirectoryStreamWalk for IgnoreAsyncWalkDir<'a> {
             async fn next_entry(
                 &mut self,
             ) -> Option<Result<(FileType, PathBuf, AsyncReadableFileStream), anyhow::Error>>

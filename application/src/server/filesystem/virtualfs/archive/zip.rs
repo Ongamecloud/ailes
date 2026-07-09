@@ -13,8 +13,8 @@ use crate::{
         encode_mode,
         usage::SpaceDelta,
         virtualfs::{
-            AsyncFileRead, AsyncReadableFileStream, ByteRange, DirectoryListing,
-            DirectoryStreamWalk, DirectoryWalk, FileMetadata, FileRead, IsIgnoredFn,
+            AsyncDirectoryStreamWalk, AsyncDirectoryWalk, AsyncFileRead, AsyncReadableFileStream,
+            ByteRange, DirectoryListing, DirectoryWalk, FileMetadata, FileRead, IsIgnoredFn,
             VirtualReadableFilesystem,
         },
     },
@@ -619,11 +619,55 @@ impl VirtualReadableFilesystem for VirtualZipArchive {
         Ok(entries)
     }
 
-    async fn async_walk_dir<'a>(
+    fn walk_dir<'a>(
         &'a self,
         path: &(dyn AsRef<Path> + Send + Sync),
         is_ignored: IsIgnoredFn,
     ) -> Result<Box<dyn DirectoryWalk + Send + Sync + 'a>, anyhow::Error> {
+        struct IgnoreWalkDir {
+            path: PathBuf,
+            archive: zip::ZipArchive<MultiReader>,
+            current_index: usize,
+            is_ignored: IsIgnoredFn,
+        }
+
+        impl DirectoryWalk for IgnoreWalkDir {
+            fn next_entry(&mut self) -> Option<Result<(FileType, PathBuf), anyhow::Error>> {
+                while self.current_index < self.archive.len() {
+                    let entry = self.archive.by_index(self.current_index).ok()?;
+                    self.current_index += 1;
+
+                    let name = match entry.enclosed_name() {
+                        Some(name) => name.to_path_buf(),
+                        None => continue,
+                    };
+
+                    if !name.starts_with(&self.path) || name == self.path {
+                        continue;
+                    }
+
+                    let file_type = VirtualZipArchive::zip_entry_to_file_type(&entry);
+
+                    if let Some(name) = (self.is_ignored)(file_type, name.to_path_buf()) {
+                        return Some(Ok((file_type, name)));
+                    }
+                }
+                None
+            }
+        }
+
+        Ok(Box::new(IgnoreWalkDir {
+            path: path.as_ref().to_path_buf(),
+            archive: self.archive.clone(),
+            current_index: 0,
+            is_ignored,
+        }))
+    }
+    async fn async_walk_dir<'a>(
+        &'a self,
+        path: &(dyn AsRef<Path> + Send + Sync),
+        is_ignored: IsIgnoredFn,
+    ) -> Result<Box<dyn AsyncDirectoryWalk + Send + Sync + 'a>, anyhow::Error> {
         struct IgnoreAsyncWalkDir {
             path: PathBuf,
             archive: zip::ZipArchive<MultiReader>,
@@ -632,7 +676,7 @@ impl VirtualReadableFilesystem for VirtualZipArchive {
         }
 
         #[async_trait::async_trait]
-        impl DirectoryWalk for IgnoreAsyncWalkDir {
+        impl AsyncDirectoryWalk for IgnoreAsyncWalkDir {
             async fn next_entry(&mut self) -> Option<Result<(FileType, PathBuf), anyhow::Error>> {
                 while self.current_index < self.archive.len() {
                     let entry = self.archive.by_index(self.current_index).ok()?;
@@ -669,7 +713,7 @@ impl VirtualReadableFilesystem for VirtualZipArchive {
         &'a self,
         path: &(dyn AsRef<Path> + Send + Sync),
         is_ignored: IsIgnoredFn,
-    ) -> Result<Box<dyn DirectoryStreamWalk + Send + Sync + 'a>, anyhow::Error> {
+    ) -> Result<Box<dyn AsyncDirectoryStreamWalk + Send + Sync + 'a>, anyhow::Error> {
         struct IgnoreAsyncWalkDir {
             path: PathBuf,
             archive: zip::ZipArchive<MultiReader>,
@@ -678,7 +722,7 @@ impl VirtualReadableFilesystem for VirtualZipArchive {
         }
 
         #[async_trait::async_trait]
-        impl DirectoryStreamWalk for IgnoreAsyncWalkDir {
+        impl AsyncDirectoryStreamWalk for IgnoreAsyncWalkDir {
             async fn next_entry(
                 &mut self,
             ) -> Option<Result<(FileType, PathBuf, AsyncReadableFileStream), anyhow::Error>>

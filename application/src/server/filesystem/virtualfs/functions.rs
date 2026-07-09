@@ -60,18 +60,40 @@ impl<T: Fn(FileType, PathBuf) -> Option<PathBuf> + Send + Sync + 'static> From<T
     }
 }
 
-type DirectoryWalkFnInner = dyn Fn(FileType, PathBuf) -> futures::future::BoxFuture<'static, Result<(), anyhow::Error>>
+type DirectoryWalkFnInner =
+    dyn Fn(FileType, PathBuf) -> Result<(), anyhow::Error> + Send + Sync + 'static;
+
+#[derive(Clone)]
+pub struct DirectoryWalkFn(Arc<DirectoryWalkFnInner>);
+
+impl<T: Fn(FileType, PathBuf) -> Result<(), anyhow::Error> + Send + Sync + 'static> From<T>
+    for DirectoryWalkFn
+{
+    fn from(f: T) -> Self {
+        Self(Arc::new(f))
+    }
+}
+
+impl Deref for DirectoryWalkFn {
+    type Target = DirectoryWalkFnInner;
+
+    fn deref(&self) -> &Self::Target {
+        &*self.0
+    }
+}
+
+type AsyncDirectoryWalkFnInner = dyn Fn(FileType, PathBuf) -> futures::future::BoxFuture<'static, Result<(), anyhow::Error>>
     + Send
     + Sync
     + 'static;
 
 #[derive(Clone)]
-pub struct DirectoryWalkFn(Arc<DirectoryWalkFnInner>);
+pub struct AsyncDirectoryWalkFn(Arc<AsyncDirectoryWalkFnInner>);
 
-impl<T, Fut> From<T> for DirectoryWalkFn
-where
+impl<
     T: Fn(FileType, PathBuf) -> Fut + Send + Sync + 'static,
-    Fut: futures::Future<Output = Result<(), anyhow::Error>> + Send + 'static,
+    Fut: Future<Output = Result<(), anyhow::Error>> + Send + 'static,
+> From<T> for AsyncDirectoryWalkFn
 {
     fn from(f: T) -> Self {
         Self(Arc::new(move |file_type, path| {
@@ -81,8 +103,8 @@ where
     }
 }
 
-impl Deref for DirectoryWalkFn {
-    type Target = DirectoryWalkFnInner;
+impl Deref for AsyncDirectoryWalkFn {
+    type Target = AsyncDirectoryWalkFnInner;
 
     fn deref(&self) -> &Self::Target {
         &*self.0
@@ -99,12 +121,12 @@ type DirectoryStreamWalkFnInner = dyn Fn(
     + 'static;
 
 #[derive(Clone)]
-pub struct DirectoryStreamWalkFn(Arc<DirectoryStreamWalkFnInner>);
+pub struct AsyncDirectoryStreamWalkFn(Arc<DirectoryStreamWalkFnInner>);
 
-impl<T, Fut> From<T> for DirectoryStreamWalkFn
-where
+impl<
     T: Fn(FileType, PathBuf, AsyncReadableFileStream) -> Fut + Send + Sync + 'static,
-    Fut: futures::Future<Output = Result<(), anyhow::Error>> + Send + 'static,
+    Fut: Future<Output = Result<(), anyhow::Error>> + Send + 'static,
+> From<T> for AsyncDirectoryStreamWalkFn
 {
     fn from(f: T) -> Self {
         Self(Arc::new(move |file_type, path, stream| {
@@ -114,7 +136,7 @@ where
     }
 }
 
-impl Deref for DirectoryStreamWalkFn {
+impl Deref for AsyncDirectoryStreamWalkFn {
     type Target = DirectoryStreamWalkFnInner;
 
     fn deref(&self) -> &Self::Target {

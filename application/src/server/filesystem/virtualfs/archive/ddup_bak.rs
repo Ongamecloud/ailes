@@ -12,8 +12,8 @@ use crate::{
         encode_mode,
         usage::SpaceDelta,
         virtualfs::{
-            AsyncFileRead, AsyncReadableFileStream, ByteRange, DirectoryListing,
-            DirectoryStreamWalk, DirectoryWalk, FileMetadata, FileRead, IsIgnoredFn,
+            AsyncDirectoryStreamWalk, AsyncDirectoryWalk, AsyncFileRead, AsyncReadableFileStream,
+            ByteRange, DirectoryListing, DirectoryWalk, FileMetadata, FileRead, IsIgnoredFn,
             ReadableFileStream, VirtualReadableFilesystem,
         },
     },
@@ -1157,18 +1157,76 @@ impl VirtualReadableFilesystem for VirtualDdupBakArchive {
         Ok(simplex_reader)
     }
 
-    async fn async_walk_dir<'a>(
+    fn walk_dir<'a>(
         &'a self,
         path: &(dyn AsRef<Path> + Send + Sync),
         is_ignored: IsIgnoredFn,
     ) -> Result<Box<dyn DirectoryWalk + Send + Sync + 'a>, anyhow::Error> {
-        struct DdupWalkDir {
+        struct IgnoreWalkDir {
+            queue: VecDeque<(PathBuf, ddup_bak::archive::entries::Entry)>,
+            is_ignored: IsIgnoredFn,
+        }
+
+        impl DirectoryWalk for IgnoreWalkDir {
+            fn next_entry(&mut self) -> Option<Result<(FileType, PathBuf), anyhow::Error>> {
+                if let Some((path, entry)) = self.queue.pop_front() {
+                    let file_type = VirtualDdupBakArchive::ddup_bak_entry_to_file_type(&entry);
+
+                    if let ddup_bak::archive::entries::Entry::Directory(dir) = &entry {
+                        for child in &dir.entries {
+                            let child_path = path.join(child.name());
+                            let child_type =
+                                VirtualDdupBakArchive::ddup_bak_entry_to_file_type(child);
+
+                            if (self.is_ignored)(child_type, child_path.clone()).is_some() {
+                                self.queue.push_back((child_path, child.clone()));
+                            }
+                        }
+                    }
+                    return Some(Ok((file_type, path)));
+                }
+                None
+            }
+        }
+
+        let archive = self.archive.clone();
+        let path = path.as_ref().to_path_buf();
+        let mut queue = VecDeque::new();
+
+        if let Some(entry) = archive.find_archive_entry(&path) {
+            if let ddup_bak::archive::entries::Entry::Directory(dir) = entry {
+                for child in &dir.entries {
+                    let child_path = path.join(child.name());
+                    let child_type = Self::ddup_bak_entry_to_file_type(child);
+                    if (is_ignored)(child_type, child_path.clone()).is_some() {
+                        queue.push_back((child_path, child.clone()));
+                    }
+                }
+            }
+        } else if path.components().count() == 0 {
+            for child in archive.entries() {
+                let child_path = path.join(child.name());
+                let child_type = Self::ddup_bak_entry_to_file_type(child);
+                if (is_ignored)(child_type, child_path.clone()).is_some() {
+                    queue.push_back((child_path, child.clone()));
+                }
+            }
+        }
+
+        Ok(Box::new(IgnoreWalkDir { queue, is_ignored }))
+    }
+    async fn async_walk_dir<'a>(
+        &'a self,
+        path: &(dyn AsRef<Path> + Send + Sync),
+        is_ignored: IsIgnoredFn,
+    ) -> Result<Box<dyn AsyncDirectoryWalk + Send + Sync + 'a>, anyhow::Error> {
+        struct AsyncIgnoreWalkDir {
             queue: VecDeque<(PathBuf, ddup_bak::archive::entries::Entry)>,
             is_ignored: IsIgnoredFn,
         }
 
         #[async_trait::async_trait]
-        impl DirectoryWalk for DdupWalkDir {
+        impl AsyncDirectoryWalk for AsyncIgnoreWalkDir {
             async fn next_entry(&mut self) -> Option<Result<(FileType, PathBuf), anyhow::Error>> {
                 if let Some((path, entry)) = self.queue.pop_front() {
                     let file_type = VirtualDdupBakArchive::ddup_bak_entry_to_file_type(&entry);
@@ -1214,14 +1272,14 @@ impl VirtualReadableFilesystem for VirtualDdupBakArchive {
             }
         }
 
-        Ok(Box::new(DdupWalkDir { queue, is_ignored }))
+        Ok(Box::new(AsyncIgnoreWalkDir { queue, is_ignored }))
     }
 
     async fn async_walk_dir_stream<'a>(
         &'a self,
         path: &(dyn AsRef<Path> + Send + Sync),
         is_ignored: IsIgnoredFn,
-    ) -> Result<Box<dyn DirectoryStreamWalk + Send + Sync + 'a>, anyhow::Error> {
+    ) -> Result<Box<dyn AsyncDirectoryStreamWalk + Send + Sync + 'a>, anyhow::Error> {
         struct DdupStreamWalk {
             repository: Option<Arc<ddup_bak::repository::Repository>>,
             queue: VecDeque<(PathBuf, ddup_bak::archive::entries::Entry)>,
@@ -1229,7 +1287,7 @@ impl VirtualReadableFilesystem for VirtualDdupBakArchive {
         }
 
         #[async_trait::async_trait]
-        impl DirectoryStreamWalk for DdupStreamWalk {
+        impl AsyncDirectoryStreamWalk for DdupStreamWalk {
             async fn next_entry(
                 &mut self,
             ) -> Option<Result<(FileType, PathBuf, AsyncReadableFileStream), anyhow::Error>>

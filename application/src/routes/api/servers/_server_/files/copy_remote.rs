@@ -10,7 +10,7 @@ mod post {
         response::{ApiResponse, ApiResponseResult},
         routes::{ApiError, GetState, api::servers::_server_::GetServer},
         server::{
-            filesystem::virtualfs::{DirectoryStreamWalkFn, IsIgnoredFn},
+            filesystem::virtualfs::{AsyncDirectoryStreamWalkFn, IsIgnoredFn},
             transfer::TransferArchiveFormat,
         },
     };
@@ -179,7 +179,7 @@ mod post {
                                 walker
                                     .run_multithreaded(
                                         state.config.load().api.file_copy_threads,
-                                        DirectoryStreamWalkFn::from({
+                                        AsyncDirectoryStreamWalkFn::from({
                                             let server = server.clone();
                                             let filesystem = filesystem.clone();
                                             let source_path = Arc::new(root);
