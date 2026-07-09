@@ -255,6 +255,7 @@ impl DockerServerConfigurationExt for crate::server::configuration::ServerConfig
                 devices: Some(self.convert_devices()),
                 network_mode: Some(network_mode),
                 dns: Some(config.load().docker.network.dns.clone()),
+                dns_options: Some(config.load().docker.network.dns_options.clone()),
                 tmpfs: Some(HashMap::from([(
                     "/tmp".to_string(),
                     format!("rw,exec,nosuid,size={}M", config.load().docker.tmpfs_size),
@@ -1392,6 +1393,7 @@ impl super::ServerExecutor for DockerExecutor {
                 ]),
                 network_mode: Some(self.app_config.load().docker.network.mode.clone()),
                 dns: Some(self.app_config.load().docker.network.dns.clone()),
+                dns_options: Some(self.app_config.load().docker.network.dns_options.clone()),
                 tmpfs: Some(HashMap::from([(
                     "/tmp".to_string(),
                     format!(
@@ -1599,6 +1601,7 @@ impl super::ServerExecutor for DockerExecutor {
                 ]),
                 network_mode: Some(self.app_config.load().docker.network.mode.clone()),
                 dns: Some(self.app_config.load().docker.network.dns.clone()),
+                dns_options: Some(self.app_config.load().docker.network.dns_options.clone()),
                 tmpfs: Some(HashMap::from([(
                     "/tmp".to_string(),
                     format!(

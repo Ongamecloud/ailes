@@ -379,6 +379,14 @@ fn docker_network_interface() -> String {
 fn docker_network_dns() -> Vec<String> {
     vec!["1.1.1.1".to_string(), "1.0.0.1".to_string()]
 }
+fn docker_network_dns_options() -> Vec<String> {
+    vec![
+        "ndots:0".to_string(),
+        "timeout:2".to_string(),
+        "attempts:3".to_string(),
+        "single-request-reopen".to_string(),
+    ]
+}
 fn docker_network_name() -> String {
     #[cfg(unix)]
     {
@@ -896,6 +904,8 @@ nestify::nest! {
                 pub disable_interface_binding: bool,
                 #[serde(default = "docker_network_dns")]
                 pub dns: Vec<String>,
+                #[serde(default = "docker_network_dns_options")]
+                pub dns_options: Vec<String>,
 
                 #[serde(default = "docker_network_name")]
                 pub name: String,
