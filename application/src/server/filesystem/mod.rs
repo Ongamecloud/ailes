@@ -1060,31 +1060,33 @@ impl Filesystem {
         Ok(())
     }
 
-    pub fn chown_path(&self, path: impl AsRef<Path>) -> Result<(), std::io::Error> {
-        if self.config.load().system.user.rootless.enabled {
-            return Ok(());
-        }
-
+    fn chown_impl(
+        config: &crate::config::Config,
+        cap_filesystem: &cap::CapFilesystem,
+        path: impl AsRef<Path>,
+    ) -> Result<(), std::io::Error> {
         #[cfg(unix)]
         {
             use std::os::fd::AsFd;
 
-            let owner_uid = rustix::fs::Uid::from_raw_unchecked(self.config.load().system.user.uid);
-            let owner_gid = rustix::fs::Gid::from_raw_unchecked(self.config.load().system.user.gid);
+            let cfg = config.load();
+            let owner_uid = rustix::fs::Uid::from_raw_unchecked(cfg.system.user.uid);
+            let owner_gid = rustix::fs::Gid::from_raw_unchecked(cfg.system.user.gid);
+            drop(cfg);
 
             if path.as_ref() == Path::new("")
                 || path.as_ref() == Path::new(".")
                 || path.as_ref() == Path::new("/")
             {
                 std::os::unix::fs::chown(
-                    &self.base_path,
+                    &cap_filesystem.base_path,
                     Some(owner_uid.as_raw()),
                     Some(owner_gid.as_raw()),
                 )?;
             } else {
                 rustix::fs::chownat(
-                    self.cap_filesystem.get_inner()?.as_fd(),
-                    self.relative_path(path.as_ref()),
+                    cap_filesystem.get_inner()?.as_fd(),
+                    cap_filesystem.relative_path(path.as_ref()),
                     Some(owner_uid),
                     Some(owner_gid),
                     rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
@@ -1097,6 +1099,14 @@ impl Filesystem {
         {
             Ok(())
         }
+    }
+
+    pub fn chown_path(&self, path: impl AsRef<Path>) -> Result<(), std::io::Error> {
+        if self.config.load().system.user.rootless.enabled {
+            return Ok(());
+        }
+
+        Self::chown_impl(&self.config, &self.cap_filesystem, path)
     }
     pub async fn async_chown_path(&self, path: impl AsRef<Path>) -> Result<(), std::io::Error> {
         if self.config.load().system.user.rootless.enabled {
@@ -1288,28 +1298,34 @@ impl Filesystem {
             return Ok(());
         }
 
-        match self.async_create_dir(&path).await {
-            Ok(_) => {
-                self.async_chown_path(&path).await?;
-                return Ok(());
+        let config = self.config.clone();
+        let cap_filesystem = self.cap_filesystem.clone();
+
+        tokio::task::spawn_blocking(move || {
+            match cap_filesystem.create_dir(&path) {
+                Ok(_) => {
+                    Self::chown_impl(&config, &cap_filesystem, &path)?;
+                    return Ok(());
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => return Ok(()),
+                Err(err) if err.kind() != std::io::ErrorKind::NotFound => return Err(err),
+                Err(_) => {}
             }
-            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => return Ok(()),
-            Err(err) if err.kind() != std::io::ErrorKind::NotFound => return Err(err),
-            Err(_) => {}
-        }
 
-        let mut progress = PathBuf::new();
-        for component in path.components() {
-            progress.push(component);
+            let mut progress = PathBuf::new();
+            for component in path.components() {
+                progress.push(component);
 
-            match self.async_create_dir(&progress).await {
-                Ok(_) => self.async_chown_path(&progress).await?,
-                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(err) => return Err(err),
+                match cap_filesystem.create_dir(&progress) {
+                    Ok(_) => Self::chown_impl(&config, &cap_filesystem, &progress)?,
+                    Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(err) => return Err(err),
+                }
             }
-        }
 
-        Ok(())
+            Ok(())
+        })
+        .await?
     }
 
     pub async fn setup(&self) {
