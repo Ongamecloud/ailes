@@ -28,6 +28,14 @@ pub enum ScheduleDynamicParameter {
 }
 
 #[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case", tag = "mode")]
+pub enum ScheduleBackupSelector {
+    Latest,
+    Uuid { uuid: ScheduleDynamicParameter },
+    Name { name: ScheduleDynamicParameter },
+}
+
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum ScheduleAction {
     Sleep {
@@ -91,6 +99,14 @@ pub enum ScheduleAction {
 
         name: Option<ScheduleDynamicParameter>,
         ignored_files: Vec<compact_str::CompactString>,
+    },
+    RestoreBackup {
+        ignore_failure: bool,
+        truncate_directory: bool,
+        #[serde(default)]
+        restore_startup: bool,
+
+        backup: ScheduleBackupSelector,
     },
     CreateDirectory {
         ignore_failure: bool,
@@ -178,6 +194,7 @@ impl ScheduleAction {
             ScheduleAction::SendPower { ignore_failure, .. } => *ignore_failure,
             ScheduleAction::SendCommand { ignore_failure, .. } => *ignore_failure,
             ScheduleAction::CreateBackup { ignore_failure, .. } => *ignore_failure,
+            ScheduleAction::RestoreBackup { ignore_failure, .. } => *ignore_failure,
             ScheduleAction::CreateDirectory { ignore_failure, .. } => *ignore_failure,
             ScheduleAction::WriteFile { ignore_failure, .. } => *ignore_failure,
             ScheduleAction::CopyFile { ignore_failure, .. } => *ignore_failure,
@@ -625,6 +642,148 @@ impl ScheduleAction {
 
                 if *foreground && let Ok(Err(err)) = thread.await {
                     return Err(err);
+                }
+            }
+            ScheduleAction::RestoreBackup {
+                truncate_directory,
+                restore_startup,
+                backup,
+                ..
+            } => {
+                let (backup_uuid, backup_name) = match backup {
+                    ScheduleBackupSelector::Latest => (None, None),
+                    ScheduleBackupSelector::Uuid { uuid } => {
+                        let uuid = match execution_context.resolve_parameter(uuid) {
+                            Some(uuid) => uuid,
+                            None => {
+                                return Err(
+                                    "unable to resolve parameter `uuid` into a string.".into()
+                                );
+                            }
+                        };
+
+                        match uuid::Uuid::parse_str(uuid) {
+                            Ok(uuid) => (Some(uuid), None),
+                            Err(_) => {
+                                return Err("unable to parse parameter `uuid` into a uuid.".into());
+                            }
+                        }
+                    }
+                    ScheduleBackupSelector::Name { name } => {
+                        match execution_context.resolve_parameter(name) {
+                            Some(name) => (None, Some(name.clone())),
+                            None => {
+                                return Err(
+                                    "unable to resolve parameter `name` into a string.".into()
+                                );
+                            }
+                        }
+                    }
+                };
+
+                let (adapter, uuid, download_url) = match state
+                    .config
+                    .client
+                    .restore_backup(
+                        server.uuid,
+                        Some(execution_context.schedule_uuid),
+                        backup_uuid,
+                        backup_name.as_deref(),
+                        *truncate_directory,
+                        *restore_startup,
+                    )
+                    .await
+                {
+                    Ok(result) => result,
+                    Err(err) => {
+                        tracing::error!(
+                            server = %server.uuid,
+                            "failed to request backup restore: {:#?}",
+                            err
+                        );
+
+                        return Err("failed to request backup restore".into());
+                    }
+                };
+
+                let backup = match state
+                    .backup_manager
+                    .find_adapter(state, adapter, uuid)
+                    .await
+                {
+                    Ok(backup) => backup,
+                    Err(err) => {
+                        tracing::error!(
+                            server = %server.uuid,
+                            backup = %uuid,
+                            "failed to find backup: {:#?}",
+                            err
+                        );
+
+                        None
+                    }
+                };
+
+                let backup = match backup {
+                    Some(backup) => backup,
+                    None => {
+                        if let Err(err) = state
+                            .config
+                            .client
+                            .set_backup_restore_status(server.uuid, uuid, false)
+                            .await
+                        {
+                            tracing::error!(
+                                server = %server.uuid,
+                                backup = %uuid,
+                                "failed to reset backup restore status: {:#?}",
+                                err
+                            );
+                        }
+
+                        return Err("backup not found".into());
+                    }
+                };
+
+                let truncate_directory = *truncate_directory;
+                let thread = tokio::spawn({
+                    let state = Arc::clone(state);
+                    let server = server.clone();
+
+                    async move {
+                        if let Err(err) = state
+                            .backup_manager
+                            .restore(&backup, &server, truncate_directory, download_url)
+                            .await
+                        {
+                            tracing::error!(
+                                "failed to restore backup {} (adapter = {:?}) for {}: {}",
+                                uuid,
+                                adapter,
+                                server.uuid,
+                                err
+                            );
+
+                            return Err("failed to restore backup".into());
+                        }
+
+                        Ok::<_, Cow<'static, str>>(())
+                    }
+                });
+
+                match thread.await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(err)) => return Err(err),
+                    Err(err) => {
+                        tracing::error!(
+                            server = %server.uuid,
+                            backup = %uuid,
+                            "failed to restore backup: {:#?}",
+                            err
+                        );
+
+                        return Err("failed to restore backup".into());
+                    }
                 }
             }
             ScheduleAction::CreateDirectory { root, name, .. } => {

@@ -380,4 +380,35 @@ impl Client {
 
         super::backups::create_backup(self, server, schedule, name, ignored_files).await
     }
+
+    #[tracing::instrument(skip(self))]
+    pub async fn restore_backup(
+        &self,
+        server: uuid::Uuid,
+        schedule: Option<uuid::Uuid>,
+        backup: Option<uuid::Uuid>,
+        backup_name: Option<&str>,
+        truncate_directory: bool,
+        restore_startup: bool,
+    ) -> Result<
+        (
+            BackupAdapter,
+            uuid::Uuid,
+            Option<compact_str::CompactString>,
+        ),
+        anyhow::Error,
+    > {
+        tracing::info!("requesting backup restore");
+
+        super::backups::restore_backup(
+            self,
+            server,
+            schedule,
+            backup,
+            backup_name,
+            truncate_directory,
+            restore_startup,
+        )
+        .await
+    }
 }

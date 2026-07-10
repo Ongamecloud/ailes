@@ -216,6 +216,51 @@ pub async fn backup_kopia_configuration(
     Ok(response)
 }
 
+pub async fn restore_backup(
+    client: &Client,
+    server: uuid::Uuid,
+    schedule: Option<uuid::Uuid>,
+    backup: Option<uuid::Uuid>,
+    backup_name: Option<&str>,
+    truncate_directory: bool,
+    restore_startup: bool,
+) -> Result<
+    (
+        BackupAdapter,
+        uuid::Uuid,
+        Option<compact_str::CompactString>,
+    ),
+    anyhow::Error,
+> {
+    let response: Response = super::into_json(
+        client
+            .client
+            .post(format!("{}/servers/{}/backups/restore", client.url, server))
+            .json(&json!({
+                "schedule_uuid": schedule,
+                "backup_uuid": backup,
+                "backup_name": backup_name,
+                "truncate_directory": truncate_directory,
+                "restore_startup": restore_startup,
+            }))
+            .send()
+            .await?
+            .error_for_remote_status()
+            .await?
+            .text()
+            .await?,
+    )?;
+
+    #[derive(Deserialize)]
+    struct Response {
+        adapter: BackupAdapter,
+        uuid: uuid::Uuid,
+        download_url: Option<compact_str::CompactString>,
+    }
+
+    Ok((response.adapter, response.uuid, response.download_url))
+}
+
 pub async fn create_backup(
     client: &Client,
     server: uuid::Uuid,
