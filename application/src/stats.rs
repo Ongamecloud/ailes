@@ -134,7 +134,7 @@ impl Default for StatsManager {
                         sent_packets: 0,
                         sending_packets_rate: 0.0,
                     };
-                    for (_, net) in networks.iter() {
+                    for net in networks.values() {
                         network.received += net.total_received();
                         network.received_packets += net.total_packets_received();
                         network.receiving_rate += net.received() as f64;

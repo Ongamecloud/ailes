@@ -170,17 +170,17 @@ impl<R: std::io::Read> PropertiesParser<R> {
                     Some('u') => {
                         let mut hex_chars = String::new();
                         for _ in 0..4 {
-                            match chars.next() {
-                                Some(h) => hex_chars.push(h),
-                                None => return None,
+                            {
+                                let h = chars.next()?;
+                                hex_chars.push(h)
                             }
                         }
 
                         match u32::from_str_radix(&hex_chars, 16) {
-                            Ok(code) => match std::char::from_u32(code) {
-                                Some(u_char) => output.push(u_char),
-                                None => return None,
-                            },
+                            Ok(code) => {
+                                let u_char = std::char::from_u32(code)?;
+                                output.push(u_char)
+                            }
                             Err(_) => return None,
                         }
                     }

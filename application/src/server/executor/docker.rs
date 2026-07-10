@@ -127,29 +127,27 @@ impl DockerServerConfigurationExt for crate::server::configuration::ServerConfig
         let iface = &config.docker.network.interface;
         let mut map = self.convert_allocations_bindings();
 
-        for (_port, binds_option) in map.iter_mut() {
-            if let Some(binds) = binds_option {
-                let mut i = 0;
-                while i < binds.len() {
-                    let Some(binding) = binds.get_mut(i) else {
-                        break;
-                    };
-                    if config.docker.network.disable_interface_binding {
-                        binding.host_ip = None;
-                    }
-
-                    if binding.host_ip.as_deref() == Some("127.0.0.1") {
-                        if config.docker.network.ispn {
-                            binds.remove(i);
-
-                            continue;
-                        } else {
-                            binding.host_ip = Some(iface.clone());
-                        }
-                    }
-
-                    i += 1;
+        for binds in map.values_mut().flatten() {
+            let mut i = 0;
+            while i < binds.len() {
+                let Some(binding) = binds.get_mut(i) else {
+                    break;
+                };
+                if config.docker.network.disable_interface_binding {
+                    binding.host_ip = None;
                 }
+
+                if binding.host_ip.as_deref() == Some("127.0.0.1") {
+                    if config.docker.network.ispn {
+                        binds.remove(i);
+
+                        continue;
+                    } else {
+                        binding.host_ip = Some(iface.clone());
+                    }
+                }
+
+                i += 1;
             }
         }
 

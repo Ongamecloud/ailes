@@ -26,7 +26,7 @@ static DISK_USAGE: LazyLock<Arc<RwLock<DiskUsageMap>>> = LazyLock::new(|| {
                     tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
                     continue;
                 }
-                for (_, (_, mount, subvol_id, _)) in usage_map.iter() {
+                for (_, mount, subvol_id, _) in usage_map.values() {
                     mount_groups
                         .entry(mount.clone())
                         .or_default()
