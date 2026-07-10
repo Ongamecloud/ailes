@@ -12,7 +12,10 @@ services:
       - "/var/lib/docker/containers/:/var/lib/docker/containers/"
       # this is exclusively for the main wings configuration file, called config.yml
       - "/etc/pterodactyl:/etc/pterodactyl/"
-      # please note: if you change the /var/lib/pterodactyl path and split it up, make sure to include the following paths properly (all in the config.yml):
+      # wings inspects its own container on boot and translates bind mount sources
+      # to host paths automatically, so only the host side (left) of these volumes
+      # needs to be adjusted to relocate storage. if you split /var/lib/pterodactyl
+      # up, make sure the following paths are all still covered by a volume:
       # /var/lib/pterodactyl/volumes (used for storing server files)
       # /var/lib/pterodactyl/vmounts (used for storing temporary mountpoints, DO NOT put this on a tmpfs, thats why its separate)
       # /var/lib/pterodactyl/archives (unused for wings-rs currently, may get a future use)

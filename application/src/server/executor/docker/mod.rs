@@ -14,6 +14,8 @@ use std::{
 };
 use tokio::io::{AsyncWriteExt, ReadBuf};
 
+pub mod host_mounts;
+
 #[inline]
 pub fn string_to_option(s: &str) -> Option<String> {
     if s.is_empty() {
@@ -29,6 +31,7 @@ trait DockerServerConfigurationExt {
         &self,
         config: &crate::config::Config,
         filesystem: &crate::server::filesystem::Filesystem,
+        host_mounts: Option<&host_mounts::HostMountTable>,
     ) -> Vec<bollard::plugin::Mount>;
 
     #[cfg(unix)]
@@ -46,6 +49,7 @@ trait DockerServerConfigurationExt {
         config: &crate::config::Config,
         client: &bollard::Docker,
         filesystem: &crate::server::filesystem::Filesystem,
+        host_mounts: Option<&host_mounts::HostMountTable>,
     ) -> Result<bollard::plugin::ContainerCreateBody, anyhow::Error>;
     fn container_update_config(
         &self,
@@ -61,6 +65,7 @@ impl DockerServerConfigurationExt for crate::server::configuration::ServerConfig
         &self,
         config: &crate::config::Config,
         filesystem: &crate::server::filesystem::Filesystem,
+        host_mounts: Option<&host_mounts::HostMountTable>,
     ) -> Vec<bollard::models::Mount> {
         self.mounts(config, filesystem)
             .await
@@ -68,7 +73,7 @@ impl DockerServerConfigurationExt for crate::server::configuration::ServerConfig
             .map(|mount| bollard::models::Mount {
                 typ: Some(bollard::plugin::MountType::BIND),
                 target: Some(mount.target.into()),
-                source: Some(mount.source.into()),
+                source: Some(host_mounts::translate_source(host_mounts, &mount.source)),
                 read_only: Some(mount.read_only),
                 ..Default::default()
             })
@@ -172,6 +177,7 @@ impl DockerServerConfigurationExt for crate::server::configuration::ServerConfig
         config: &crate::config::Config,
         client: &bollard::Docker,
         filesystem: &crate::server::filesystem::Filesystem,
+        host_mounts: Option<&host_mounts::HostMountTable>,
     ) -> Result<bollard::plugin::ContainerCreateBody, anyhow::Error> {
         let mut labels = self.labels.clone();
         labels.insert("Service".into(), config.load().app_name.clone());
@@ -248,7 +254,7 @@ impl DockerServerConfigurationExt for crate::server::configuration::ServerConfig
                 oom_kill_disable: resources.oom_kill_disable,
 
                 port_bindings: Some(self.convert_allocations_docker_bindings(config)),
-                mounts: Some(self.convert_mounts(config, filesystem).await),
+                mounts: Some(self.convert_mounts(config, filesystem, host_mounts).await),
                 #[cfg(unix)]
                 devices: Some(self.convert_devices()),
                 network_mode: Some(network_mode),
@@ -367,11 +373,21 @@ impl DockerServerConfigurationExt for crate::server::configuration::ServerConfig
 pub struct DockerExecutor {
     docker: Arc<bollard::Docker>,
     app_config: Arc<crate::config::Config>,
+    host_mounts: std::sync::OnceLock<Option<host_mounts::HostMountTable>>,
 }
 
 impl DockerExecutor {
     pub fn new(docker: Arc<bollard::Docker>, app_config: Arc<crate::config::Config>) -> Self {
-        Self { docker, app_config }
+        Self {
+            docker,
+            app_config,
+            host_mounts: std::sync::OnceLock::new(),
+        }
+    }
+
+    #[inline]
+    fn host_mounts(&self) -> Option<&host_mounts::HostMountTable> {
+        self.host_mounts.get().and_then(Option::as_ref)
     }
 
     async fn image_exists(&self, image_name: &str) -> bool {
@@ -1189,7 +1205,42 @@ async fn find_running_container(
 #[async_trait::async_trait]
 impl super::ServerExecutor for DockerExecutor {
     async fn boot(&self) -> Result<(), anyhow::Error> {
-        self.app_config.ensure_docker_network(&self.docker).await
+        self.app_config.ensure_docker_network(&self.docker).await?;
+
+        if std::env::var("OCI_CONTAINER").is_ok() {
+            match host_mounts::HostMountTable::discover(&self.docker).await {
+                Ok(table) => {
+                    table.validate_directories(&self.app_config.load())?;
+
+                    tracing::info!(
+                        "running in container {}, translating bind mount sources to host paths",
+                        table.container_id().get(..12).unwrap_or_default()
+                    );
+                    for (destination, source) in table.mounts() {
+                        if destination != source {
+                            tracing::info!(
+                                "translating bind mount sources under {} to {}",
+                                destination.display(),
+                                source.display()
+                            );
+                        }
+                    }
+
+                    let _ = self.host_mounts.set(Some(table));
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        "running in a container, but failed to inspect own container: {err:#}"
+                    );
+                    tracing::warn!(
+                        "bind mount sources will be passed to the container engine untranslated, host paths must match the wings container's paths exactly"
+                    );
+                    let _ = self.host_mounts.set(None);
+                }
+            }
+        }
+
+        Ok(())
     }
 
     async fn setup_server_process(
@@ -1220,7 +1271,12 @@ impl super::ServerExecutor for DockerExecutor {
             .configuration
             .read()
             .await
-            .container_config(&self.app_config, &self.docker, &server.filesystem)
+            .container_config(
+                &self.app_config,
+                &self.docker,
+                &server.filesystem,
+                self.host_mounts(),
+            )
             .await?;
         server
             .configuration
@@ -1378,13 +1434,19 @@ impl super::ServerExecutor for DockerExecutor {
                 mounts: Some(vec![
                     bollard::plugin::Mount {
                         typ: Some(bollard::plugin::MountType::BIND),
-                        source: Some(server.filesystem.base().into()),
+                        source: Some(host_mounts::translate_source(
+                            self.host_mounts(),
+                            &server.filesystem.base(),
+                        )),
                         target: Some("/mnt/server".to_string()),
                         ..Default::default()
                     },
                     bollard::plugin::Mount {
                         typ: Some(bollard::plugin::MountType::BIND),
-                        source: Some(tmp_dir.to_string_lossy().into_owned()),
+                        source: Some(host_mounts::translate_source(
+                            self.host_mounts(),
+                            &tmp_dir.to_string_lossy(),
+                        )),
                         target: Some("/mnt/install".to_string()),
                         ..Default::default()
                     },
@@ -1586,13 +1648,19 @@ impl super::ServerExecutor for DockerExecutor {
                 mounts: Some(vec![
                     bollard::plugin::Mount {
                         typ: Some(bollard::plugin::MountType::BIND),
-                        source: Some(server.filesystem.base().into()),
+                        source: Some(host_mounts::translate_source(
+                            self.host_mounts(),
+                            &server.filesystem.base(),
+                        )),
                         target: Some("/mnt/server".to_string()),
                         ..Default::default()
                     },
                     bollard::plugin::Mount {
                         typ: Some(bollard::plugin::MountType::BIND),
-                        source: Some(tmp_dir.to_string_lossy().into_owned()),
+                        source: Some(host_mounts::translate_source(
+                            self.host_mounts(),
+                            &tmp_dir.to_string_lossy(),
+                        )),
                         target: Some("/mnt/script".to_string()),
                         ..Default::default()
                     },
