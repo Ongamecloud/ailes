@@ -30,6 +30,8 @@ pub struct WebsocketJwtPayload {
     pub base: crate::remote::jwt::BasePayload,
 
     pub user_uuid: uuid::Uuid,
+    pub user_name: Option<compact_str::CompactString>,
+    pub user_avatar: Option<String>,
     pub server_uuid: uuid::Uuid,
     pub permissions: Permissions,
     pub ignored_files: Option<Vec<compact_str::CompactString>>,
@@ -122,6 +124,25 @@ pub enum WebsocketEvent {
     ServerOperationError,
     #[serde(rename = "operation completed")]
     ServerOperationCompleted,
+
+    #[serde(rename = "file collab subscribe")]
+    FileCollabSubscribe,
+    #[serde(rename = "file collab unsubscribe")]
+    FileCollabUnsubscribe,
+    #[serde(rename = "file collab update")]
+    FileCollabUpdate,
+    #[serde(rename = "file collab awareness")]
+    FileCollabAwareness,
+    #[serde(rename = "file collab save")]
+    FileCollabSave,
+    #[serde(rename = "file collab sync")]
+    FileCollabSync,
+    #[serde(rename = "file collab participants")]
+    FileCollabParticipants,
+    #[serde(rename = "file collab saved")]
+    FileCollabSaved,
+    #[serde(rename = "file collab error")]
+    FileCollabError,
 }
 
 #[derive(Debug, Clone)]
@@ -271,6 +292,7 @@ where
 pub type SocketJwt = Arc<RwLock<Option<Arc<WebsocketJwtPayload>>>>;
 
 pub struct ServerWebsocketHandler {
+    pub connection_id: uuid::Uuid,
     sender: Arc<Mutex<SplitSink<WebSocket, Message>>>,
     state: crate::routes::State,
     socket_jwt: SocketJwt,
@@ -285,6 +307,7 @@ impl ServerWebsocketHandler {
         socket_jwt: SocketJwt,
     ) -> Self {
         Self {
+            connection_id: uuid::Uuid::new_v4(),
             sender,
             state,
             socket_jwt,
@@ -365,7 +388,7 @@ impl ServerWebsocketHandler {
         }
     }
 
-    async fn send_message(&self, message: WebsocketMessage) {
+    pub async fn send_message(&self, message: WebsocketMessage) {
         if self.closed.load(Ordering::Relaxed) {
             return;
         }

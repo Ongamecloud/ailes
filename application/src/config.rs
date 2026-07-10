@@ -289,6 +289,22 @@ fn system_file_history_maintenance_interval() -> u64 {
     3600
 }
 
+fn system_file_collaboration_enabled() -> bool {
+    true
+}
+fn system_file_collaboration_file_size_cap() -> u64 {
+    1024 * 1024
+}
+fn system_file_collaboration_max_sessions_per_server() -> u64 {
+    16
+}
+fn system_file_collaboration_max_sessions_per_connection() -> u64 {
+    8
+}
+fn system_file_collaboration_session_grace_period() -> u64 {
+    120
+}
+
 fn system_backup_mounting_enabled() -> bool {
     true
 }
@@ -783,6 +799,24 @@ nestify::nest! {
 
                 #[serde(default = "system_file_history_maintenance_interval")]
                 pub maintenance_interval: u64,
+            },
+
+            #[serde(default)]
+            #[schema(inline)]
+            pub file_collaboration: #[derive(ToSchema, Deserialize, Serialize, DefaultFromSerde)] #[serde(default)] pub struct SystemFileCollaboration {
+                #[serde(default = "system_file_collaboration_enabled")]
+                pub enabled: bool,
+
+                #[serde(default = "system_file_collaboration_file_size_cap")]
+                pub file_size_cap: u64,
+
+                #[serde(default = "system_file_collaboration_max_sessions_per_server")]
+                pub max_sessions_per_server: u64,
+                #[serde(default = "system_file_collaboration_max_sessions_per_connection")]
+                pub max_sessions_per_connection: u64,
+
+                #[serde(default = "system_file_collaboration_session_grace_period")]
+                pub session_grace_period: u64,
             },
 
             #[serde(default)]

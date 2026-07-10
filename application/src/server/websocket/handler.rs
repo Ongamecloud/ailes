@@ -412,5 +412,7 @@ pub async fn handle_ws(
                 );
             }
         }
+
+        server.collab.disconnect(websocket_handler.connection_id).await;
     })
 }

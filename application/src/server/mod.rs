@@ -12,6 +12,7 @@ use tokio::sync::{Mutex, RwLock};
 
 pub mod activity;
 pub mod backup;
+pub mod collab;
 pub mod configuration;
 pub mod diff;
 pub mod executor;
@@ -47,6 +48,7 @@ pub struct InnerServer {
     process_handle: RwLock<Option<Arc<dyn executor::ProcessHandle>>>,
     process_startup_task: RwLock<Option<tokio::task::JoinHandle<()>>>,
     pub schedules: Arc<schedule::manager::ScheduleManager>,
+    pub collab: collab::manager::CollabManager,
     pub diff: diff::manager::DiffManager,
     pub activity: activity::ActivityManager,
 
@@ -114,6 +116,7 @@ impl Server {
         );
 
         let activity = activity::ActivityManager::new(configuration.uuid, &app_state.config);
+        let collab = collab::manager::CollabManager::new(configuration.uuid, &app_state.config);
         let diff = diff::manager::DiffManager::new(configuration.uuid, &app_state.config);
         let schedules = Arc::new(schedule::manager::ScheduleManager::new(Arc::clone(
             &app_state.config,
@@ -136,6 +139,7 @@ impl Server {
             process_handle: RwLock::new(None),
             process_startup_task: RwLock::new(None),
             schedules: Arc::clone(&schedules),
+            collab,
             diff,
             activity,
 

@@ -1,18 +1,19 @@
 use super::{WebsocketEvent, WebsocketMessage};
 use crate::server::{
     activity::{Activity, ActivityEvent},
+    collab::CollabError,
     permissions::Permission,
 };
 use compact_str::ToCompactString;
 use futures::StreamExt;
 use serde_json::json;
-use std::{net::IpAddr, str::FromStr};
+use std::{net::IpAddr, str::FromStr, sync::Arc};
 
 pub async fn handle_message(
     state: &crate::routes::AppState,
     user_ip: IpAddr,
     server: &crate::server::Server,
-    websocket_handler: &super::ServerWebsocketHandler,
+    websocket_handler: &Arc<super::ServerWebsocketHandler>,
     message: super::WebsocketMessage,
 ) -> Result<(), anyhow::Error> {
     let user_ip = Some(user_ip);
@@ -379,6 +380,146 @@ pub async fn handle_message(
                     schedule: None,
                     timestamp: chrono::Utc::now(),
                 });
+            }
+        }
+        WebsocketEvent::FileCollabSubscribe
+        | WebsocketEvent::FileCollabUnsubscribe
+        | WebsocketEvent::FileCollabUpdate
+        | WebsocketEvent::FileCollabAwareness
+        | WebsocketEvent::FileCollabSave => {
+            let Some(path) = message.args.first().cloned() else {
+                return Ok(());
+            };
+
+            let socket_jwt = websocket_handler.get_jwt().await?;
+            let user_uuid = socket_jwt.user_uuid;
+            let user_name = socket_jwt
+                .user_name
+                .clone()
+                .unwrap_or_else(|| user_uuid.to_compact_string());
+            let user_avatar = socket_jwt.user_avatar.clone();
+            drop(socket_jwt);
+
+            let required_permission = match message.event {
+                WebsocketEvent::FileCollabUpdate | WebsocketEvent::FileCollabSave => {
+                    Permission::FileUpdate
+                }
+                _ => Permission::FileReadContent,
+            };
+            if !websocket_handler
+                .has_permission(required_permission)
+                .await?
+            {
+                tracing::debug!(
+                    server = %server.uuid,
+                    "jwt does not have permission for collaborative editing: {:?}",
+                    required_permission
+                );
+
+                websocket_handler
+                    .send_message(
+                        WebsocketMessage::builder(WebsocketEvent::FileCollabError)
+                            .arg(path)
+                            .arg("missing permission")
+                            .build(),
+                    )
+                    .await;
+
+                return Ok(());
+            }
+
+            let result = match message.event {
+                WebsocketEvent::FileCollabSubscribe => {
+                    server
+                        .collab
+                        .subscribe(
+                            server,
+                            websocket_handler,
+                            user_uuid,
+                            user_name,
+                            user_avatar,
+                            &path,
+                        )
+                        .await
+                }
+                WebsocketEvent::FileCollabUnsubscribe => {
+                    server
+                        .collab
+                        .unsubscribe(server, websocket_handler.connection_id, &path)
+                        .await
+                }
+                WebsocketEvent::FileCollabUpdate => {
+                    let (Some(finished), Some(chunk)) = (
+                        message.args.get(1).map(|s| s.as_str()),
+                        message.args.get(2).map(|s| s.as_str()),
+                    ) else {
+                        return Ok(());
+                    };
+
+                    server
+                        .collab
+                        .apply_update(
+                            server,
+                            websocket_handler.connection_id,
+                            &path,
+                            finished == "1",
+                            chunk,
+                        )
+                        .await
+                }
+                WebsocketEvent::FileCollabAwareness => {
+                    let Some(payload) = message.args.get(1).map(|s| s.as_str()) else {
+                        return Ok(());
+                    };
+
+                    server
+                        .collab
+                        .relay_awareness(server, websocket_handler.connection_id, &path, payload)
+                        .await
+                }
+                WebsocketEvent::FileCollabSave => {
+                    server
+                        .collab
+                        .save(
+                            server,
+                            websocket_handler.connection_id,
+                            user_uuid,
+                            user_ip,
+                            &path,
+                        )
+                        .await
+                }
+                _ => return Ok(()),
+            };
+
+            match result {
+                Ok(()) => {}
+                Err(CollabError::User(err)) => {
+                    websocket_handler
+                        .send_message(
+                            WebsocketMessage::builder(WebsocketEvent::FileCollabError)
+                                .arg(path)
+                                .arg(err)
+                                .build(),
+                        )
+                        .await;
+                }
+                Err(CollabError::Internal(err)) => {
+                    tracing::error!(
+                        server = %server.uuid,
+                        "error handling collaborative editing message: {:#}",
+                        err
+                    );
+
+                    websocket_handler
+                        .send_message(
+                            WebsocketMessage::builder(WebsocketEvent::FileCollabError)
+                                .arg(path)
+                                .arg("an unexpected error occurred")
+                                .build(),
+                        )
+                        .await;
+                }
             }
         }
         WebsocketEvent::Ping => {
