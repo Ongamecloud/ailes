@@ -606,7 +606,10 @@ impl ScheduleAction {
                             err
                         );
 
-                        return Err("failed to create backup".into());
+                        return Err(crate::remote::ApiError::message_or(
+                            &err,
+                            "failed to create backup",
+                        ));
                     }
                 };
 
@@ -702,7 +705,10 @@ impl ScheduleAction {
                             err
                         );
 
-                        return Err("failed to request backup restore".into());
+                        return Err(crate::remote::ApiError::message_or(
+                            &err,
+                            "failed to request backup restore",
+                        ));
                     }
                 };
 
@@ -1596,7 +1602,10 @@ impl ScheduleAction {
                             err
                         );
 
-                        return Err("failed to set server startup variable".into());
+                        return Err(crate::remote::ApiError::message_or(
+                            &err,
+                            "failed to set server startup variable",
+                        ));
                     }
                 };
             }
@@ -1626,7 +1635,10 @@ impl ScheduleAction {
                             err
                         );
 
-                        return Err("failed to set server startup command".into());
+                        return Err(crate::remote::ApiError::message_or(
+                            &err,
+                            "failed to set server startup command",
+                        ));
                     }
                 };
             }
@@ -1656,7 +1668,10 @@ impl ScheduleAction {
                             err
                         );
 
-                        return Err("failed to set server startup docker image".into());
+                        return Err(crate::remote::ApiError::message_or(
+                            &err,
+                            "failed to set server startup docker image",
+                        ));
                     }
                 };
             }
