@@ -71,7 +71,8 @@ impl ServerExecutor for NoopExecutor {
     async fn resolve_internal_target(
         &self,
         _server: &crate::server::Server,
-    ) -> Result<Option<std::net::IpAddr>, anyhow::Error> {
+        _port: u16,
+    ) -> Result<Option<std::net::SocketAddr>, anyhow::Error> {
         Self::unsupported()
     }
 }

@@ -71,5 +71,6 @@ pub trait ServerExecutor: Send + Sync {
     async fn resolve_internal_target(
         &self,
         server: &super::Server,
-    ) -> Result<Option<std::net::IpAddr>, anyhow::Error>;
+        port: u16,
+    ) -> Result<Option<std::net::SocketAddr>, anyhow::Error>;
 }

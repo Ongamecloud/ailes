@@ -374,6 +374,7 @@ pub struct DockerExecutor {
     docker: Arc<bollard::Docker>,
     app_config: Arc<crate::config::Config>,
     host_mounts: std::sync::OnceLock<Option<host_mounts::HostMountTable>>,
+    host_gateway: std::sync::OnceLock<Option<std::net::IpAddr>>,
 }
 
 impl DockerExecutor {
@@ -382,12 +383,56 @@ impl DockerExecutor {
             docker,
             app_config,
             host_mounts: std::sync::OnceLock::new(),
+            host_gateway: std::sync::OnceLock::new(),
         }
     }
 
     #[inline]
     fn host_mounts(&self) -> Option<&host_mounts::HostMountTable> {
         self.host_mounts.get().and_then(Option::as_ref)
+    }
+
+    /// Returns the host gateway address to route through when wings itself is
+    /// running inside a container. `None` means wings is running on the host (or
+    /// the gateway could not be determined), in which case the game server's
+    /// internal docker network IP is reachable directly.
+    #[inline]
+    fn host_gateway(&self) -> Option<std::net::IpAddr> {
+        *self.host_gateway.get_or_init(Self::detect_host_gateway)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn detect_host_gateway() -> Option<std::net::IpAddr> {
+        // Only reroute when wings is running inside a container. On the host the
+        // default route points at the LAN router, which must never receive game
+        // server traffic.
+        if !Path::new("/.dockerenv").exists() {
+            return None;
+        }
+
+        let routes = std::fs::read_to_string("/proc/net/route").ok()?;
+        for line in routes.lines().skip(1) {
+            let mut fields = line.split_whitespace();
+            let _iface = fields.next()?;
+            let destination = fields.next()?;
+            let gateway = fields.next()?;
+
+            // The default route has a zero destination and a non-zero gateway.
+            // Both fields are little-endian hex of the raw IPv4 address.
+            if destination == "00000000" && gateway != "00000000" {
+                let raw = u32::from_str_radix(gateway, 16).ok()?;
+                return Some(std::net::IpAddr::V4(std::net::Ipv4Addr::from(
+                    raw.to_le_bytes(),
+                )));
+            }
+        }
+
+        None
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn detect_host_gateway() -> Option<std::net::IpAddr> {
+        None
     }
 
     async fn image_exists(&self, image_name: &str) -> bool {
@@ -1748,7 +1793,8 @@ impl super::ServerExecutor for DockerExecutor {
     async fn resolve_internal_target(
         &self,
         server: &super::super::Server,
-    ) -> Result<Option<std::net::IpAddr>, anyhow::Error> {
+        port: u16,
+    ) -> Result<Option<std::net::SocketAddr>, anyhow::Error> {
         let container_id = match find_running_container(
             &self.docker,
             &server.uuid.to_string(),
@@ -1760,6 +1806,28 @@ impl super::ServerExecutor for DockerExecutor {
             None => return Ok(None),
         };
 
+        if let Some(gateway) = self.host_gateway() {
+            let binding = {
+                let configuration = server.configuration.read().await;
+                configuration
+                    .allocations
+                    .mappings
+                    .iter()
+                    .find(|(_, ports)| ports.contains(&port))
+                    .and_then(|(ip, _)| ip.parse::<std::net::IpAddr>().ok())
+            };
+
+            if let Some(binding_ip) = binding {
+                let target_ip = if binding_ip.is_unspecified() || binding_ip.is_loopback() {
+                    gateway
+                } else {
+                    binding_ip
+                };
+
+                return Ok(Some(std::net::SocketAddr::new(target_ip, port)));
+            }
+        }
+
         let inspect = self.docker.inspect_container(&container_id, None).await?;
 
         let network_name = self.app_config.load().docker.network.name.clone();
@@ -1770,7 +1838,7 @@ impl super::ServerExecutor for DockerExecutor {
             .and_then(|endpoint| endpoint.ip_address)
             .filter(|ip| !ip.is_empty())
         {
-            Some(ip) => Ok(Some(ip.parse()?)),
+            Some(ip) => Ok(Some(std::net::SocketAddr::new(ip.parse()?, port))),
             None => Ok(None),
         }
     }
