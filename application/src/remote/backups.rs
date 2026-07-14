@@ -266,6 +266,7 @@ pub async fn create_backup(
     server: uuid::Uuid,
     schedule: Option<uuid::Uuid>,
     name: Option<&str>,
+    backup_group: Option<uuid::Uuid>,
     ignored_files: &[impl Serialize + AsRef<str>],
 ) -> Result<(BackupAdapter, uuid::Uuid), anyhow::Error> {
     let response: Response = super::into_json(
@@ -275,6 +276,7 @@ pub async fn create_backup(
             .json(&json!({
                 "schedule_uuid": schedule,
                 "name": name,
+                "backup_group_uuid": backup_group,
                 "ignored_files": ignored_files,
             }))
             .send()

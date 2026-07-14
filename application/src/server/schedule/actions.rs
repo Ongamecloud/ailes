@@ -98,6 +98,8 @@ pub enum ScheduleAction {
         foreground: bool,
 
         name: Option<ScheduleDynamicParameter>,
+        #[serde(default)]
+        backup_group_uuid: Option<uuid::Uuid>,
         ignored_files: Vec<compact_str::CompactString>,
     },
     RestoreBackup {
@@ -574,6 +576,7 @@ impl ScheduleAction {
             ScheduleAction::CreateBackup {
                 foreground,
                 name,
+                backup_group_uuid,
                 ignored_files,
                 ..
             } => {
@@ -594,6 +597,7 @@ impl ScheduleAction {
                         server.uuid,
                         Some(execution_context.schedule_uuid),
                         name,
+                        *backup_group_uuid,
                         ignored_files,
                     )
                     .await

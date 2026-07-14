@@ -374,11 +374,13 @@ impl Client {
         server: uuid::Uuid,
         schedule: Option<uuid::Uuid>,
         name: Option<&str>,
+        backup_group: Option<uuid::Uuid>,
         ignored_files: &[impl Serialize + Debug + AsRef<str>],
     ) -> Result<(BackupAdapter, uuid::Uuid), anyhow::Error> {
         tracing::info!("creating backup");
 
-        super::backups::create_backup(self, server, schedule, name, ignored_files).await
+        super::backups::create_backup(self, server, schedule, name, backup_group, ignored_files)
+            .await
     }
 
     #[tracing::instrument(skip(self))]
