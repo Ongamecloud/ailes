@@ -39,7 +39,10 @@ impl crate::commands::CliCommand<CompletionsArgs> for CompletionsCommand {
                 clap_complete::generate(
                     args.shell,
                     &mut command,
-                    binary.to_string_lossy().to_string(),
+                    binary
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("calagopus-wings"),
                     &mut std::io::stdout(),
                 );
 

@@ -239,7 +239,7 @@ async fn handle_cors(
 
 async fn main_rt() {
     let cli = crate::commands::CliCommandGroupBuilder::new(
-        "wings-rs",
+        "calagopus-wings",
         "The wings server implementing server management for the panel.",
     );
 
