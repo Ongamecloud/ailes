@@ -30,9 +30,80 @@ pub enum ScheduleDynamicParameter {
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case", tag = "mode")]
 pub enum ScheduleBackupSelector {
-    Latest,
-    Uuid { uuid: ScheduleDynamicParameter },
-    Name { name: ScheduleDynamicParameter },
+    Latest {
+        #[serde(default)]
+        backup_group_uuid: Option<uuid::Uuid>,
+    },
+    Oldest {
+        #[serde(default)]
+        backup_group_uuid: Option<uuid::Uuid>,
+    },
+    Uuid {
+        uuid: ScheduleDynamicParameter,
+    },
+    Name {
+        name: ScheduleDynamicParameter,
+        #[serde(default)]
+        backup_group_uuid: Option<uuid::Uuid>,
+        #[serde(default)]
+        oldest: bool,
+    },
+}
+
+#[derive(Default)]
+pub struct ResolvedBackupSelector {
+    pub backup_uuid: Option<uuid::Uuid>,
+    pub backup_name: Option<compact_str::CompactString>,
+    pub backup_group_uuid: Option<uuid::Uuid>,
+    pub oldest: bool,
+}
+
+impl ScheduleBackupSelector {
+    pub fn resolve(
+        &self,
+        execution_context: &super::ScheduleExecutionContext,
+    ) -> Result<ResolvedBackupSelector, Cow<'static, str>> {
+        match self {
+            ScheduleBackupSelector::Latest { backup_group_uuid } => Ok(ResolvedBackupSelector {
+                backup_group_uuid: *backup_group_uuid,
+                ..Default::default()
+            }),
+            ScheduleBackupSelector::Oldest { backup_group_uuid } => Ok(ResolvedBackupSelector {
+                backup_group_uuid: *backup_group_uuid,
+                oldest: true,
+                ..Default::default()
+            }),
+            ScheduleBackupSelector::Uuid { uuid } => {
+                let uuid = match execution_context.resolve_parameter(uuid) {
+                    Some(uuid) => uuid,
+                    None => {
+                        return Err("unable to resolve parameter `uuid` into a string.".into());
+                    }
+                };
+
+                match uuid::Uuid::parse_str(uuid) {
+                    Ok(uuid) => Ok(ResolvedBackupSelector {
+                        backup_uuid: Some(uuid),
+                        ..Default::default()
+                    }),
+                    Err(_) => Err("unable to parse parameter `uuid` into a uuid.".into()),
+                }
+            }
+            ScheduleBackupSelector::Name {
+                name,
+                backup_group_uuid,
+                oldest,
+            } => match execution_context.resolve_parameter(name) {
+                Some(name) => Ok(ResolvedBackupSelector {
+                    backup_name: Some(name.to_compact_string()),
+                    backup_group_uuid: *backup_group_uuid,
+                    oldest: *oldest,
+                    ..Default::default()
+                }),
+                None => Err("unable to resolve parameter `name` into a string.".into()),
+            },
+        }
+    }
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -109,6 +180,20 @@ pub enum ScheduleAction {
         restore_startup: bool,
 
         backup: ScheduleBackupSelector,
+    },
+    DeleteBackup {
+        #[serde(default)]
+        ignore_failure: bool,
+
+        backup: ScheduleBackupSelector,
+    },
+    MoveBackup {
+        #[serde(default)]
+        ignore_failure: bool,
+
+        backup: ScheduleBackupSelector,
+        #[serde(default)]
+        backup_group_uuid: Option<uuid::Uuid>,
     },
     CreateDirectory {
         ignore_failure: bool,
@@ -197,6 +282,8 @@ impl ScheduleAction {
             ScheduleAction::SendCommand { ignore_failure, .. } => *ignore_failure,
             ScheduleAction::CreateBackup { ignore_failure, .. } => *ignore_failure,
             ScheduleAction::RestoreBackup { ignore_failure, .. } => *ignore_failure,
+            ScheduleAction::DeleteBackup { ignore_failure, .. } => *ignore_failure,
+            ScheduleAction::MoveBackup { ignore_failure, .. } => *ignore_failure,
             ScheduleAction::CreateDirectory { ignore_failure, .. } => *ignore_failure,
             ScheduleAction::WriteFile { ignore_failure, .. } => *ignore_failure,
             ScheduleAction::CopyFile { ignore_failure, .. } => *ignore_failure,
@@ -657,36 +744,7 @@ impl ScheduleAction {
                 backup,
                 ..
             } => {
-                let (backup_uuid, backup_name) = match backup {
-                    ScheduleBackupSelector::Latest => (None, None),
-                    ScheduleBackupSelector::Uuid { uuid } => {
-                        let uuid = match execution_context.resolve_parameter(uuid) {
-                            Some(uuid) => uuid,
-                            None => {
-                                return Err(
-                                    "unable to resolve parameter `uuid` into a string.".into()
-                                );
-                            }
-                        };
-
-                        match uuid::Uuid::parse_str(uuid) {
-                            Ok(uuid) => (Some(uuid), None),
-                            Err(_) => {
-                                return Err("unable to parse parameter `uuid` into a uuid.".into());
-                            }
-                        }
-                    }
-                    ScheduleBackupSelector::Name { name } => {
-                        match execution_context.resolve_parameter(name) {
-                            Some(name) => (None, Some(name.clone())),
-                            None => {
-                                return Err(
-                                    "unable to resolve parameter `name` into a string.".into()
-                                );
-                            }
-                        }
-                    }
-                };
+                let selector = backup.resolve(execution_context)?;
 
                 let (adapter, uuid, download_url) = match state
                     .config
@@ -694,8 +752,10 @@ impl ScheduleAction {
                     .restore_backup(
                         server.uuid,
                         Some(execution_context.schedule_uuid),
-                        backup_uuid,
-                        backup_name.as_deref(),
+                        selector.backup_uuid,
+                        selector.backup_name.as_deref(),
+                        selector.backup_group_uuid,
+                        selector.oldest,
                         *truncate_directory,
                         *restore_startup,
                     )
@@ -794,6 +854,67 @@ impl ScheduleAction {
 
                         return Err("failed to restore backup".into());
                     }
+                }
+            }
+            ScheduleAction::DeleteBackup { backup, .. } => {
+                let selector = backup.resolve(execution_context)?;
+
+                if let Err(err) = state
+                    .config
+                    .client
+                    .delete_backup(
+                        server.uuid,
+                        Some(execution_context.schedule_uuid),
+                        selector.backup_uuid,
+                        selector.backup_name.as_deref(),
+                        selector.backup_group_uuid,
+                        selector.oldest,
+                    )
+                    .await
+                {
+                    tracing::error!(
+                        server = %server.uuid,
+                        "failed to delete backup: {:#?}",
+                        err
+                    );
+
+                    return Err(crate::remote::ApiError::message_or(
+                        &err,
+                        "failed to delete backup",
+                    ));
+                }
+            }
+            ScheduleAction::MoveBackup {
+                backup,
+                backup_group_uuid,
+                ..
+            } => {
+                let selector = backup.resolve(execution_context)?;
+
+                if let Err(err) = state
+                    .config
+                    .client
+                    .move_backup(
+                        server.uuid,
+                        Some(execution_context.schedule_uuid),
+                        selector.backup_uuid,
+                        selector.backup_name.as_deref(),
+                        selector.backup_group_uuid,
+                        selector.oldest,
+                        *backup_group_uuid,
+                    )
+                    .await
+                {
+                    tracing::error!(
+                        server = %server.uuid,
+                        "failed to move backup: {:#?}",
+                        err
+                    );
+
+                    return Err(crate::remote::ApiError::message_or(
+                        &err,
+                        "failed to move backup",
+                    ));
                 }
             }
             ScheduleAction::CreateDirectory { root, name, .. } => {

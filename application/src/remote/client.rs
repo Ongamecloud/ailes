@@ -384,12 +384,15 @@ impl Client {
     }
 
     #[tracing::instrument(skip(self))]
+    #[allow(clippy::too_many_arguments)]
     pub async fn restore_backup(
         &self,
         server: uuid::Uuid,
         schedule: Option<uuid::Uuid>,
         backup: Option<uuid::Uuid>,
         backup_name: Option<&str>,
+        backup_group: Option<uuid::Uuid>,
+        oldest: bool,
         truncate_directory: bool,
         restore_startup: bool,
     ) -> Result<
@@ -408,8 +411,62 @@ impl Client {
             schedule,
             backup,
             backup_name,
+            backup_group,
+            oldest,
             truncate_directory,
             restore_startup,
+        )
+        .await
+    }
+
+    #[tracing::instrument(skip(self))]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn delete_backup(
+        &self,
+        server: uuid::Uuid,
+        schedule: Option<uuid::Uuid>,
+        backup: Option<uuid::Uuid>,
+        backup_name: Option<&str>,
+        backup_group: Option<uuid::Uuid>,
+        oldest: bool,
+    ) -> Result<uuid::Uuid, anyhow::Error> {
+        tracing::info!("requesting backup deletion");
+
+        super::backups::delete_backup(
+            self,
+            server,
+            schedule,
+            backup,
+            backup_name,
+            backup_group,
+            oldest,
+        )
+        .await
+    }
+
+    #[tracing::instrument(skip(self))]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn move_backup(
+        &self,
+        server: uuid::Uuid,
+        schedule: Option<uuid::Uuid>,
+        backup: Option<uuid::Uuid>,
+        backup_name: Option<&str>,
+        backup_group: Option<uuid::Uuid>,
+        oldest: bool,
+        target_backup_group: Option<uuid::Uuid>,
+    ) -> Result<uuid::Uuid, anyhow::Error> {
+        tracing::info!("requesting backup move");
+
+        super::backups::move_backup(
+            self,
+            server,
+            schedule,
+            backup,
+            backup_name,
+            backup_group,
+            oldest,
+            target_backup_group,
         )
         .await
     }
