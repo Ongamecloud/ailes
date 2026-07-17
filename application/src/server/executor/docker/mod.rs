@@ -25,6 +25,69 @@ pub fn string_to_option(s: &str) -> Option<String> {
     }
 }
 
+enum HostBinding {
+    Wildcard,
+    Address(std::net::IpAddr),
+    Unbound,
+}
+
+impl HostBinding {
+    fn resolve(network: &crate::config::DockerNetwork, ip: std::net::IpAddr) -> Self {
+        if network.disable_interface_binding {
+            return Self::Wildcard;
+        }
+
+        if ip == std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST) {
+            if network.ispn {
+                return Self::Unbound;
+            }
+
+            return match network.interface.parse::<std::net::IpAddr>() {
+                Ok(interface) if interface.is_unspecified() => Self::Wildcard,
+                Ok(interface) => Self::Address(interface),
+                Err(_) => Self::Wildcard,
+            };
+        }
+
+        if ip.is_unspecified() {
+            return Self::Wildcard;
+        }
+
+        Self::Address(ip)
+    }
+
+    fn collides_with(&self, host_ip: Option<&str>) -> bool {
+        let address = match self {
+            Self::Unbound => return false,
+            Self::Wildcard => return true,
+            Self::Address(address) => address,
+        };
+
+        match host_ip.and_then(|host_ip| host_ip.parse::<std::net::IpAddr>().ok()) {
+            Some(host_ip) => host_ip.is_unspecified() || host_ip == *address,
+            None => true,
+        }
+    }
+}
+
+fn container_server(names: Option<&[String]>) -> Option<uuid::Uuid> {
+    for name in names.unwrap_or_default() {
+        let name = name.trim_start_matches('/');
+
+        if let Ok(uuid) = name.parse::<uuid::Uuid>() {
+            return Some(uuid);
+        }
+
+        if let Some((_, uuid)) = name.rsplit_once('.')
+            && let Ok(uuid) = uuid.parse::<uuid::Uuid>()
+        {
+            return Some(uuid);
+        }
+    }
+
+    None
+}
+
 #[async_trait::async_trait]
 trait DockerServerConfigurationExt {
     async fn convert_mounts(
@@ -1841,5 +1904,61 @@ impl super::ServerExecutor for DockerExecutor {
             Some(ip) => Ok(Some(std::net::SocketAddr::new(ip.parse()?, port))),
             None => Ok(None),
         }
+    }
+
+    async fn used_ports(
+        &self,
+        ips: &[std::net::IpAddr],
+    ) -> Result<HashMap<std::net::IpAddr, Vec<super::UsedPort>>, anyhow::Error> {
+        if ips.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let config = self.app_config.load();
+        let bindings: Vec<(std::net::IpAddr, HostBinding)> = ips
+            .iter()
+            .map(|ip| (*ip, HostBinding::resolve(&config.docker.network, *ip)))
+            .collect();
+        let mut used: HashMap<std::net::IpAddr, HashMap<u16, Option<uuid::Uuid>>> =
+            ips.iter().map(|ip| (*ip, HashMap::new())).collect();
+
+        let containers = self
+            .docker
+            .list_containers(Some(bollard::query_parameters::ListContainersOptions {
+                all: false,
+                ..Default::default()
+            }))
+            .await?;
+
+        for container in containers {
+            let server = container_server(container.names.as_deref());
+
+            for port in container.ports.unwrap_or_default() {
+                let Some(public_port) = port.public_port else {
+                    continue;
+                };
+
+                for (ip, binding) in &bindings {
+                    if binding.collides_with(port.ip.as_deref())
+                        && let Some(ports) = used.get_mut(ip)
+                    {
+                        ports.entry(public_port).or_insert(server);
+                    }
+                }
+            }
+        }
+
+        Ok(used
+            .into_iter()
+            .map(|(ip, ports)| {
+                let mut ports: Vec<super::UsedPort> = ports
+                    .into_iter()
+                    .map(|(port, server)| super::UsedPort { port, server })
+                    .collect();
+                ports.sort_unstable_by_key(|port| port.port);
+
+                (ip, ports)
+            })
+            .collect())
     }
 }

@@ -75,4 +75,12 @@ impl ServerExecutor for NoopExecutor {
     ) -> Result<Option<std::net::SocketAddr>, anyhow::Error> {
         Self::unsupported()
     }
+
+    async fn used_ports(
+        &self,
+        ips: &[std::net::IpAddr],
+    ) -> Result<std::collections::HashMap<std::net::IpAddr, Vec<super::UsedPort>>, anyhow::Error>
+    {
+        Ok(ips.iter().map(|ip| (*ip, Vec::new())).collect())
+    }
 }
