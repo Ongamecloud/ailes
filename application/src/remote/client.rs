@@ -293,6 +293,21 @@ impl Client {
     }
 
     #[tracing::instrument(skip(self))]
+    pub async fn set_backup_deletion_status(
+        &self,
+        uuid: uuid::Uuid,
+        successful: bool,
+    ) -> Result<(), anyhow::Error> {
+        tracing::info!("setting backup deletion status");
+
+        self.retry(
+            || super::backups::set_backup_deletion_status(self, uuid, successful),
+            Self::skip_client_errors,
+        )
+        .await
+    }
+
+    #[tracing::instrument(skip(self))]
     pub async fn set_backup_restore_status(
         &self,
         server: uuid::Uuid,

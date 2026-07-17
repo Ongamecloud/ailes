@@ -83,6 +83,25 @@ pub async fn set_backup_status(
     Ok(())
 }
 
+pub async fn set_backup_deletion_status(
+    client: &Client,
+    uuid: uuid::Uuid,
+    successful: bool,
+) -> Result<(), anyhow::Error> {
+    client
+        .client
+        .post(format!("{}/backups/{}/deletion", client.url, uuid))
+        .json(&json!({
+            "successful": successful,
+        }))
+        .send()
+        .await?
+        .error_for_remote_status()
+        .await?;
+
+    Ok(())
+}
+
 pub async fn set_backup_restore_status(
     client: &Client,
     server: uuid::Uuid,

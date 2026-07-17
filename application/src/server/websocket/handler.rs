@@ -208,6 +208,7 @@ pub async fn handle_ws(
                                                 websocket::WebsocketEvent::ServerBackupStarted
                                                 | websocket::WebsocketEvent::ServerBackupProgress
                                                 | websocket::WebsocketEvent::ServerBackupCompleted
+                                                | websocket::WebsocketEvent::ServerBackupDeleted
                                                     if !websocket_handler
                                                         .has_permission(Permission::BackupRead).await?
                                                     => {
