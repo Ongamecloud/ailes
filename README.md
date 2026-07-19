@@ -295,4 +295,4 @@ ignore_panel_wings_upgrades: false
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=calagopus/wings&type=date&legend=top-left)](https://www.star-history.com/#calagopus/wings&type=date&legend=top-left)
+[![Star History Chart](https://api.star-history.com/chart?repos=calagopus/panel%2Ccalagopus/wings&type=date&legend=top-left&sealed_token=ON7mv6sghlbaI27jrMzNyayYKCDHowIdsyLYRV7Z1CwNLOQf34gnv9hjSgjrdwE7nWcAXc-uWoJlK2YhxcsvxjKspnmH7ppkHPXnsR0iQH3xWzf6k7T9ZfjFxlra9qoE1PBc-_YozZqGMHfD-wWxJ5JoePKoTIdQY68cNnvNrvnhylOAw5GuiMmNpfIj)](https://www.star-history.com/?repos=calagopus%2Fpanel%2Ccalagopus%2Fwings&type=date&legend=top-left)
