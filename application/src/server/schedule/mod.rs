@@ -21,7 +21,7 @@ pub enum ScheduleResourceMetric {
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum ScheduleTrigger {
     Cron {
-        schedule: Box<cron::Schedule>,
+        schedule: Box<croner::Cron>,
     },
     PowerAction {
         action: crate::models::ServerPowerAction,
@@ -56,7 +56,7 @@ impl PartialEq for ScheduleTrigger {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (ScheduleTrigger::Cron { schedule: s1 }, ScheduleTrigger::Cron { schedule: s2 }) => {
-                s1.source() == s2.source()
+                s1 == s2
             }
             (
                 ScheduleTrigger::PowerAction { action: a1 },
@@ -624,7 +624,8 @@ impl Schedule {
                                 drop(timezone_lock);
 
                                 let now_datetime = chrono::Utc::now().with_timezone(&timezone);
-                                let target_datetime = match schedule.after(&now_datetime).next() {
+                                let target_datetime = match schedule.iter_after(now_datetime).next()
+                                {
                                     Some(dt) => dt,
                                     None => break,
                                 };
