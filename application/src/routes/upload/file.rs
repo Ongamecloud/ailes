@@ -34,8 +34,13 @@ mod post {
             #[serde(default)]
             directory: compact_str::CompactString,
             wants_continue: Option<compact_str::CompactString>,
+            total_size: Option<compact_str::CompactString>,
         },
     }
+
+    /// Multipart boundary + part header overhead tolerated when comparing the request
+    /// Content-Length against the remaining allowed file size.
+    const MULTIPART_OVERHEAD_ALLOWANCE: u64 = 16 * 1024;
 
     #[derive(ToSchema, Serialize)]
     struct Response {
@@ -65,6 +70,8 @@ mod post {
         pub unique_id: compact_str::CompactString,
         pub file_path: PathBuf,
         pub written_size: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub total_size: Option<u64>,
     }
 
     #[utoipa::path(post, path = "/", responses(
@@ -88,6 +95,10 @@ mod post {
         (
             "wants_continue" = Option<String>, Query,
             description = "field index that indicates the client wants a continuation token for the next slice; presence selects the continuation flow",
+        ),
+        (
+            "total_size" = Option<String>, Query,
+            description = "total size in bytes the uploaded file will have across all slices; lets the server deny an oversized upload before the body is transferred",
         ),
     ), request_body = String)]
     pub async fn route(
@@ -135,6 +146,31 @@ mod post {
                             .ok();
                     }
                 };
+
+                let config = state.config.load();
+                if config.api.upload_limit.as_bytes() != 0 {
+                    let upload_limit = config.api.upload_limit.as_bytes();
+
+                    let content_length = headers
+                        .get(axum::http::header::CONTENT_LENGTH)
+                        .and_then(|value| value.to_str().ok())
+                        .and_then(|value| value.parse::<u64>().ok());
+
+                    if payload.total_size.is_some_and(|total| total > upload_limit)
+                        || content_length.is_some_and(|length| {
+                            payload.written_size.saturating_add(length)
+                                > upload_limit + MULTIPART_OVERHEAD_ALLOWANCE
+                        })
+                    {
+                        return ApiResponse::error(&format!(
+                            "file size is larger than {}MiB",
+                            config.api.upload_limit.as_mib()
+                        ))
+                        .with_status(StatusCode::EXPECTATION_FAILED)
+                        .ok();
+                    }
+                }
+                drop(config);
 
                 let parent = match payload.file_path.parent() {
                     Some(parent) => parent,
@@ -224,6 +260,7 @@ mod post {
                                 unique_id: uuid::Uuid::new_v4().to_compact_string(),
                                 file_path: payload.file_path,
                                 written_size,
+                                total_size: payload.total_size,
                             })?);
                     }
                 } else {
@@ -236,6 +273,7 @@ mod post {
                 token,
                 directory,
                 wants_continue,
+                total_size,
             } => {
                 let payload: FileJwtPayload = match state.config.jwt.verify(&token) {
                     Ok(payload) => payload,
@@ -269,6 +307,35 @@ mod post {
                             .ok();
                     }
                 };
+
+                let total_size = total_size.and_then(|s| s.parse::<u64>().ok());
+                if let Some(total_size) = total_size {
+                    let config = state.config.load();
+                    if config.api.upload_limit.as_bytes() != 0
+                        && total_size > config.api.upload_limit.as_bytes()
+                    {
+                        return ApiResponse::error(&format!(
+                            "file size is larger than {}MiB",
+                            config.api.upload_limit.as_mib()
+                        ))
+                        .with_status(StatusCode::EXPECTATION_FAILED)
+                        .ok();
+                    }
+                    drop(config);
+
+                    let disk_limit = server.filesystem.disk_limit();
+                    if disk_limit > 0
+                        && total_size
+                            > (disk_limit as u64)
+                                .saturating_sub(server.filesystem.get_physical_cached_size())
+                    {
+                        return ApiResponse::error(
+                            "file size is larger than the server's available disk space",
+                        )
+                        .with_status(StatusCode::EXPECTATION_FAILED)
+                        .ok();
+                    }
+                }
 
                 let ignored = if payload.ignored_files.is_empty() {
                     None
@@ -408,6 +475,7 @@ mod post {
                                 unique_id: uuid::Uuid::new_v4().to_compact_string(),
                                 file_path: path.clone(),
                                 written_size,
+                                total_size,
                             })?);
                     }
 
