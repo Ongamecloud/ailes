@@ -23,6 +23,13 @@ pub struct CollabParticipant {
 #[derive(Serialize)]
 pub struct CollabSyncMeta {
     pub dirty: bool,
+    pub conflict: Option<CollabConflict>,
+}
+
+#[derive(Serialize, Clone)]
+pub struct CollabConflict {
+    pub hash: Option<String>,
+    pub deleted: bool,
 }
 
 #[derive(Serialize)]

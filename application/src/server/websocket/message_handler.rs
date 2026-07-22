@@ -386,7 +386,8 @@ pub async fn handle_message(
         | WebsocketEvent::FileCollabUnsubscribe
         | WebsocketEvent::FileCollabUpdate
         | WebsocketEvent::FileCollabAwareness
-        | WebsocketEvent::FileCollabSave => {
+        | WebsocketEvent::FileCollabSave
+        | WebsocketEvent::FileCollabReload => {
             let Some(path) = message.args.first().cloned() else {
                 return Ok(());
             };
@@ -401,9 +402,9 @@ pub async fn handle_message(
             drop(socket_jwt);
 
             let required_permission = match message.event {
-                WebsocketEvent::FileCollabUpdate | WebsocketEvent::FileCollabSave => {
-                    Permission::FileUpdate
-                }
+                WebsocketEvent::FileCollabUpdate
+                | WebsocketEvent::FileCollabSave
+                | WebsocketEvent::FileCollabReload => Permission::FileUpdate,
                 _ => Permission::FileReadContent,
             };
             if !websocket_handler
@@ -478,6 +479,9 @@ pub async fn handle_message(
                         .await
                 }
                 WebsocketEvent::FileCollabSave => {
+                    let force = message.args.get(1).map(|s| s.as_str()) == Some("1");
+                    let expected_hash = message.args.get(2).map(|s| s.as_str());
+
                     server
                         .collab
                         .save(
@@ -486,7 +490,15 @@ pub async fn handle_message(
                             user_uuid,
                             user_ip,
                             &path,
+                            force,
+                            expected_hash,
                         )
+                        .await
+                }
+                WebsocketEvent::FileCollabReload => {
+                    server
+                        .collab
+                        .reload(server, websocket_handler.connection_id, &path)
                         .await
                 }
                 _ => return Ok(()),

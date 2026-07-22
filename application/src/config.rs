@@ -302,7 +302,7 @@ fn system_file_collaboration_max_sessions_per_connection() -> u64 {
     8
 }
 fn system_file_collaboration_session_grace_period() -> u64 {
-    120
+    30
 }
 
 fn system_backup_mounting_enabled() -> bool {
