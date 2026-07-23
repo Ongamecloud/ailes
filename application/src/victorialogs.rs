@@ -229,6 +229,7 @@ impl Client {
         }
     }
 
+    #[allow(dead_code)]
     pub async fn close(&self) {
         let _ = self.shutdown.send(true);
         if let Some(handle) = self.worker_handle.lock().await.take() {
@@ -258,6 +259,7 @@ pub fn get_global() -> Option<Arc<Client>> {
     GLOBAL_CLIENT.read().unwrap().clone()
 }
 
+#[allow(dead_code)]
 pub fn close_global() {
     let client = GLOBAL_CLIENT.write().unwrap().take();
     if let Some(client) = client {
