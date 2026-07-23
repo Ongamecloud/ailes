@@ -8,7 +8,6 @@ on:
 env:
   BIN_NAME: wings-rs
   PROJECT_NAME: wings-rs
-  GHCR_IMAGE: ghcr.io/${{ github.repository }}
 
 jobs:
   generate-sbom:
@@ -138,6 +137,9 @@ jobs:
       attestations: write
 
     steps:
+      - name: Set image name
+        run: echo "GHCR_IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> $GITHUB_ENV
+
       - name: Checkout code
         uses: actions/checkout@v6
 
@@ -184,7 +186,6 @@ jobs:
           RAW_TAG="${{ github.ref_name }}"
           VERSION="${RAW_TAG#release-}"
 
-          # Tag suffixes shared across both registries.
           SUFFIXES=("${VERSION}")
 
           if [[ "$VERSION" == *-* ]]; then
@@ -194,11 +195,9 @@ jobs:
               SUFFIXES+=("latest")
             fi
           else
-            # Stable release (no hyphen): add 'latest'
             SUFFIXES+=("latest")
           fi
 
-          # Emit each suffix for both registries.
           DOCKER_TAGS=""
           for t in "${SUFFIXES[@]}"; do
             DOCKER_TAGS="${DOCKER_TAGS}${DOCKER_TAGS:+,}${GHCR_IMAGE}:${t}"
