@@ -1255,6 +1255,31 @@ impl Config {
             inner.debug = true;
         }
 
+        // VictoriaLogs config from environment variables
+        if let Ok(url) = std::env::var("VICTORIALOGS_URL") {
+            inner.victorialogs.url = url;
+            inner.victorialogs.enabled = true;
+        }
+        if let Ok(username) = std::env::var("VICTORIALOGS_USERNAME") {
+            inner.victorialogs.username = username;
+        }
+        if let Ok(password) = std::env::var("VICTORIALOGS_PASSWORD") {
+            inner.victorialogs.password = password;
+        }
+        if let Ok(environment) = std::env::var("VICTORIALOGS_ENVIRONMENT") {
+            inner.victorialogs.environment = environment;
+        }
+        if let Ok(batch_size) = std::env::var("VICTORIALOGS_BATCH_SIZE") {
+            if let Ok(v) = batch_size.parse() {
+                inner.victorialogs.batch_size = v;
+            }
+        }
+        if let Ok(flush_interval) = std::env::var("VICTORIALOGS_FLUSH_INTERVAL") {
+            if let Ok(v) = flush_interval.parse() {
+                inner.victorialogs.flush_interval = v;
+            }
+        }
+
         Self::validate_inner(&inner)?;
         Self::save_to(path, &inner)?;
 
