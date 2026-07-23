@@ -35,6 +35,7 @@ mod server;
 mod ssh;
 mod stats;
 mod utils;
+mod victorialogs;
 
 use payload::Payload;
 
@@ -406,6 +407,22 @@ async fn main_rt() {
     tracing::info!("running server executor boot tasks");
     if let Err(err) = executor.boot().await {
         exit_error!("failed to boot server executor: {:?}", err);
+    }
+
+    {
+        let vl_config = &config.load().victorialogs;
+        if vl_config.enabled {
+            crate::victorialogs::init_global(crate::victorialogs::VictoriaLogsConfig {
+                enabled: vl_config.enabled,
+                url: vl_config.url.clone(),
+                username: vl_config.username.clone(),
+                password: vl_config.password.clone(),
+                environment: vl_config.environment.clone(),
+                batch_size: vl_config.batch_size,
+                flush_interval: std::time::Duration::from_secs(vl_config.flush_interval),
+            });
+            tracing::info!(url = %vl_config.url, "VictoriaLogs logging enabled for game server containers");
+        }
     }
 
     match config.client.reset_state().await {

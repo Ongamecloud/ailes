@@ -1065,6 +1065,38 @@ impl Server {
 
                         server.setup_container().await?;
 
+                        // Forward historical logs to VictoriaLogs if enabled
+                        if let Some(vl) = crate::victorialogs::get_global() {
+                            let vl_server = server.clone();
+                            tokio::spawn(async move {
+                                let server_uuid = vl_server.uuid.to_string();
+                                let server_name = vl_server
+                                    .configuration
+                                    .read()
+                                    .await
+                                    .environment
+                                    .get("SERVER_NAME")
+                                    .and_then(|v| v.as_str().map(|s| s.to_string()))
+                                    .unwrap_or_else(|| "unknown".to_string());
+
+                                let log_stream = vl_server.logs_lines(None).await;
+                                use futures::StreamExt;
+                                tokio::pin!(log_stream);
+
+                                let mut count = 0usize;
+                                while let Some(Ok(line)) = log_stream.next().await {
+                                    vl.log(&server_uuid, &server_uuid, &server_name, &line, None);
+                                    count += 1;
+                                }
+
+                                tracing::debug!(
+                                    server = %vl_server.uuid,
+                                    lines = count,
+                                    "forwarded historical logs to VictoriaLogs"
+                                );
+                            });
+                        }
+
                         let process_handle = match server.process_handle.read().await.as_ref() {
                             Some(c) => Arc::clone(c),
                             None => return Ok(()),

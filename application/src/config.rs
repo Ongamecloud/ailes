@@ -543,6 +543,19 @@ impl From<i64> for MiB {
     }
 }
 
+fn victorialogs_url() -> String {
+    "http://localhost:9482".to_string()
+}
+fn victorialogs_environment() -> String {
+    "production".to_string()
+}
+fn victorialogs_batch_size() -> usize {
+    200
+}
+fn victorialogs_flush_interval() -> u64 {
+    3
+}
+
 nestify::nest! {
     #[derive(ToSchema, Deserialize, Serialize, DefaultFromSerde)]
     pub struct InnerConfig {
@@ -1080,6 +1093,25 @@ nestify::nest! {
         pub ignore_panel_config_updates: bool,
         #[serde(default)]
         pub ignore_panel_wings_upgrades: bool,
+
+        #[serde(default)]
+        #[schema(inline)]
+        pub victorialogs: #[derive(ToSchema, Deserialize, Serialize, DefaultFromSerde)] #[serde(default)] pub struct VictoriaLogs {
+            #[serde(default)]
+            pub enabled: bool,
+            #[serde(default = "victorialogs_url")]
+            pub url: String,
+            #[serde(default)]
+            pub username: String,
+            #[serde(default)]
+            pub password: String,
+            #[serde(default = "victorialogs_environment")]
+            pub environment: String,
+            #[serde(default = "victorialogs_batch_size")]
+            pub batch_size: usize,
+            #[serde(default = "victorialogs_flush_interval")]
+            pub flush_interval: u64,
+        },
     }
 }
 

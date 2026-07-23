@@ -856,8 +856,20 @@ impl DockerProcessHandle {
         tokio::spawn({
             let server = server.clone();
             let app_config = Arc::clone(&app_config);
+            let vl_container_id = container_id.clone();
 
             async move {
+                let vl_client = crate::victorialogs::get_global();
+                let vl_server_uuid = server.uuid.to_string();
+                let vl_server_name = server
+                    .configuration
+                    .read()
+                    .await
+                    .environment
+                    .get("SERVER_NAME")
+                    .and_then(|v| v.as_str().map(|s| s.to_string()))
+                    .unwrap_or_else(|| "unknown".to_string());
+
                 let mut line_buffer = LineBuffer::new();
 
                 let mut ratelimit_counter = 0;
@@ -900,6 +912,16 @@ impl DockerProcessHandle {
 
                 let mut emit = |slice: &[u8]| {
                     let line = Arc::new(compact_str::CompactString::from_utf8_lossy(slice));
+
+                    if let Some(vl) = &vl_client {
+                        vl.log(
+                            &vl_container_id,
+                            &vl_server_uuid,
+                            &vl_server_name,
+                            &line,
+                            None,
+                        );
+                    }
 
                     if allow_ratelimit() {
                         stdout_ratelimited_tx.send(Arc::clone(&line)).ok();
